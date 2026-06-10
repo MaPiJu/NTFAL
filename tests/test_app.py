@@ -68,6 +68,32 @@ def test_wildcard_watchlist_scans_whole_universe(tmp_path, btc_fixtures):
     assert list(snapshot["charts"]) == ["BTC"]
 
 
+def test_tradfi_dex_wildcard_scans_builder_universe(tmp_path, btc_fixtures):
+    fixtures = dict(btc_fixtures)
+    fixtures[("xyz:GOLD", "1w")] = btc_fixtures[("BTC", "1w")]
+    fixtures[("xyz:GOLD", "1d")] = btc_fixtures[("BTC", "1d")]
+    cfg = make_config(tmp_path, watchlist=("*", "xyz:*"))
+    client = make_client(fixtures, tmp_path)
+    progress: list[str] = []
+    snapshot = build_snapshot(cfg, client, on_progress=progress.append)
+
+    # Native crypto universe + the whole tradfi ("xyz") dex, delisted excluded.
+    assert progress == ["BTC", "ETH", "HYPE", "SOL", "xyz:GOLD", "xyz:SP500"]
+    assert [s["asset"] for s in snapshot["signals"]] == ["BTC", "xyz:GOLD"]
+    assert snapshot["skipped"] == ["ETH", "HYPE", "SOL", "xyz:SP500"]
+    assert "xyz:GOLD" in snapshot["charts"]
+
+
+def test_explicit_tradfi_coin_in_watchlist(tmp_path, btc_fixtures):
+    fixtures = dict(btc_fixtures)
+    fixtures[("xyz:GOLD", "1w")] = btc_fixtures[("BTC", "1w")]
+    fixtures[("xyz:GOLD", "1d")] = btc_fixtures[("BTC", "1d")]
+    cfg = make_config(tmp_path, watchlist=("BTC", "xyz:GOLD"))
+    client = make_client(fixtures, tmp_path)
+    snapshot = build_snapshot(cfg, client)
+    assert [s["asset"] for s in snapshot["signals"]] == ["BTC", "xyz:GOLD"]
+
+
 def test_snapshot_reports_tripped_guard(tmp_path, btc_fixtures):
     cfg = make_config(tmp_path, month_realized_losses=700.0)
     client = make_client(btc_fixtures, tmp_path)

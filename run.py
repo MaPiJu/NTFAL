@@ -38,8 +38,9 @@ def print_signals_table(snapshot: dict[str, Any]) -> None:
     def num(x: float | None) -> str:
         return f"{x:,.6g}" if x is not None else "—"
 
+    # 14-wide asset column: tradfi names like "xyz:ALUMINIUM" are longer than tickers.
     header = (
-        f"{'ASSET':<6} {'TIDE':<7} {'IMP W/D':<11} {'FI(2)':>14} {'ACTION':<12} "
+        f"{'ASSET':<14} {'TIDE':<7} {'IMP W/D':<11} {'FI(2)':>14} {'ACTION':<12} "
         f"{'ENTRY':>12} {'LIMIT':>12} {'STOP':>12} {'TARGET':>12} {'R:R':>7} {'SIZE':>10}"
     )
     print("\n" + header)
@@ -50,7 +51,7 @@ def print_signals_table(snapshot: dict[str, Any]) -> None:
             rr += "⚠"
         size = num(s["position_size"]["size"]) if s["position_size"] else "—"
         print(
-            f"{s['asset']:<6} {s['weekly_trend']:<7} "
+            f"{s['asset']:<14} {s['weekly_trend']:<7} "
             f"{s['weekly_impulse'] + '/' + s['daily_impulse']:<11} "
             f"{s['force_index_2']:>14,.4g} {s['action']:<12} "
             f"{num(s['entry']):>12} {num(s['entry_limit']):>12} {num(s['stop']):>12} "

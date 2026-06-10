@@ -24,6 +24,17 @@ META = {
     ]
 }
 
+# HIP-3 builder dex carrying tradfi perps; names come back already prefixed.
+XYZ_META = {
+    "universe": [
+        {"name": "xyz:GOLD", "szDecimals": 4, "maxLeverage": 25},
+        {"name": "xyz:SP500", "szDecimals": 4, "maxLeverage": 30},
+        {"name": "xyz:RETIRED", "szDecimals": 1, "maxLeverage": 5, "isDelisted": True},
+    ]
+}
+
+META_BY_DEX = {"": META, "xyz": XYZ_META}
+
 
 def load_fixture(name: str) -> list[dict]:
     return json.loads((FIXTURES / name).read_text())
@@ -41,7 +52,10 @@ def make_client(
         if requests_log is not None:
             requests_log.append(payload)
         if payload["type"] == "meta":
-            return httpx.Response(200, json=META)
+            dex = payload.get("dex", "")
+            if dex not in META_BY_DEX:
+                return httpx.Response(400, json={"error": f"unknown dex {dex}"})
+            return httpx.Response(200, json=META_BY_DEX[dex])
         if payload["type"] == "candleSnapshot":
             req = payload["req"]
             candles = candle_fixtures.get((req["coin"], req["interval"]), [])

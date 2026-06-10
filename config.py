@@ -15,13 +15,14 @@ from dotenv import load_dotenv
 
 DEFAULT_CONFIG_PATH = Path("config.toml")
 
-# Watchlist wildcard: scan every tradable perp in the Hyperliquid universe.
+# Watchlist wildcard: "*" scans every tradable native perp; "<dex>:*"
+# (e.g. "xyz:*", the tradfi dex) scans a whole HIP-3 builder-dex universe.
 WATCHLIST_ALL = "*"
 
 
 @dataclass(frozen=True)
 class ScannerConfig:
-    # Explicit coin names, or ("*",) to scan the whole tradable perp universe.
+    # Explicit coin names and/or wildcards ("*", "xyz:*") — see WATCHLIST_ALL.
     watchlist: tuple[str, ...]
     weekly_interval: str
     daily_interval: str

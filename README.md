@@ -66,16 +66,22 @@ uv run python run.py --serve --schedule 06:00   # re-refresh daily at 06:00 UTC
 
 The dashboard shows the signals table (with a clear banner when the 6% guard is active)
 and, per asset, weekly + daily TradingView Lightweight Charts with Impulse-colored
-candles, EMA13/EMA26 overlays, and MACD-Histogram / Force Index panes.
+candles, EMA13/EMA26 overlays, MACD-Histogram / Force Index panes, and a legend
+explaining every series. The table header stays visible while scrolling, and a
+filter (on by default) hides "stand aside" assets from both the table and the
+chart cards — charts for hidden assets are only rendered if you reveal them.
 
 ## Configuration
 
 Edit `config.toml`:
 
-- `scanner.watchlist` — explicit coins, e.g. `["BTC", "ETH", "SOL", "HYPE"]`, or `["*"]`
-  to scan **every** tradable Hyperliquid perp (delisted assets are excluded; the refresh
-  fires two requests per asset, so the full universe takes a few minutes and assets too
-  new to have two completed weekly/daily bars are listed as skipped)
+- `scanner.watchlist` — explicit coins, e.g. `["BTC", "ETH", "xyz:GOLD"]`, and/or
+  wildcards: `"*"` scans **every** tradable native (crypto) Hyperliquid perp and
+  `"xyz:*"` scans the whole HIP-3 `xyz` builder dex — the **tradfi** universe
+  (stocks, indices, gold, oil, forex…). The default is `["*", "xyz:*"]`. Delisted
+  assets are excluded; the refresh fires two requests per asset, so full universes
+  take a few minutes and assets too new to have two completed weekly/daily bars are
+  listed as skipped.
 - `risk.equity` — account equity used for sizing
 - `risk.risk_pct` — risk per trade (default `0.01` = 1%; hard-capped at 2%)
 - `risk.equity_at_month_start`, `risk.month_realized_losses`, `risk.open_trade_risk` —
