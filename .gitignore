@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+dist/
+build/
+*.egg-info/
+
+# Secrets & local config
+.env
+
+# Data cache (parquet candles + dashboard snapshot)
+cache/
+
+# uv
+uv.lock
