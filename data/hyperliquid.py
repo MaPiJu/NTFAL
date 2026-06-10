@@ -47,6 +47,12 @@ class HyperliquidError(RuntimeError):
     """Raised when the info endpoint returns unusable data or a coin is unknown."""
 
 
+def coin_dex(coin: str) -> str:
+    """Perp dex a coin belongs to: '' for native perps, the prefix for HIP-3
+    builder-deployed perps (e.g. 'xyz:GOLD' -> 'xyz', the tradfi dex)."""
+    return coin.split(":", 1)[0] if ":" in coin else ""
+
+
 def parse_candles(raw: list[dict[str, Any]]) -> pd.DataFrame:
     """Parse a candleSnapshot payload (string OHLCV fields) into a typed frame.
 
@@ -110,31 +116,43 @@ class HyperliquidClient:
 
     # -- meta ---------------------------------------------------------------
 
-    def perp_universe(self) -> dict[str, dict[str, Any]]:
-        """Map of perp name -> meta entry (incl. szDecimals) from the `meta` request."""
-        meta = self._info({"type": "meta"})
+    def perp_universe(self, dex: str = "") -> dict[str, dict[str, Any]]:
+        """Map of perp name -> meta entry (incl. szDecimals) from the `meta` request.
+
+        `dex` selects a perp dex: '' is the native (crypto) universe; HIP-3
+        builder dexes like 'xyz' carry tradfi perps (stocks, indices, gold…)
+        whose names come back already prefixed (e.g. 'xyz:GOLD').
+        """
+        payload: dict[str, Any] = {"type": "meta"}
+        if dex:
+            payload["dex"] = dex
+        meta = self._info(payload)
         universe = meta.get("universe")
         if not isinstance(universe, list):
             raise HyperliquidError(f"unexpected meta payload: {json.dumps(meta)[:200]}")
         return {entry["name"]: entry for entry in universe}
 
     def validate_watchlist(self, coins: Sequence[str]) -> dict[str, int]:
-        """Check every coin against the perp universe; return {coin: szDecimals}.
+        """Check every coin against its perp universe; return {coin: szDecimals}.
 
-        Raises HyperliquidError listing any coin that is not a tradable perp.
+        Coins may mix dexes ('BTC' is native, 'xyz:GOLD' lives on the tradfi
+        dex); one `meta` request is made per dex involved. Raises
+        HyperliquidError listing any coin that is not a tradable perp.
         """
-        universe = self.perp_universe()
-        unknown = [c for c in coins if c not in universe]
+        universes: dict[str, dict[str, dict[str, Any]]] = {}
+        for dex in {coin_dex(c) for c in coins}:
+            universes[dex] = self.perp_universe(dex)
+        unknown = [c for c in coins if c not in universes[coin_dex(c)]]
         if unknown:
             raise HyperliquidError(f"not in the Hyperliquid perp universe: {', '.join(unknown)}")
-        return {c: int(universe[c]["szDecimals"]) for c in coins}
+        return {c: int(universes[coin_dex(c)][c]["szDecimals"]) for c in coins}
 
-    def tradable_perps(self) -> dict[str, int]:
-        """Every currently tradable perp -> szDecimals, sorted by name.
+    def tradable_perps(self, dex: str = "") -> dict[str, int]:
+        """Every currently tradable perp of a dex -> szDecimals, sorted by name.
 
         Delisted assets stay in `meta` (flagged `isDelisted`) and are excluded.
         """
-        universe = self.perp_universe()
+        universe = self.perp_universe(dex)
         return {
             name: int(entry["szDecimals"])
             for name, entry in sorted(universe.items())
@@ -160,7 +178,8 @@ class HyperliquidClient:
         return parse_candles(raw)
 
     def _cache_path(self, coin: str, interval: str) -> Path:
-        return self.cache_dir / f"{coin}_{interval}.parquet"
+        # ':' in HIP-3 coin names (e.g. 'xyz:GOLD') is not filename-safe everywhere.
+        return self.cache_dir / f"{coin.replace(':', '_')}_{interval}.parquet"
 
     def load_cached(self, coin: str, interval: str) -> pd.DataFrame | None:
         path = self._cache_path(coin, interval)

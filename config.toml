@@ -2,10 +2,14 @@
 # Nothing in this file is a secret; secrets (if ever needed) belong in .env.
 
 [scanner]
-# Explicit coins (e.g. ["BTC", "ETH", "SOL", "HYPE"]) or ["*"] to scan EVERY
-# tradable Hyperliquid perp. The full universe means two requests per asset,
-# so the refresh takes a few minutes and the dashboard gets one card per perp.
-watchlist = ["*"]
+# Watchlist entries:
+#   - explicit coins, e.g. "BTC", "ETH", or tradfi perps like "xyz:GOLD"
+#   - "*"      = EVERY tradable native (crypto) Hyperliquid perp
+#   - "xyz:*"  = every tradable perp of the HIP-3 "xyz" dex — the tradfi
+#                universe (stocks, indices, gold, oil, forex…)
+# Scanning full universes means two requests per asset, so the refresh takes
+# a few minutes and the dashboard gets one card per perp.
+watchlist = ["*", "xyz:*"]
 weekly_interval = "1w"
 daily_interval = "1d"
 # History depth (bars) to keep cached. The API serves at most 5000 candles.

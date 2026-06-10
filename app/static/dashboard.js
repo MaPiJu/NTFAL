@@ -39,6 +39,7 @@ function renderTable(snapshot) {
         : `<span class="${s.rr_ok ? "rr-good" : "rr-bad"}">${rr.toFixed(2)}${s.rr_ok ? "" : " ⚠"}</span>`;
     const size = s.position_size ? fmt(s.position_size.size, 6) : "—";
     const row = document.createElement("tr");
+    row.dataset.action = s.action;
     row.innerHTML = `
       <td><strong>${s.asset}</strong></td>
       <td>${s.weekly_trend}</td>
@@ -102,23 +103,67 @@ function renderChart(container, data) {
   chart.timeScale().fitContent();
 }
 
+const LEGEND_HTML = `
+  <div class="chart-legend">
+    <span class="key"><i class="swatch" style="background:#ffa726"></i>EMA 13</span>
+    <span class="key"><i class="swatch" style="background:#42a5f5"></i>EMA 26</span>
+    <span class="key">Candles = Impulse:
+      <span class="dot green">●</span> bullish
+      <span class="dot red">●</span> bearish
+      <span class="dot blue">●</span> neutral</span>
+    <span class="key">Middle pane — MACD-Histogram(12,26,9) bars:
+      <span class="dot green">▮</span> rising slope
+      <span class="dot red">▮</span> falling slope</span>
+    <span class="key">Bottom pane — Force Index:
+      <i class="swatch" style="background:#ab47bc"></i>EMA-2
+      <i class="swatch" style="background:#8b949e"></i>EMA-13 · dashed line = 0</span>
+  </div>`;
+
 function renderCards(snapshot) {
   const cards = document.getElementById("cards");
   cards.innerHTML = "";
   for (const s of snapshot.signals) {
     const card = document.createElement("section");
     card.className = "card";
+    card.dataset.action = s.action;
+    card.dataset.asset = s.asset;
     card.innerHTML = `
       <h2>${s.asset} <span class="badge ${s.action}">${s.action.replace("_", " ")}</span></h2>
+      ${LEGEND_HTML}
       <div class="charts">
-        <div><div class="chart-title">Weekly (tide)</div><div class="chart" id="chart-${s.asset}-w"></div></div>
-        <div><div class="chart-title">Daily (wave)</div><div class="chart" id="chart-${s.asset}-d"></div></div>
+        <div><div class="chart-title">Weekly (tide)</div><div class="chart chart-w"></div></div>
+        <div><div class="chart-title">Daily (wave)</div><div class="chart chart-d"></div></div>
       </div>`;
     cards.appendChild(card);
-    const assetCharts = snapshot.charts[s.asset];
-    renderChart(document.getElementById(`chart-${s.asset}-w`), assetCharts.weekly);
-    renderChart(document.getElementById(`chart-${s.asset}-d`), assetCharts.daily);
   }
+}
+
+// Charts are built lazily, the first time a card is actually shown — with the
+// stand-aside filter on by default this skips most of the universe.
+function ensureChartsRendered(card, snapshot) {
+  if (card.dataset.rendered) return;
+  const assetCharts = snapshot.charts[card.dataset.asset];
+  renderChart(card.querySelector(".chart-w"), assetCharts.weekly);
+  renderChart(card.querySelector(".chart-d"), assetCharts.daily);
+  card.dataset.rendered = "1";
+}
+
+function applyStandAsideFilter(snapshot) {
+  const hide = document.getElementById("hide-stand-aside").checked;
+  let hidden = 0;
+  for (const row of document.querySelectorAll("#signals-table tbody tr")) {
+    const out = hide && row.dataset.action === "stand_aside";
+    row.classList.toggle("hidden", out);
+    if (out) hidden += 1;
+  }
+  for (const card of document.querySelectorAll("#cards .card")) {
+    const out = hide && card.dataset.action === "stand_aside";
+    card.classList.toggle("hidden", out);
+    if (!out) ensureChartsRendered(card, snapshot);
+  }
+  document.getElementById("filter-count").textContent = hide
+    ? `${hidden} stand-aside asset${hidden === 1 ? "" : "s"} hidden`
+    : "";
 }
 
 async function main() {
@@ -144,6 +189,10 @@ async function main() {
 
   renderTable(snapshot);
   renderCards(snapshot);
+  applyStandAsideFilter(snapshot);
+  document
+    .getElementById("hide-stand-aside")
+    .addEventListener("change", () => applyStandAsideFilter(snapshot));
 }
 
 main();

@@ -81,8 +81,11 @@ EMA (`today_EMA + (today_EMA − yesterday_EMA)`) and offset by that average to 
 - Lightweight Charts is Apache-2.0 but **requires TradingView attribution**: include the
   attribution notice / `attributionLogo` per its license in the dashboard.
 - Config via `config.toml` (watchlist, intervals, equity, risk_pct) + `.env` for anything sensitive.
-- Watchlist in `config.toml`: explicit coins (e.g. BTC, ETH, SOL, HYPE) or `["*"]` to
-  scan the **entire** tradable perp universe (current default; delisted assets excluded).
+- Watchlist in `config.toml`: explicit coins (e.g. BTC, ETH, or tradfi perps like
+  `xyz:GOLD`), `"*"` to scan the **entire** tradable native (crypto) perp universe, and
+  `"<dex>:*"` to scan a whole HIP-3 builder dex — `"xyz:*"` is the tradfi universe
+  (stocks, indices, gold, oil, forex…). Current default: `["*", "xyz:*"]`; delisted
+  assets excluded.
 
 ## Definition of done (per phase)
 1. Data layer fetches+caches weekly & daily candles for the watchlist; tests on fixtures pass.

@@ -84,6 +84,27 @@ def chart_payload(df: pd.DataFrame) -> dict[str, Any]:
     }
 
 
+def expand_watchlist(watchlist: tuple[str, ...], client: HyperliquidClient) -> dict[str, int]:
+    """Resolve watchlist entries to {coin: szDecimals}, sorted by name.
+
+    "*" expands to every tradable native (crypto) perp; "<dex>:*" to every
+    tradable perp of a HIP-3 builder dex (e.g. "xyz:*" = the tradfi universe:
+    stocks, indices, gold, oil, forex…). Explicit coins are validated.
+    """
+    sz_decimals: dict[str, int] = {}
+    explicit: list[str] = []
+    for item in watchlist:
+        if item == WATCHLIST_ALL:
+            sz_decimals.update(client.tradable_perps())
+        elif item.endswith(":" + WATCHLIST_ALL):
+            sz_decimals.update(client.tradable_perps(item[: -len(":" + WATCHLIST_ALL)]))
+        else:
+            explicit.append(item)
+    if explicit:
+        sz_decimals.update(client.validate_watchlist(explicit))
+    return dict(sorted(sz_decimals.items()))
+
+
 def build_snapshot(
     cfg: Config,
     client: HyperliquidClient,
@@ -91,13 +112,11 @@ def build_snapshot(
 ) -> dict[str, Any]:
     """Full daily refresh for the watchlist -> dashboard snapshot dict.
 
-    A watchlist of ["*"] expands to every tradable perp in the universe.
+    "*" in the watchlist expands to every tradable native perp, "<dex>:*" to a
+    whole HIP-3 dex (e.g. "xyz:*" for the tradfi perps).
     """
     now_ms = int(time.time() * 1000)
-    if WATCHLIST_ALL in cfg.scanner.watchlist:
-        sz_decimals = client.tradable_perps()
-    else:
-        sz_decimals = client.validate_watchlist(cfg.scanner.watchlist)
+    sz_decimals = expand_watchlist(cfg.scanner.watchlist, client)
     guard = six_percent_guard(
         cfg.risk.equity_at_month_start,
         cfg.risk.month_realized_losses,

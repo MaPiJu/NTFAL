@@ -11,6 +11,7 @@ from data.hyperliquid import (
     MAX_CANDLES_PER_REQUEST,
     HyperliquidClient,
     HyperliquidError,
+    coin_dex,
     completed_bars,
     parse_candles,
 )
@@ -52,6 +53,44 @@ def test_tradable_perps_excludes_delisted(tmp_path, btc_fixtures):
     assert perps == {"BTC": 5, "ETH": 4, "HYPE": 2, "SOL": 2}
     assert "OLD" not in perps  # delisted
     assert list(perps) == sorted(perps)
+
+
+def test_coin_dex():
+    assert coin_dex("BTC") == ""
+    assert coin_dex("xyz:GOLD") == "xyz"
+
+
+def test_validate_watchlist_mixed_dexes(tmp_path, btc_fixtures):
+    log: list[dict] = []
+    client = make_client(btc_fixtures, tmp_path, requests_log=log)
+    sz = client.validate_watchlist(["BTC", "xyz:GOLD"])
+    assert sz == {"BTC": 5, "xyz:GOLD": 4}
+    # one meta request per dex involved: native (no dex key) + "xyz"
+    meta_dexes = {req.get("dex", "") for req in log if req["type"] == "meta"}
+    assert meta_dexes == {"", "xyz"}
+
+    with pytest.raises(HyperliquidError, match="xyz:DOGEZILLA"):
+        client.validate_watchlist(["xyz:DOGEZILLA"])
+
+
+def test_tradable_perps_builder_dex(tmp_path, btc_fixtures):
+    client = make_client(btc_fixtures, tmp_path)
+    perps = client.tradable_perps("xyz")
+    assert perps == {"xyz:GOLD": 4, "xyz:SP500": 4}
+    assert "xyz:RETIRED" not in perps  # delisted
+
+
+def test_cache_path_is_filename_safe(tmp_path, btc_fixtures):
+    fixtures = dict(btc_fixtures)
+    fixtures[("xyz:GOLD", "1d")] = btc_fixtures[("BTC", "1d")]
+    client = make_client(fixtures, tmp_path)
+    now_ms = fixtures[("xyz:GOLD", "1d")][-1]["t"] + 1000
+
+    df = client.refresh("xyz:GOLD", "1d", lookback_bars=400, now_ms=now_ms)
+    assert not df.empty
+    assert (tmp_path / "xyz_GOLD_1d.parquet").exists()
+    cached = client.load_cached("xyz:GOLD", "1d")
+    assert cached is not None and len(cached) == len(df)
 
 
 def test_info_retries_on_rate_limit(tmp_path):
