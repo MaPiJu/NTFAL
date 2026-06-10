@@ -19,6 +19,8 @@ META = {
         {"name": "ETH", "szDecimals": 4, "maxLeverage": 25},
         {"name": "SOL", "szDecimals": 2, "maxLeverage": 20},
         {"name": "HYPE", "szDecimals": 2, "maxLeverage": 10},
+        # Delisted perps remain in `meta` but must never be scanned.
+        {"name": "OLD", "szDecimals": 0, "maxLeverage": 3, "isDelisted": True},
     ]
 }
 

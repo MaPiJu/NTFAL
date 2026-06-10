@@ -7,13 +7,14 @@ FastAPI app — the server itself never talks to the exchange.
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from dataclasses import asdict
 from datetime import UTC, datetime
 from typing import Any
 
 import pandas as pd
 
-from config import Config
+from config import WATCHLIST_ALL, Config
 from data.hyperliquid import HyperliquidClient, completed_bars
 from indicators import ema, force_index, impulse_color, macd_histogram
 from risk.sizing import position_size, six_percent_guard
@@ -83,10 +84,20 @@ def chart_payload(df: pd.DataFrame) -> dict[str, Any]:
     }
 
 
-def build_snapshot(cfg: Config, client: HyperliquidClient) -> dict[str, Any]:
-    """Full daily refresh for the watchlist -> dashboard snapshot dict."""
+def build_snapshot(
+    cfg: Config,
+    client: HyperliquidClient,
+    on_progress: Callable[[str], None] | None = None,
+) -> dict[str, Any]:
+    """Full daily refresh for the watchlist -> dashboard snapshot dict.
+
+    A watchlist of ["*"] expands to every tradable perp in the universe.
+    """
     now_ms = int(time.time() * 1000)
-    sz_decimals = client.validate_watchlist(cfg.scanner.watchlist)
+    if WATCHLIST_ALL in cfg.scanner.watchlist:
+        sz_decimals = client.tradable_perps()
+    else:
+        sz_decimals = client.validate_watchlist(cfg.scanner.watchlist)
     guard = six_percent_guard(
         cfg.risk.equity_at_month_start,
         cfg.risk.month_realized_losses,
@@ -95,7 +106,10 @@ def build_snapshot(cfg: Config, client: HyperliquidClient) -> dict[str, Any]:
 
     signals: list[dict[str, Any]] = []
     charts: dict[str, Any] = {}
-    for coin in cfg.scanner.watchlist:
+    skipped: list[str] = []
+    for coin in sz_decimals:
+        if on_progress is not None:
+            on_progress(coin)
         weekly = completed_bars(
             client.refresh(coin, cfg.scanner.weekly_interval, cfg.scanner.lookback_weeks),
             now_ms,
@@ -104,6 +118,12 @@ def build_snapshot(cfg: Config, client: HyperliquidClient) -> dict[str, Any]:
             client.refresh(coin, cfg.scanner.daily_interval, cfg.scanner.lookback_days),
             now_ms,
         )
+
+        # Fresh listings without two completed bars per timeframe can't be
+        # evaluated (no slope, no prior-day levels) — report, don't crash.
+        if len(weekly) < 2 or len(daily) < 2:
+            skipped.append(coin)
+            continue
 
         sig = evaluate_asset(coin, weekly, daily)
         row = asdict(sig)
@@ -129,5 +149,6 @@ def build_snapshot(cfg: Config, client: HyperliquidClient) -> dict[str, Any]:
         "risk_pct": cfg.risk.risk_pct,
         "guard": asdict(guard),
         "signals": signals,
+        "skipped": skipped,
         "charts": charts,
     }

@@ -12,7 +12,7 @@ from config import Config, RiskConfig, ScannerConfig
 from tests.conftest import make_client
 
 
-def make_config(cache_dir, **risk_overrides) -> Config:
+def make_config(cache_dir, watchlist=("BTC",), **risk_overrides) -> Config:
     risk = {
         "equity": 10_000.0,
         "risk_pct": 0.01,
@@ -22,7 +22,7 @@ def make_config(cache_dir, **risk_overrides) -> Config:
     } | risk_overrides
     return Config(
         scanner=ScannerConfig(
-            watchlist=("BTC",),
+            watchlist=watchlist,
             weekly_interval="1w",
             daily_interval="1d",
             lookback_weeks=260,
@@ -52,6 +52,20 @@ def test_build_snapshot_from_fixtures(tmp_path, btc_fixtures):
         assert {"time", "open", "high", "low", "close", "color"} <= set(candle)
         assert payload["ema13"] and payload["ema26"]
         assert payload["macd_hist"] and payload["force_index_2"]
+
+
+def test_wildcard_watchlist_scans_whole_universe(tmp_path, btc_fixtures):
+    cfg = make_config(tmp_path, watchlist=("*",))
+    client = make_client(btc_fixtures, tmp_path)
+    progress: list[str] = []
+    snapshot = build_snapshot(cfg, client, on_progress=progress.append)
+
+    # Every tradable perp is scanned (delisted OLD is not), but only BTC has
+    # enough recorded history to be evaluated — the rest are reported skipped.
+    assert progress == ["BTC", "ETH", "HYPE", "SOL"]
+    assert [s["asset"] for s in snapshot["signals"]] == ["BTC"]
+    assert snapshot["skipped"] == ["ETH", "HYPE", "SOL"]
+    assert list(snapshot["charts"]) == ["BTC"]
 
 
 def test_snapshot_reports_tripped_guard(tmp_path, btc_fixtures):
