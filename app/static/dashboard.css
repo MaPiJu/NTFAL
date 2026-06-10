@@ -1,0 +1,87 @@
+:root {
+  --bg: #0e1116;
+  --panel: #161b22;
+  --border: #2d333b;
+  --text: #c9d1d9;
+  --muted: #8b949e;
+  --green: #089981;
+  --red: #f23645;
+  --blue: #2962ff;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-size: 14px;
+}
+
+header { padding: 16px 24px 8px; }
+h1 { margin: 0 0 4px; font-size: 20px; }
+h1 .sub { font-size: 13px; color: var(--muted); font-weight: normal; margin-left: 8px; }
+.meta { color: var(--muted); font-size: 12px; }
+
+main { padding: 0 24px 24px; }
+
+.guard-banner {
+  margin: 8px 24px;
+  padding: 12px 16px;
+  border: 1px solid var(--red);
+  border-radius: 6px;
+  background: rgba(242, 54, 69, 0.12);
+  color: var(--red);
+  font-weight: 600;
+}
+.hidden { display: none; }
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+th, td { padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--border); }
+th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; }
+td.reason { color: var(--muted); font-size: 12px; max-width: 320px; }
+
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-weight: 700;
+  font-size: 12px;
+  text-transform: uppercase;
+}
+.badge.long { background: rgba(8, 153, 129, 0.18); color: var(--green); }
+.badge.short { background: rgba(242, 54, 69, 0.18); color: var(--red); }
+.badge.stand_aside { background: rgba(139, 148, 158, 0.15); color: var(--muted); }
+
+.dot { font-size: 15px; }
+.dot.green { color: var(--green); }
+.dot.red { color: var(--red); }
+.dot.blue { color: var(--blue); }
+
+.rr-bad { color: var(--red); }
+.rr-good { color: var(--green); }
+
+.card {
+  margin-top: 24px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px 16px 16px;
+}
+.card h2 { margin: 4px 0 12px; font-size: 16px; }
+.card .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+@media (max-width: 1100px) { .card .charts { grid-template-columns: 1fr; } }
+.chart-title { color: var(--muted); font-size: 12px; margin-bottom: 4px; text-transform: uppercase; }
+.chart { width: 100%; }
+
+footer { padding: 16px 24px 24px; color: var(--muted); font-size: 12px; }
+footer a { color: var(--muted); }
+.attribution { margin-top: 4px; }

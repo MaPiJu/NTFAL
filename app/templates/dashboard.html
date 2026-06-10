@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Elder Triple Screen Scanner — Hyperliquid</title>
+  <link rel="stylesheet" href="/static/dashboard.css" />
+  <script src="https://unpkg.com/lightweight-charts@5/dist/lightweight-charts.standalone.production.js"></script>
+</head>
+<body>
+  <header>
+    <h1>Elder Triple Screen Scanner <span class="sub">Hyperliquid perps · weekly tide / daily wave</span></h1>
+    <div id="meta" class="meta"></div>
+  </header>
+
+  <div id="guard-banner" class="guard-banner hidden"></div>
+
+  <main>
+    <section id="signals">
+      <table id="signals-table">
+        <thead>
+          <tr>
+            <th>Asset</th><th>Weekly tide</th><th>Impulse W/D</th><th>FI(2) daily</th>
+            <th>Action</th><th>Entry (stop-order)</th><th>Entry (limit)</th>
+            <th>Stop</th><th>Target</th><th>R:R</th><th>Size</th><th>Reason</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+    <section id="cards"></section>
+  </main>
+
+  <footer>
+    <p>Informational analysis only — <strong>not financial advice</strong>; this tool places no trades.</p>
+    <p class="attribution">
+      Charts powered by the
+      <a href="https://www.tradingview.com/" target="_blank" rel="noopener">TradingView</a>
+      Lightweight Charts&trade; library.
+      Copyright &copy; TradingView, Inc. <a href="https://www.tradingview.com/" target="_blank" rel="noopener">https://www.tradingview.com/</a>
+    </p>
+  </footer>
+
+  <script src="/static/dashboard.js"></script>
+</body>
+</html>

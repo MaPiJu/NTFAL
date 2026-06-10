@@ -1,0 +1,29 @@
+# Elder Triple Screen Scanner — configuration
+# Nothing in this file is a secret; secrets (if ever needed) belong in .env.
+
+[scanner]
+# Keep the watchlist SMALL (3-6 perps). More is worse.
+watchlist = ["BTC", "ETH", "SOL", "HYPE"]
+weekly_interval = "1w"
+daily_interval = "1d"
+# History depth (bars) to keep cached. The API serves at most 5000 candles.
+lookback_weeks = 260
+lookback_days = 500
+
+[risk]
+# Account equity in USD (used by the 2% Iron Triangle sizing).
+equity = 10000.0
+# Risk per trade as a fraction of equity. Default 1%, HARD CAP 2% — values
+# above 0.02 are clamped, never silently exceeded.
+risk_pct = 0.01
+# 6% Rule bookkeeping — this tool is read-only and does not track your trades,
+# so update these by hand (or leave at 0 if flat):
+#   equity_at_month_start: equity on the 1st of the current month
+#   month_realized_losses: realized losses so far this month (positive number)
+#   open_trade_risk:       sum of (entry - stop) * size over open positions
+equity_at_month_start = 10000.0
+month_realized_losses = 0.0
+open_trade_risk = 0.0
+
+[cache]
+dir = "cache"
