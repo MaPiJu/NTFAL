@@ -2,17 +2,19 @@
 
 from __future__ import annotations
 
+import httpx
 import pandas as pd
 import pytest
 
 from data.hyperliquid import (
     INTERVAL_MS,
     MAX_CANDLES_PER_REQUEST,
+    HyperliquidClient,
     HyperliquidError,
     completed_bars,
     parse_candles,
 )
-from tests.conftest import load_fixture, make_client
+from tests.conftest import META, load_fixture, make_client
 
 
 def test_parse_candles_types_and_order():
@@ -42,6 +44,29 @@ def test_validate_watchlist(tmp_path, btc_fixtures):
 
     with pytest.raises(HyperliquidError, match="DOGEZILLA"):
         client.validate_watchlist(["BTC", "DOGEZILLA"])
+
+
+def test_tradable_perps_excludes_delisted(tmp_path, btc_fixtures):
+    client = make_client(btc_fixtures, tmp_path)
+    perps = client.tradable_perps()
+    assert perps == {"BTC": 5, "ETH": 4, "HYPE": 2, "SOL": 2}
+    assert "OLD" not in perps  # delisted
+    assert list(perps) == sorted(perps)
+
+
+def test_info_retries_on_rate_limit(tmp_path):
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(429, headers={"Retry-After": "0"})
+        return httpx.Response(200, json=META)
+
+    http = httpx.Client(transport=httpx.MockTransport(handler))
+    client = HyperliquidClient(http=http, cache_dir=tmp_path)
+    assert "BTC" in client.perp_universe()
+    assert calls["n"] == 2
 
 
 def test_refresh_initial_fetch_and_cache(tmp_path, btc_fixtures):

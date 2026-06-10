@@ -25,7 +25,10 @@ from data.hyperliquid import HyperliquidClient
 def print_signals_table(snapshot: dict[str, Any]) -> None:
     guard = snapshot["guard"]
     print(f"\nElder Triple Screen — generated {snapshot['generated_at']}")
-    print(f"equity ${snapshot['equity']:,.2f} · risk/trade {snapshot['risk_pct']:.1%}")
+    print(
+        f"equity ${snapshot['equity']:,.2f} · risk/trade {snapshot['risk_pct']:.1%} "
+        f"· {len(snapshot['signals'])} assets analyzed"
+    )
     if guard["blocked"]:
         print(
             f"⚠ 6% RULE ACTIVE: monthly losses + open risk ${guard['total_at_risk']:,.2f} "
@@ -56,12 +59,16 @@ def print_signals_table(snapshot: dict[str, Any]) -> None:
     print()
     for s in snapshot["signals"]:
         print(f"  {s['asset']}: {s['reason']}")
+    if snapshot.get("skipped"):
+        print(f"\nskipped (not enough history yet): {', '.join(snapshot['skipped'])}")
     print("\nInformational only — not financial advice; no orders are placed.\n")
 
 
 def do_refresh(cfg: Config) -> dict[str, Any]:
     with HyperliquidClient(cache_dir=cfg.cache_dir) as client:
-        snapshot = build_snapshot(cfg, client)
+        snapshot = build_snapshot(
+            cfg, client, on_progress=lambda coin: print(f"refreshing {coin}…", flush=True)
+        )
     cfg.cache_dir.mkdir(parents=True, exist_ok=True)
     out = cfg.cache_dir / SNAPSHOT_FILENAME
     out.write_text(json.dumps(snapshot))

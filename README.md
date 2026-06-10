@@ -72,7 +72,10 @@ candles, EMA13/EMA26 overlays, and MACD-Histogram / Force Index panes.
 
 Edit `config.toml`:
 
-- `scanner.watchlist` — keep it **small** (3–6 perps), e.g. `["BTC", "ETH", "SOL", "HYPE"]`
+- `scanner.watchlist` — explicit coins, e.g. `["BTC", "ETH", "SOL", "HYPE"]`, or `["*"]`
+  to scan **every** tradable Hyperliquid perp (delisted assets are excluded; the refresh
+  fires two requests per asset, so the full universe takes a few minutes and assets too
+  new to have two completed weekly/daily bars are listed as skipped)
 - `risk.equity` — account equity used for sizing
 - `risk.risk_pct` — risk per trade (default `0.01` = 1%; hard-capped at 2%)
 - `risk.equity_at_month_start`, `risk.month_realized_losses`, `risk.open_trade_risk` —

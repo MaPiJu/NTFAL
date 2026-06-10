@@ -2,8 +2,10 @@
 # Nothing in this file is a secret; secrets (if ever needed) belong in .env.
 
 [scanner]
-# Keep the watchlist SMALL (3-6 perps). More is worse.
-watchlist = ["BTC", "ETH", "SOL", "HYPE"]
+# Explicit coins (e.g. ["BTC", "ETH", "SOL", "HYPE"]) or ["*"] to scan EVERY
+# tradable Hyperliquid perp. The full universe means two requests per asset,
+# so the refresh takes a few minutes and the dashboard gets one card per perp.
+watchlist = ["*"]
 weekly_interval = "1w"
 daily_interval = "1d"
 # History depth (bars) to keep cached. The API serves at most 5000 candles.

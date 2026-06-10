@@ -20,6 +20,9 @@ import pandas as pd
 DEFAULT_API_URL = "https://api.hyperliquid.xyz/info"
 # The API serves only the most recent 5000 candles per (coin, interval).
 MAX_CANDLES_PER_REQUEST = 5000
+# Scanning the full universe fires hundreds of requests; back off on 429
+# instead of dying mid-refresh.
+RATE_LIMIT_RETRIES = 5
 
 INTERVAL_MS: dict[str, int] = {
     "1m": 60_000,
@@ -97,9 +100,13 @@ class HyperliquidClient:
         self.close()
 
     def _info(self, payload: dict[str, Any]) -> Any:
-        resp = self._http.post(self.api_url, json=payload)
-        resp.raise_for_status()
-        return resp.json()
+        for attempt in range(RATE_LIMIT_RETRIES):
+            resp = self._http.post(self.api_url, json=payload)
+            if resp.status_code != 429 or attempt == RATE_LIMIT_RETRIES - 1:
+                resp.raise_for_status()
+                return resp.json()
+            time.sleep(float(resp.headers.get("Retry-After", 2**attempt)))
+        raise HyperliquidError("unreachable")  # pragma: no cover
 
     # -- meta ---------------------------------------------------------------
 
@@ -121,6 +128,18 @@ class HyperliquidClient:
         if unknown:
             raise HyperliquidError(f"not in the Hyperliquid perp universe: {', '.join(unknown)}")
         return {c: int(universe[c]["szDecimals"]) for c in coins}
+
+    def tradable_perps(self) -> dict[str, int]:
+        """Every currently tradable perp -> szDecimals, sorted by name.
+
+        Delisted assets stay in `meta` (flagged `isDelisted`) and are excluded.
+        """
+        universe = self.perp_universe()
+        return {
+            name: int(entry["szDecimals"])
+            for name, entry in sorted(universe.items())
+            if not entry.get("isDelisted", False)
+        }
 
     # -- candles ------------------------------------------------------------
 
