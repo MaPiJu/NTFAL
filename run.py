@@ -35,27 +35,44 @@ def print_signals_table(snapshot: dict[str, Any]) -> None:
             f">= limit ${guard['limit']:,.2f} — NO NEW ENTRIES this month."
         )
 
+    best = next((s for s in snapshot["signals"] if s.get("is_top_pick")), None)
+    if best is not None:
+        print(
+            f"★ BEST TRADE: {best['asset']} {best['action']} "
+            f"(score {best['quality_score'] * 100:.0f}/100, R:R {best['reward_risk']:.2f}, "
+            f"entry {best['entry']:,.6g}, stop {best['stop']:,.6g}, target {best['target']:,.6g})"
+        )
+
     def num(x: float | None) -> str:
         return f"{x:,.6g}" if x is not None else "—"
 
+    # Best trade first: tradable setups by Elder score (desc), then the rest by name.
+    def sort_key(s: dict[str, Any]) -> tuple[int, float, str]:
+        aside = s["action"] == "stand_aside"
+        return (1 if aside else 0, -(s["quality_score"] or 0.0), s["asset"])
+
     # 14-wide asset column: tradfi names like "xyz:ALUMINIUM" are longer than tickers.
     header = (
-        f"{'ASSET':<14} {'TIDE':<7} {'IMP W/D':<11} {'FI(2)':>14} {'ACTION':<12} "
-        f"{'ENTRY':>12} {'LIMIT':>12} {'STOP':>12} {'TARGET':>12} {'R:R':>7} {'SIZE':>10}"
+        f"{'ASSET':<14} {'TIDE':<7} {'IMP W/D':<11} {'FI(2)':>14} {'ACTION':<13} "
+        f"{'PRICE':>12} {'ENTRY':>12} {'LIMIT':>12} {'STOP':>12} {'TARGET':>12} "
+        f"{'R:R':>7} {'SCORE':>6} {'SIZE':>10}"
     )
     print("\n" + header)
     print("-" * len(header))
-    for s in snapshot["signals"]:
+    for s in sorted(snapshot["signals"], key=sort_key):
         rr = f"{s['reward_risk']:.2f}" if s["reward_risk"] is not None else "—"
         if s["reward_risk"] is not None and not s["rr_ok"]:
             rr += "⚠"
         size = num(s["position_size"]["size"]) if s["position_size"] else "—"
+        score = f"{s['quality_score'] * 100:.0f}" if s.get("quality_score") is not None else "—"
+        action = s["action"] + (" ★" if s.get("is_top_pick") else "")
         print(
             f"{s['asset']:<14} {s['weekly_trend']:<7} "
             f"{s['weekly_impulse'] + '/' + s['daily_impulse']:<11} "
-            f"{s['force_index_2']:>14,.4g} {s['action']:<12} "
+            f"{s['force_index_2']:>14,.4g} {action:<13} "
+            f"{num(s.get('last_close')):>12} "
             f"{num(s['entry']):>12} {num(s['entry_limit']):>12} {num(s['stop']):>12} "
-            f"{num(s['target']):>12} {rr:>7} {size:>10}"
+            f"{num(s['target']):>12} {rr:>7} {score:>6} {size:>10}"
         )
     print()
     for s in snapshot["signals"]:

@@ -39,10 +39,17 @@ def test_build_snapshot_from_fixtures(tmp_path, btc_fixtures):
     snapshot = build_snapshot(cfg, client)
 
     assert snapshot["guard"]["blocked"] is False
+    assert "top_pick" in snapshot  # name of the best trade, or None
     (sig,) = snapshot["signals"]
     assert sig["asset"] == "BTC"
     assert sig["action"] in {"long", "short", "stand_aside"}
     assert sig["weekly_impulse"] in {"green", "red", "blue"}
+    # new fields surfaced for the dashboard / ranking
+    assert "last_close" in sig and "quality_score" in sig and "is_top_pick" in sig
+    # the top pick (if any) must be a tradable, R:R-passing setup
+    if snapshot["top_pick"] is not None:
+        pick = next(s for s in snapshot["signals"] if s["asset"] == snapshot["top_pick"])
+        assert pick["action"] != "stand_aside" and pick["rr_ok"] and pick["is_top_pick"]
 
     charts = snapshot["charts"]["BTC"]
     for interval in ("weekly", "daily"):

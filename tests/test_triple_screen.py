@@ -4,11 +4,18 @@ from __future__ import annotations
 
 import pytest
 
+from indicators import ema
 from strategy.triple_screen import (
+    EMA_FAST,
+    Signal,
     average_penetration,
+    compute_quality_score,
     evaluate_asset,
+    impulse_confirmation,
     projected_ema,
+    select_best,
     tick_size,
+    weekly_channel,
     weekly_trend,
 )
 from tests.conftest import make_ohlcv
@@ -113,6 +120,77 @@ def test_impulse_red_vetoes_long():
     assert sig.action == "stand_aside"
     assert "vetoed by Impulse" in sig.reason
     assert sig.entry is None
+
+
+def test_weekly_channel_lower_band_stays_positive_after_a_crash():
+    # Asset fell from ~120 to ~6 with deep weekly wicks. When price was high those
+    # wicks pierced the EMA by large *absolute* amounts; an absolute channel offset
+    # subtracts that stale distance from today's tiny EMA and goes negative — the
+    # old source of negative short targets. The proportional channel must not.
+    closes = [
+        120.0, 90.0, 60.0, 40.0, 28.0, 20.0, 15.0, 12.0, 10.0, 9.0,
+        8.5, 8.0, 7.5, 7.0, 6.8, 6.6, 6.4, 6.2, 6.1, 6.05,
+        6.02, 6.0, 5.98, 5.96, 5.94, 5.92,
+    ]  # fmt: skip
+    lows = [c * 0.6 for c in closes]  # deep wicks -> big penetrations while price was high
+    highs = [c * 1.05 for c in closes]
+    weekly = make_ohlcv(closes, lows=lows, highs=highs, freq="W")
+
+    upper, lower = weekly_channel(weekly)
+    ema_last = float(ema(weekly["close"], EMA_FAST).iloc[-1])
+
+    assert lower > 0  # the bug was a negative lower band (negative short target)
+    assert lower < ema_last <= upper
+
+
+def test_quality_score_rewards_better_reward_risk():
+    base = dict(impulse_agreement=1.0, tide_strength=0.03, pullback_depth=1.0)
+    better = compute_quality_score(reward_risk=3.0, **base)
+    worse = compute_quality_score(reward_risk=2.0, **base)
+    assert 0.0 <= worse < better <= 1.0
+
+
+def test_impulse_confirmation_counts_agreeing_screens():
+    assert impulse_confirmation("long", "green", "green") == 1.0
+    assert impulse_confirmation("long", "green", "blue") == 0.5
+    assert impulse_confirmation("long", "blue", "blue") == 0.0
+    assert impulse_confirmation("short", "red", "red") == 1.0
+    assert impulse_confirmation("short", "red", "blue") == 0.5
+
+
+def _mk_signal(asset: str, action: str, rr: float | None, score: float | None, rr_ok: bool):
+    return Signal(
+        asset=asset,
+        action=action,
+        reason="",
+        weekly_trend="up",
+        weekly_impulse="green",
+        daily_impulse="green",
+        force_index_2=-1.0,
+        entry=10.0,
+        entry_limit=None,
+        stop=9.0,
+        target=13.0,
+        reward_risk=rr,
+        rr_ok=rr_ok,
+        weekly_trend_strength=0.02,
+        pullback_quality=0.5,
+        quality_score=score,
+    )
+
+
+def test_select_best_picks_highest_quality_tradable_above_floor():
+    a = _mk_signal("A", "long", 2.5, 0.60, rr_ok=True)
+    b = _mk_signal("B", "long", 3.5, 0.90, rr_ok=True)  # best
+    c = _mk_signal("C", "stand_aside", None, None, rr_ok=False)  # not tradable
+    d = _mk_signal("D", "long", 1.5, 0.95, rr_ok=False)  # below the 2:1 floor
+    assert select_best([a, b, c, d]).asset == "B"
+
+
+def test_select_best_returns_none_when_nothing_qualifies():
+    only_aside = _mk_signal("A", "stand_aside", None, None, rr_ok=False)
+    sub_floor = _mk_signal("B", "long", 1.2, 0.9, rr_ok=False)
+    assert select_best([only_aside, sub_floor]) is None
 
 
 def test_average_penetration_and_projection():
