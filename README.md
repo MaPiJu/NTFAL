@@ -20,6 +20,11 @@ charts so the operator can make a **discretionary** entry decision and place ord
   projected EMA13 offset by the average pullback penetration.
 - **Impulse censorship (applied last):** any **red** Impulse (weekly or daily) forbids
   longs; any **green** forbids shorts.
+- **Best-trade ranking:** every validated setup gets a 0–100 quality score blending
+  Elder's selection criteria — reward:risk (dominant; 2:1 floor, 3:1 = full credit),
+  Impulse agreement across both screens, weekly-tide strength, and daily pullback depth.
+  The single highest-scoring setup that clears the 2:1 floor is flagged as the **best
+  trade** (`★`); the table is sorted best-first. The 6% guard suppresses any pick.
 - **Risk:** 2% Rule (Iron Triangle sizing, default 1% risk per trade, hard cap 2%) and
   the 6% monthly guard that blocks all new entries once monthly losses + open risk reach
   6% of the month-start equity.
@@ -64,11 +69,13 @@ Optional once-a-day automatic refresh (manual run is the default workflow):
 uv run python run.py --serve --schedule 06:00   # re-refresh daily at 06:00 UTC
 ```
 
-The dashboard shows the signals table (with a clear banner when the 6% guard is active)
-and, per asset, weekly + daily TradingView Lightweight Charts with Impulse-colored
-candles, EMA13/EMA26 overlays, MACD-Histogram / Force Index panes, and a legend
-explaining every series. The table header stays visible while scrolling, and a
-filter (on by default) hides "stand aside" assets from both the table and the
+The dashboard shows the signals table (with a clear banner when the 6% guard is active,
+plus a green banner naming the best trade) and, per asset, weekly + daily TradingView
+Lightweight Charts with Impulse-colored candles, EMA13/EMA26 overlays, MACD-Histogram /
+Force Index panes, and a legend explaining every series. The table adds a **Current
+price** column (latest completed daily close) and a **Score** column, is sorted
+best-trade-first, and highlights the top pick. The header stays visible while scrolling,
+and a filter (on by default) hides "stand aside" assets from both the table and the
 chart cards — charts for hidden assets are only rendered if you reveal them.
 
 ## Configuration

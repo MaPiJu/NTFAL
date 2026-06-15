@@ -18,7 +18,7 @@ from config import WATCHLIST_ALL, Config
 from data.hyperliquid import HyperliquidClient, completed_bars
 from indicators import ema, force_index, impulse_color, macd_histogram
 from risk.sizing import position_size, six_percent_guard
-from strategy.triple_screen import EMA_FAST, EMA_SLOW, evaluate_asset
+from strategy.triple_screen import EMA_FAST, EMA_SLOW, Signal, evaluate_asset, select_best
 
 SNAPSHOT_FILENAME = "snapshot.json"
 
@@ -124,6 +124,7 @@ def build_snapshot(
     )
 
     signals: list[dict[str, Any]] = []
+    evaluated: list[Signal] = []  # parallel to `signals`, for cross-asset ranking
     charts: dict[str, Any] = {}
     skipped: list[str] = []
     for coin in sz_decimals:
@@ -145,6 +146,7 @@ def build_snapshot(
             continue
 
         sig = evaluate_asset(coin, weekly, daily)
+        evaluated.append(sig)
         row = asdict(sig)
         row["position_size"] = None
         if sig.action != "stand_aside" and sig.entry and sig.stop and not guard.blocked:
@@ -162,11 +164,19 @@ def build_snapshot(
 
         charts[coin] = {"weekly": chart_payload(weekly), "daily": chart_payload(daily)}
 
+    # "Which trade do I take?" — rank the validated setups and flag the single
+    # best. While the 6% guard is active no new entry is allowed, so no pick.
+    best = None if guard.blocked else select_best(evaluated)
+    best_asset = best.asset if best is not None else None
+    for row in signals:
+        row["is_top_pick"] = row["asset"] == best_asset
+
     return {
         "generated_at": datetime.now(tz=UTC).isoformat(timespec="seconds"),
         "equity": cfg.risk.equity,
         "risk_pct": cfg.risk.risk_pct,
         "guard": asdict(guard),
+        "top_pick": best_asset,
         "signals": signals,
         "skipped": skipped,
         "charts": charts,

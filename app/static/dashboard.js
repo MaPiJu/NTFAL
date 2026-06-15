@@ -28,10 +28,28 @@ function impulseDot(color) {
   return `<span class="dot ${color}" title="${color}">●</span>`;
 }
 
+// Best trade first: tradable setups ranked by Elder quality score (desc),
+// then the stand-aside rest by name. Returns a sorted copy.
+function rankedSignals(snapshot) {
+  return [...snapshot.signals].sort((a, b) => {
+    const aside = (s) => (s.action === "stand_aside" ? 1 : 0);
+    if (aside(a) !== aside(b)) return aside(a) - aside(b);
+    if (aside(a) === 1) return a.asset.localeCompare(b.asset);
+    return (b.quality_score ?? 0) - (a.quality_score ?? 0);
+  });
+}
+
+function scoreCell(s) {
+  if (s.quality_score === null || s.quality_score === undefined) return "—";
+  const pct = Math.round(s.quality_score * 100);
+  const star = s.is_top_pick ? ' <span class="top-star" title="best trade">★</span>' : "";
+  return `<span class="score">${pct}</span>${star}`;
+}
+
 function renderTable(snapshot) {
   const tbody = document.querySelector("#signals-table tbody");
   tbody.innerHTML = "";
-  for (const s of snapshot.signals) {
+  for (const s of rankedSignals(snapshot)) {
     const rr = s.reward_risk;
     const rrCell =
       rr === null
@@ -40,17 +58,20 @@ function renderTable(snapshot) {
     const size = s.position_size ? fmt(s.position_size.size, 6) : "—";
     const row = document.createElement("tr");
     row.dataset.action = s.action;
+    if (s.is_top_pick) row.classList.add("top-pick");
     row.innerHTML = `
       <td><strong>${s.asset}</strong></td>
       <td>${s.weekly_trend}</td>
       <td>${impulseDot(s.weekly_impulse)} / ${impulseDot(s.daily_impulse)}</td>
       <td>${fmt(s.force_index_2, 4)}</td>
       <td><span class="badge ${s.action}">${s.action.replace("_", " ")}</span></td>
+      <td>${fmt(s.last_close)}</td>
       <td>${fmt(s.entry)}</td>
       <td>${fmt(s.entry_limit)}</td>
       <td>${fmt(s.stop)}</td>
       <td>${fmt(s.target)}</td>
       <td>${rrCell}</td>
+      <td>${scoreCell(s)}</td>
       <td>${size}</td>
       <td class="reason">${s.reason}</td>`;
     tbody.appendChild(row);
@@ -122,13 +143,15 @@ const LEGEND_HTML = `
 function renderCards(snapshot) {
   const cards = document.getElementById("cards");
   cards.innerHTML = "";
-  for (const s of snapshot.signals) {
+  for (const s of rankedSignals(snapshot)) {
     const card = document.createElement("section");
     card.className = "card";
+    if (s.is_top_pick) card.classList.add("top-pick");
     card.dataset.action = s.action;
     card.dataset.asset = s.asset;
+    const pickTag = s.is_top_pick ? ' <span class="badge top-pick-badge">★ best trade</span>' : "";
     card.innerHTML = `
-      <h2>${s.asset} <span class="badge ${s.action}">${s.action.replace("_", " ")}</span></h2>
+      <h2>${s.asset} <span class="badge ${s.action}">${s.action.replace("_", " ")}</span>${pickTag}</h2>
       ${LEGEND_HTML}
       <div class="charts">
         <div><div class="chart-title">Weekly (tide)</div><div class="chart chart-w"></div></div>
@@ -185,6 +208,20 @@ async function main() {
       `⚠ 6% RULE ACTIVE — monthly losses + open risk $${fmt(snapshot.guard.total_at_risk, 8)} ` +
       `≥ limit $${fmt(snapshot.guard.limit, 8)}. No new entries for the rest of the month.`;
     banner.classList.remove("hidden");
+  }
+
+  const pickBanner = document.getElementById("best-pick-banner");
+  const best = snapshot.top_pick
+    ? snapshot.signals.find((s) => s.asset === snapshot.top_pick)
+    : null;
+  if (best) {
+    pickBanner.innerHTML =
+      `★ Best trade — <strong>${best.asset}</strong> ` +
+      `<span class="badge ${best.action}">${best.action.replace("_", " ")}</span> · ` +
+      `score ${Math.round(best.quality_score * 100)}/100 · ` +
+      `R:R ${best.reward_risk.toFixed(2)} · entry ${fmt(best.entry)} · stop ${fmt(best.stop)} · ` +
+      `target ${fmt(best.target)}`;
+    pickBanner.classList.remove("hidden");
   }
 
   renderTable(snapshot);
