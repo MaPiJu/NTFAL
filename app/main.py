@@ -16,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 _APP_DIR = Path(__file__).parent
+_STATIC_DIR = _APP_DIR / "static"
 
 app = FastAPI(
     title="Elder Triple Screen Scanner",
@@ -28,6 +29,15 @@ templates = Jinja2Templates(directory=_APP_DIR / "templates")
 
 def snapshot_path() -> Path:
     return Path(os.environ.get("SNAPSHOT_PATH", "cache/snapshot.json"))
+
+
+def asset_version() -> str:
+    """Cache-busting tag = newest mtime of the CSS/JS, so a browser never serves
+    a stale dashboard.js against a freshly updated dashboard.html (which caused
+    shifted columns / missing Score after an update)."""
+    files = [_STATIC_DIR / "dashboard.css", _STATIC_DIR / "dashboard.js"]
+    mtimes = [int(f.stat().st_mtime) for f in files if f.exists()]
+    return str(max(mtimes)) if mtimes else "0"
 
 
 @app.get("/api/snapshot")
@@ -43,4 +53,4 @@ def api_snapshot() -> JSONResponse:
 
 @app.get("/", response_class=HTMLResponse)
 def dashboard(request: Request) -> HTMLResponse:
-    return templates.TemplateResponse(request, "dashboard.html")
+    return templates.TemplateResponse(request, "dashboard.html", {"v": asset_version()})

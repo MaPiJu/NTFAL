@@ -85,9 +85,32 @@ def test_downtrend_rally_goes_short():
     assert sig.entry == pytest.approx(prior_low - tick_size(prior_low))
     expected_stop = float(daily["high"].iloc[-2:].max()) + tick_size(prior_low)
     assert sig.stop == pytest.approx(expected_stop)
-    assert sig.target is not None
-    # in this steep synthetic fall, price is far below weekly value -> R:R flagged
+    # price is already far below the weekly value zone, so there is no value-based
+    # target *below* the entry: target/R:R are undefined and the setup is flagged
+    # (never a top pick) rather than inventing a target above the entry.
+    assert sig.target is None
+    assert sig.reward_risk is None
     assert sig.rr_ok is False
+    assert sig.quality_score is None
+    assert "no value target" in sig.reason
+
+
+def test_short_with_room_to_value_has_positive_target_and_rr():
+    # A mild rollover (weekly EMA still near price) leaves the value zone *below*
+    # the entry, so the short has a real, positive target and reward:risk — the
+    # opposite of the over-extended case above.
+    weekly = make_ohlcv(
+        [40 + 1.5 * i for i in range(30)] + [85 - 1.0 * i for i in range(1, 9)], freq="W"
+    )
+    daily = make_ohlcv([85 - 0.12 * i for i in range(60)] + [78.0])
+
+    sig = evaluate_asset("X", weekly, daily)
+
+    assert sig.action == "short"
+    assert sig.daily_impulse != "green"  # not vetoed
+    assert sig.target is not None and sig.target < sig.entry  # valid downside target
+    assert sig.reward_risk is not None and sig.reward_risk > 0
+    assert sig.quality_score is not None
 
 
 def test_downtrend_without_rally_stands_aside():

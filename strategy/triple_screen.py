@@ -142,8 +142,13 @@ def weekly_channel(weekly: pd.DataFrame, span: int = EMA_FAST) -> tuple[float, f
 
 def _long_levels(
     weekly: pd.DataFrame, daily: pd.DataFrame
-) -> tuple[float, float | None, float, float]:
-    """(entry, entry_limit, stop, target) for a long setup."""
+) -> tuple[float, float | None, float, float | None]:
+    """(entry, entry_limit, stop, target) for a long setup.
+
+    `target` is None when price already trades above both the weekly value zone
+    and the upper channel — there is then no value-based target *above* the entry,
+    so the reward is undefined (the move is over-extended) rather than invented.
+    """
     prior_high = float(daily["high"].iloc[-1])
     tick = tick_size(prior_high)
     entry = prior_high + tick  # buy-stop 1 tick above prior day's high
@@ -153,19 +158,31 @@ def _long_levels(
 
     stop = float(daily["low"].iloc[-2:].min()) - tick  # daily stop below recent lows
 
-    # Target: weekly value zone (between EMA13 and EMA26); if price already
-    # trades above value, fall back to the weekly upper channel.
+    # Target: weekly value zone (between EMA13 and EMA26); if price already trades
+    # above value, fall back to the weekly upper channel. A valid long target must
+    # sit *above* the entry — otherwise there is no measurable reward.
     e13 = float(ema(weekly["close"], EMA_FAST).iloc[-1])
     e26 = float(ema(weekly["close"], EMA_SLOW).iloc[-1])
     value_high = max(e13, e26)
-    target = value_high if value_high > entry else weekly_channel(weekly)[0]
+    if value_high > entry:
+        target: float | None = value_high
+    else:
+        channel_high = weekly_channel(weekly)[0]
+        target = channel_high if channel_high > entry else None
     return entry, limit, stop, target
 
 
 def _short_levels(
     weekly: pd.DataFrame, daily: pd.DataFrame
-) -> tuple[float, float | None, float, float]:
-    """(entry, entry_limit, stop, target) for a short setup."""
+) -> tuple[float, float | None, float, float | None]:
+    """(entry, entry_limit, stop, target) for a short setup.
+
+    `target` is None when price already trades below both the weekly value zone
+    and the lower channel — there is then no value-based target *below* the entry,
+    so the reward is undefined (the down-move is over-extended) rather than a
+    nonsensical target above the entry (which produced the negative R:R / target
+    artifacts on deeply sold-off coins).
+    """
     prior_low = float(daily["low"].iloc[-1])
     tick = tick_size(prior_low)
     entry = prior_low - tick  # sell-stop 1 tick below prior day's low
@@ -175,10 +192,15 @@ def _short_levels(
 
     stop = float(daily["high"].iloc[-2:].max()) + tick
 
+    # A valid short target must sit *below* the entry — otherwise no reward.
     e13 = float(ema(weekly["close"], EMA_FAST).iloc[-1])
     e26 = float(ema(weekly["close"], EMA_SLOW).iloc[-1])
     value_low = min(e13, e26)
-    target = value_low if value_low < entry else weekly_channel(weekly)[1]
+    if value_low < entry:
+        target: float | None = value_low
+    else:
+        channel_low = weekly_channel(weekly)[1]
+        target = channel_low if channel_low < entry else None
     return entry, limit, stop, target
 
 
@@ -299,21 +321,31 @@ def evaluate_asset(asset: str, weekly: pd.DataFrame, daily: pd.DataFrame) -> Sig
     entry = limit = stop = target = rr = None
     if candidate == "long":
         entry, limit, stop, target = _long_levels(weekly, daily)
-        if entry > stop:
+        if target is not None and entry > stop:
             rr = (target - entry) / (entry - stop)
+        elif target is None:
+            reason += (
+                " — price already above the weekly value zone, no value target (reward unclear)"
+            )
     elif candidate == "short":
         entry, limit, stop, target = _short_levels(weekly, daily)
-        if stop > entry:
+        if target is not None and stop > entry:
             rr = (entry - target) / (stop - entry)
+        elif target is None:
+            reason += (
+                " — price already below the weekly value zone, no value target (reward unclear)"
+            )
 
+    # Quality score needs a measurable reward; without a target there's no R:R to rank.
     tide_strength = weekly_slope_strength(weekly["close"])
     score = None
     pull = 0.0
     if candidate in ("long", "short"):
         pull = pullback_quality(daily)
-        score = compute_quality_score(
-            rr, impulse_confirmation(candidate, w_imp, d_imp), tide_strength, pull
-        )
+        if rr is not None:
+            score = compute_quality_score(
+                rr, impulse_confirmation(candidate, w_imp, d_imp), tide_strength, pull
+            )
 
     return Signal(
         asset=asset,
