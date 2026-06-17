@@ -1,0 +1,225 @@
+"""Elder trade management for an OPEN position (book ch. on exits & the Impulse system).
+
+The Triple Screen tells you *when to enter*; this module answers the operator's
+other daily question — "I'm already in this trade, do I hold, take profits, or
+get out?" — using only Elder's own exit tools, no new indicators:
+
+- **Impulse censorship, used for exits.** Elder's Impulse system is at its best as
+  a censorship system. While you are long it *forbids selling* only as long as the
+  Impulse is **green**; the moment green is lost (the bar turns **blue**) the
+  prohibition is lifted — that is your *permission to take profits*. A **red**
+  Impulse goes further: momentum has actively reversed → get out. Mirror image for
+  shorts (red permits holding, blue lifts it, green means reverse → exit).
+- **Premise invalidated ("the trade no longer earns its risk").** If the weekly
+  tide — the reason you took the trade — flips against the position, the strategic
+  case is gone → exit.
+- **Profit target.** Take profits when price reaches the weekly value zone
+  (between EMA13 and EMA26) or, if price already trades beyond value, the weekly
+  channel — exactly the targets the entry logic projects.
+- **Trailing stop (SafeZone).** Suggest tightening the protective stop behind the
+  recent daily extreme by the average penetration of the fast EMA, ratcheted to at
+  least break-even once the trade is in profit. Never widen risk.
+
+Verdict precedence: EXIT (premise dead) > TAKE_PROFITS (target hit or Impulse
+permission while in profit) > HOLD. As everywhere in this project the output is
+informational only — a human decides and places any order manually.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from dataclasses import dataclass
+from typing import Any, Literal
+
+import pandas as pd
+
+from indicators import ema, impulse_color
+from strategy.triple_screen import (
+    EMA_FAST,
+    EMA_SLOW,
+    Trend,
+    average_penetration,
+    tick_size,
+    weekly_channel,
+    weekly_trend,
+)
+
+Side = Literal["long", "short"]
+Verdict = Literal["hold", "take_profits", "exit"]
+
+
+@dataclass(frozen=True)
+class OpenPosition:
+    asset: str
+    side: Side
+    entry: float
+    size: float  # absolute units of the asset (always positive)
+
+
+@dataclass(frozen=True)
+class TradeManagement:
+    asset: str
+    side: Side
+    entry: float
+    size: float
+    current_price: float
+    unrealized_pnl: float  # in quote currency (USD): (price - entry) * size, signed by side
+    return_pct: float  # signed return in the trade's favor: long (p/e - 1), short (1 - p/e)
+    weekly_trend: Trend
+    weekly_impulse: str
+    daily_impulse: str
+    in_profit: bool
+    target: float  # weekly value-zone edge (or channel) in the trade's direction
+    target_reached: bool
+    suggested_stop: float  # SafeZone trailing stop, ratcheted to >= break-even in profit
+    verdict: Verdict
+    reasons: list[str]
+
+
+def parse_positions(state: Mapping[str, Any]) -> list[OpenPosition]:
+    """Extract open perp positions from a Hyperliquid `clearinghouseState` payload.
+
+    `szi` is the signed position size (negative = short); a zero size means the
+    position is closed and is skipped. Read-only: this only *reads* public account
+    state — no key, no signing, no order is ever involved.
+    """
+    out: list[OpenPosition] = []
+    for ap in state.get("assetPositions", []):
+        p = ap.get("position") or {}
+        try:
+            szi = float(p.get("szi", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if szi == 0:
+            continue
+        out.append(
+            OpenPosition(
+                asset=str(p["coin"]),
+                side="long" if szi > 0 else "short",
+                entry=float(p["entryPx"]),
+                size=abs(szi),
+            )
+        )
+    return out
+
+
+def _profit_target(pos: OpenPosition, weekly: pd.DataFrame) -> float:
+    """Weekly value-zone edge in the trade's direction, or the weekly channel
+    band when price already trades beyond value (mirrors the entry targets)."""
+    e13 = float(ema(weekly["close"], EMA_FAST).iloc[-1])
+    e26 = float(ema(weekly["close"], EMA_SLOW).iloc[-1])
+    if pos.side == "long":
+        value_edge = max(e13, e26)
+        return value_edge if value_edge > pos.entry else weekly_channel(weekly)[0]
+    value_edge = min(e13, e26)
+    return value_edge if value_edge < pos.entry else weekly_channel(weekly)[1]
+
+
+def safezone_stop(pos: OpenPosition, daily: pd.DataFrame, *, in_profit: bool) -> float:
+    """Elder SafeZone-style trailing stop: place it behind the recent daily extreme
+    by the average EMA penetration, ratcheted to break-even once the trade profits.
+
+    Long: below the lower of the last two daily lows, minus the average downside
+    penetration of EMA13; short: above the higher of the last two highs, plus the
+    average upside penetration. Reuses the project's `average_penetration` (the same
+    basis the entry logic uses) so no new indicator is introduced.
+    """
+    if pos.side == "long":
+        base = float(daily["low"].iloc[-2:].min())
+        pen = average_penetration(daily, "down")
+        offset = pen if pen is not None else tick_size(base)
+        stop = base - offset
+        return max(stop, pos.entry) if in_profit else stop
+    base = float(daily["high"].iloc[-2:].max())
+    pen = average_penetration(daily, "up")
+    offset = pen if pen is not None else tick_size(base)
+    stop = base + offset
+    return min(stop, pos.entry) if in_profit else stop
+
+
+def assess_position(
+    pos: OpenPosition, weekly: pd.DataFrame, daily: pd.DataFrame
+) -> TradeManagement:
+    """Elder exit verdict for one open position from completed weekly + daily bars.
+
+    `weekly`/`daily` are OHLCV frames of completed bars (oldest first), the same
+    shape the Triple Screen consumes.
+    """
+    w_imp = str(impulse_color(weekly["close"]).iloc[-1])
+    d_imp = str(impulse_color(daily["close"]).iloc[-1])
+    trend = weekly_trend(weekly["close"])
+    price = float(daily["close"].iloc[-1])
+
+    direction = 1.0 if pos.side == "long" else -1.0
+    pnl = (price - pos.entry) * pos.size * direction
+    return_pct = (price / pos.entry - 1.0) * direction if pos.entry else 0.0
+    in_profit = pnl > 0
+
+    target = _profit_target(pos, weekly)
+    target_reached = price >= target if pos.side == "long" else price <= target
+    suggested_stop = safezone_stop(pos, daily, in_profit=in_profit)
+
+    favorable_trend: Trend = "up" if pos.side == "long" else "down"
+    favorable_imp = "green" if pos.side == "long" else "red"
+    adverse_imp = "red" if pos.side == "long" else "green"
+
+    reasons: list[str] = []
+    verdict: Verdict = "hold"
+
+    # --- EXIT: the strategic premise is dead -------------------------------
+    if trend not in (favorable_trend, "neutral"):
+        verdict = "exit"
+        reasons.append(
+            f"weekly tide flipped to {trend} — the reason for this {pos.side} is gone; exit"
+        )
+    if w_imp == adverse_imp or d_imp == adverse_imp:
+        verdict = "exit"
+        screen = "weekly" if w_imp == adverse_imp else "daily"
+        reasons.append(
+            f"{screen} Impulse turned {adverse_imp} — momentum reversed against the "
+            f"{pos.side}; exit"
+        )
+
+    # --- TAKE PROFITS: target hit, or Impulse permission while in profit ----
+    if verdict != "exit":
+        if target_reached:
+            verdict = "take_profits"
+            reasons.append(
+                f"price {price:.6g} reached the weekly value/channel target "
+                f"{target:.6g} — take profits"
+            )
+        # Permission to take profits once NEITHER screen still shows favorable
+        # momentum (the green/red is gone on both the tide and the wave) and the
+        # trade is in profit. While even one screen keeps its color, hold.
+        lost_favor = w_imp != favorable_imp and d_imp != favorable_imp
+        if lost_favor and in_profit:
+            verdict = "take_profits"
+            reasons.append(
+                f"neither weekly ({w_imp}) nor daily ({d_imp}) Impulse is still "
+                f"{favorable_imp} — momentum stalling; permission to take profits"
+            )
+
+    if not reasons:
+        reasons.append(
+            "weekly tide and Impulse still favor the trade — hold; trail the stop to "
+            f"{suggested_stop:.6g}"
+        )
+
+    return TradeManagement(
+        asset=pos.asset,
+        side=pos.side,
+        entry=pos.entry,
+        size=pos.size,
+        current_price=price,
+        unrealized_pnl=pnl,
+        return_pct=return_pct,
+        weekly_trend=trend,
+        weekly_impulse=w_imp,
+        daily_impulse=d_imp,
+        in_profit=in_profit,
+        target=target,
+        target_reached=target_reached,
+        suggested_stop=suggested_stop,
+        verdict=verdict,
+        reasons=reasons,
+    )

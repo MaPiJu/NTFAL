@@ -40,9 +40,18 @@ class RiskConfig:
 
 
 @dataclass(frozen=True)
+class PositionsConfig:
+    # Public wallet address used to read OPEN positions from Hyperliquid's public
+    # clearinghouseState info endpoint. Read-only — no private key, no signing.
+    # Empty string disables open-trade management.
+    address: str
+
+
+@dataclass(frozen=True)
 class Config:
     scanner: ScannerConfig
     risk: RiskConfig
+    positions: PositionsConfig
     cache_dir: Path
 
 
@@ -52,9 +61,13 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> Config:
 
     s = raw["scanner"]
     r = raw["risk"]
+    p = raw.get("positions", {})
 
     equity = float(os.environ.get("EQUITY", r["equity"]))
     risk_pct = float(os.environ.get("RISK_PCT", r["risk_pct"]))
+    # A public address is not a secret, but allow an env override so it need not
+    # be committed (see .env.example).
+    address = str(os.environ.get("HL_ADDRESS", p.get("address", ""))).strip()
 
     return Config(
         scanner=ScannerConfig(
@@ -71,5 +84,6 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> Config:
             month_realized_losses=float(r.get("month_realized_losses", 0.0)),
             open_trade_risk=float(r.get("open_trade_risk", 0.0)),
         ),
+        positions=PositionsConfig(address=address),
         cache_dir=Path(raw.get("cache", {}).get("dir", "cache")),
     )

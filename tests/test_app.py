@@ -8,11 +8,11 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.pipeline import build_snapshot
-from config import Config, RiskConfig, ScannerConfig
-from tests.conftest import make_client
+from config import Config, PositionsConfig, RiskConfig, ScannerConfig
+from tests.conftest import make_clearinghouse_state, make_client
 
 
-def make_config(cache_dir, watchlist=("BTC",), **risk_overrides) -> Config:
+def make_config(cache_dir, watchlist=("BTC",), address="", **risk_overrides) -> Config:
     risk = {
         "equity": 10_000.0,
         "risk_pct": 0.01,
@@ -29,6 +29,7 @@ def make_config(cache_dir, watchlist=("BTC",), **risk_overrides) -> Config:
             lookback_days=400,
         ),
         risk=RiskConfig(**risk),
+        positions=PositionsConfig(address=address),
         cache_dir=cache_dir,
     )
 
@@ -99,6 +100,47 @@ def test_explicit_tradfi_coin_in_watchlist(tmp_path, btc_fixtures):
     client = make_client(fixtures, tmp_path)
     snapshot = build_snapshot(cfg, client)
     assert [s["asset"] for s in snapshot["signals"]] == ["BTC", "xyz:GOLD"]
+
+
+def test_no_address_means_no_positions(tmp_path, btc_fixtures):
+    cfg = make_config(tmp_path)
+    client = make_client(btc_fixtures, tmp_path)
+    snapshot = build_snapshot(cfg, client)
+    assert snapshot["positions"] == []
+    assert snapshot["position_address"] is None
+
+
+def test_open_position_gets_management_verdict(tmp_path, btc_fixtures):
+    addr = "0x" + "ab" * 20
+    cfg = make_config(tmp_path, address=addr)
+    state = make_clearinghouse_state([{"coin": "BTC", "szi": "0.5", "entryPx": "50000.0"}])
+    client = make_client(btc_fixtures, tmp_path, clearinghouse_states={addr: state})
+    snapshot = build_snapshot(cfg, client)
+
+    assert snapshot["position_address"].startswith("0xabab") and "…" in snapshot["position_address"]
+    (pos,) = snapshot["positions"]
+    assert pos["asset"] == "BTC"
+    assert pos["side"] == "long"
+    assert pos["entry"] == 50000.0
+    assert pos["verdict"] in {"hold", "take_profits", "exit"}
+    assert pos["reasons"]
+
+
+def test_held_coin_outside_watchlist_is_fetched_on_demand(tmp_path, btc_fixtures):
+    # The watchlist scans nothing, yet a held coin still gets its candles fetched
+    # and a management verdict produced.
+    fixtures = dict(btc_fixtures)
+    fixtures[("ETH", "1w")] = btc_fixtures[("BTC", "1w")]
+    fixtures[("ETH", "1d")] = btc_fixtures[("BTC", "1d")]
+    addr = "0x" + "cd" * 20
+    cfg = make_config(tmp_path, watchlist=("BTC",), address=addr)
+    state = make_clearinghouse_state([{"coin": "ETH", "szi": "-1.0", "entryPx": "4000.0"}])
+    client = make_client(fixtures, tmp_path, clearinghouse_states={addr: state})
+    snapshot = build_snapshot(cfg, client)
+
+    assert [s["asset"] for s in snapshot["signals"]] == ["BTC"]  # ETH not scanned
+    (pos,) = snapshot["positions"]
+    assert pos["asset"] == "ETH" and pos["side"] == "short"
 
 
 def test_snapshot_reports_tripped_guard(tmp_path, btc_fixtures):

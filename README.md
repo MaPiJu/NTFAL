@@ -28,6 +28,37 @@ charts so the operator can make a **discretionary** entry decision and place ord
 - **Risk:** 2% Rule (Iron Triangle sizing, default 1% risk per trade, hard cap 2%) and
   the 6% monthly guard that blocks all new entries once monthly losses + open risk reach
   6% of the month-start equity.
+- **Trade management (open positions):** for trades you already hold, Elder's exit tools
+  give a daily verdict — **hold**, **take profits**, or **exit** — from the same weekly +
+  daily screens (see below).
+
+## Managing open trades
+
+The Triple Screen says *when to enter*; this answers the operator's other daily
+question — *"I already hold this, do I hold, take profits, or get out?"* If you set a
+**public** wallet address in `config.toml` (`[positions].address`) the tool reads your
+**open positions** from Hyperliquid's public `clearinghouseState` info endpoint — a
+read-only account lookup, like a block explorer. **No private key, no signing, no
+order** is ever involved, and you can leave the field empty to disable the feature.
+
+For each open position it applies only Elder's own exit logic (no new indicators):
+
+- **Impulse used for exits.** While long you may keep holding as long as the Impulse is
+  **green**; once *neither* the weekly nor the daily Impulse is green any more (both have
+  gone **blue**) the prohibition against selling is lifted → **permission to take
+  profits** (only flagged while in profit). A **red** Impulse goes further — momentum has
+  reversed → **exit**. Mirror image for shorts.
+- **Premise invalidated.** If the **weekly tide flips** against the position, the reason
+  you took the trade is gone → **exit** ("the trade no longer earns its risk").
+- **Profit target.** When price reaches the **weekly value zone** (EMA13–EMA26) or, if it
+  already trades beyond value, the weekly channel → **take profits**.
+- **Trailing stop (SafeZone).** A suggested stop tucked behind the recent daily extreme by
+  the average EMA penetration, ratcheted to at least break-even once the trade is in profit.
+
+Verdict precedence is **exit > take profits > hold**. The result appears as an "Open
+positions" table at the top of the dashboard and as a panel on the held asset's card, and
+is printed by `run.py`. As everywhere, it is **informational only** — you decide and place
+any order manually.
 
 Indicators are exactly the ones in the spec — EMA13/EMA26, MACD-Histogram(12,26,9),
 2-EMA Force Index (EMA-13 FI shown for context), Impulse color. Nothing else.
@@ -95,8 +126,12 @@ Edit `config.toml`:
   manual bookkeeping inputs for the 6% Rule (the tool is read-only and does not track
   your trades)
 
-`EQUITY` and `RISK_PCT` can also be overridden via environment variables / `.env`
-(see `.env.example`). No secrets are needed anywhere.
+- `positions.address` — **public** wallet address (0x…) used to read your open positions
+  for trade management. Read-only: a public address only, never a private key; nothing is
+  signed and no order is placed. Empty disables trade management.
+
+`EQUITY`, `RISK_PCT`, and `HL_ADDRESS` can also be overridden via environment variables /
+`.env` (see `.env.example`). No secrets are needed anywhere.
 
 ## Development
 

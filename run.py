@@ -82,6 +82,48 @@ def print_signals_table(snapshot: dict[str, Any]) -> None:
     print("\nInformational only — not financial advice; no orders are placed.\n")
 
 
+VERDICT_LABEL = {"hold": "HOLD", "take_profits": "TAKE PROFITS", "exit": "EXIT"}
+
+
+def print_positions_table(snapshot: dict[str, Any]) -> None:
+    """Elder trade-management verdict for each OPEN position (read-only)."""
+    positions = snapshot.get("positions") or []
+    if not snapshot.get("position_address") and not positions:
+        return  # trade management disabled (no public address configured)
+
+    print(
+        f"\nOpen positions — Elder trade management  (address {snapshot.get('position_address')})"
+    )
+    if not positions:
+        print("  (none open, or held coins are too new to evaluate)\n")
+        return
+
+    def num(x: float | None) -> str:
+        return f"{x:,.6g}" if x is not None else "—"
+
+    header = (
+        f"{'ASSET':<14} {'SIDE':<6} {'ENTRY':>12} {'PRICE':>12} {'PnL':>12} "
+        f"{'RET%':>8} {'IMP W/D':<11} {'TARGET':>12} {'TRAIL STOP':>12} {'VERDICT':<13}"
+    )
+    print("\n" + header)
+    print("-" * len(header))
+    for p in positions:
+        ret = f"{p['return_pct'] * 100:+.1f}%"
+        target = num(p["target"]) + ("✓" if p["target_reached"] else "")
+        verdict = VERDICT_LABEL.get(p["verdict"], p["verdict"])
+        print(
+            f"{p['asset']:<14} {p['side']:<6} {num(p['entry']):>12} {num(p['current_price']):>12} "
+            f"{p['unrealized_pnl']:>12,.2f} {ret:>8} "
+            f"{p['weekly_impulse'] + '/' + p['daily_impulse']:<11} "
+            f"{target:>12} {num(p['suggested_stop']):>12} {verdict:<13}"
+        )
+    print()
+    for p in positions:
+        for reason in p["reasons"]:
+            print(f"  {p['asset']} ({p['side']}): {reason}")
+    print()
+
+
 def do_refresh(cfg: Config) -> dict[str, Any]:
     with HyperliquidClient(cache_dir=cfg.cache_dir) as client:
         snapshot = build_snapshot(
@@ -92,6 +134,7 @@ def do_refresh(cfg: Config) -> dict[str, Any]:
     out.write_text(json.dumps(snapshot))
     print(f"snapshot written to {out}")
     print_signals_table(snapshot)
+    print_positions_table(snapshot)
     return snapshot
 
 

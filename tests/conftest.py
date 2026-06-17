@@ -40,10 +40,19 @@ def load_fixture(name: str) -> list[dict]:
     return json.loads((FIXTURES / name).read_text())
 
 
+def make_clearinghouse_state(positions: list[dict]) -> dict:
+    """A minimal clearinghouseState payload from (coin, szi, entryPx) dicts."""
+    return {
+        "assetPositions": [{"type": "oneWay", "position": p} for p in positions],
+        "marginSummary": {"accountValue": "0"},
+    }
+
+
 def make_client(
     candle_fixtures: dict[tuple[str, str], list[dict]],
     cache_dir: Path,
     requests_log: list[dict] | None = None,
+    clearinghouse_states: dict[str, dict] | None = None,
 ) -> HyperliquidClient:
     """Client backed by httpx.MockTransport serving recorded fixtures."""
 
@@ -61,6 +70,9 @@ def make_client(
             candles = candle_fixtures.get((req["coin"], req["interval"]), [])
             served = [c for c in candles if req["startTime"] <= c["t"] <= req["endTime"]]
             return httpx.Response(200, json=served)
+        if payload["type"] == "clearinghouseState":
+            states = clearinghouse_states or {}
+            return httpx.Response(200, json=states.get(payload["user"], {"assetPositions": []}))
         return httpx.Response(400, json={"error": "unexpected request"})
 
     http = httpx.Client(transport=httpx.MockTransport(handler))
