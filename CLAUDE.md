@@ -11,7 +11,9 @@ orders **manually**.
 
 ## Hard constraints (never violate)
 - **No order execution, no signing, no private keys.** Use only Hyperliquid's *public*
-  `info` endpoint (`candleSnapshot`, `meta`). The codebase must contain no wallet,
+  `info` endpoint (`candleSnapshot`, `meta`, and `clearinghouseState` — the last is a
+  read-only account lookup of *open positions* for a **public** address, like a block
+  explorer; it takes no key and signs nothing). The codebase must contain no private key,
   no exchange API key, no `exchange`/`order`/`signing` code path.
 - **No auto-trading loop.** Output is informational only; a human decides and executes.
 - **Don't invent indicators.** "Less is more": implement only the indicators listed in
@@ -48,6 +50,22 @@ Triple Screen decision logic:
 longs are forbidden; if weekly **or** daily Impulse is **green**, shorts are forbidden.
 The Impulse system says what *not* to do — it filters the table above.
 
+## Trade-management spec (open positions — exits)
+The Triple Screen decides *entries*; managing an already-open position uses Elder's own
+exit tools only — **no new indicators**. Per held position, produce a verdict
+`hold | take_profits | exit` from the same weekly+daily bars. Precedence
+**exit > take_profits > hold**:
+- **EXIT** if the **weekly tide flips** against the position (the strategic premise is
+  dead), or if **either** Impulse turns the *adverse* color (red for a long, green for a
+  short — momentum reversed).
+- **TAKE_PROFITS** if price reaches the profit target (weekly value zone EMA13–EMA26, or
+  the weekly channel when price already trades beyond value), **or** when *neither* screen
+  still shows the favorable Impulse color (both blue) **and** the trade is in profit —
+  Elder's "permission to take profits" once the green/red is gone.
+- **HOLD** otherwise; always surface a **SafeZone trailing-stop** suggestion (behind the
+  recent daily extreme by the average EMA penetration, ratcheted to ≥ break-even in profit).
+Output is informational only; a human exits manually.
+
 "Average penetration": over the last ~4–6 weeks, measure how far pullbacks pierce below
 (uptrend) / above (downtrend) the fast EMA; average those penetrations; project tomorrow's
 EMA (`today_EMA + (today_EMA − yesterday_EMA)`) and offset by that average to set the limit.
@@ -63,11 +81,14 @@ EMA (`today_EMA + (today_EMA − yesterday_EMA)`) and offset by that average to 
 
 ## Architecture
 - `data/hyperliquid.py` — public `info` client (`httpx`); `candleSnapshot` per coin/interval;
-  validate watchlist against the perp `meta` universe; cache OHLCV to parquet/SQLite;
-  parse string OHLCV fields to float; respect the 5000-candle limit.
+  validate watchlist against the perp `meta` universe; `clearinghouseState` open positions
+  for a public address (read-only); cache OHLCV to parquet/SQLite; parse string OHLCV fields
+  to float; respect the 5000-candle limit.
 - `indicators/` — pure functions on pandas DataFrames (EMA, MACD-Hist, Force Index, Impulse color).
 - `strategy/triple_screen.py` — combines screens → per-asset `Signal` (action, reason,
   weekly/daily impulse, suggested entry/stop/target, reward:risk).
+- `strategy/trade_management.py` — Elder exit logic for **open positions** → per-position
+  `TradeManagement` (verdict hold/take_profits/exit, reasons, target, SafeZone trailing stop).
 - `risk/sizing.py` — 2% Iron Triangle + 6% monthly guard.
 - `app/` — **FastAPI** server rendering a dashboard: a daily **signals table** at top +
   one card per asset with **weekly and daily charts** using **TradingView Lightweight

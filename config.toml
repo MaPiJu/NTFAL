@@ -31,5 +31,14 @@ equity_at_month_start = 10000.0
 month_realized_losses = 0.0
 open_trade_risk = 0.0
 
+[positions]
+# Public wallet address (0x…) used to READ your open Hyperliquid positions via
+# the public `clearinghouseState` info endpoint, so the tool can apply Elder's
+# exit analysis (hold / take profits / exit) to trades you already hold.
+# This is READ-ONLY: a public address only, never a private key — nothing is
+# signed and no order is ever placed. Leave empty to disable trade management.
+# May also be set via the HL_ADDRESS environment variable (see .env.example).
+address = ""
+
 [cache]
 dir = "cache"

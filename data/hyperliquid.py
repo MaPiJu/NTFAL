@@ -1,8 +1,9 @@
 """Read-only client for Hyperliquid's public `info` endpoint.
 
 Hard constraint (see CLAUDE.md): this module — and the whole project — only
-POSTs the public `meta` and `candleSnapshot` info requests. There is no
-wallet, no signing, no order path anywhere.
+POSTs *public* info requests: `meta`, `candleSnapshot`, and `clearinghouseState`
+(open positions for a public address — a read-only account lookup, like a block
+explorer). There is no wallet, no private key, no signing, no order path anywhere.
 """
 
 from __future__ import annotations
@@ -158,6 +159,22 @@ class HyperliquidClient:
             for name, entry in sorted(universe.items())
             if not entry.get("isDelisted", False)
         }
+
+    # -- account (read-only) ------------------------------------------------
+
+    def clearinghouse_state(self, address: str) -> dict[str, Any]:
+        """Public `clearinghouseState` for a wallet address: open positions + margin.
+
+        This is a read-only account lookup against the public info endpoint — it
+        takes only a public address, never a private key, and signs nothing. Used
+        to surface the operator's OPEN positions for Elder trade management.
+        """
+        if not address:
+            raise HyperliquidError("a public wallet address is required")
+        state = self._info({"type": "clearinghouseState", "user": address})
+        if not isinstance(state, dict):
+            raise HyperliquidError(f"unexpected clearinghouseState payload for {address}")
+        return state
 
     # -- candles ------------------------------------------------------------
 

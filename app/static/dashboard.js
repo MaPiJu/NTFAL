@@ -78,6 +78,80 @@ function renderTable(snapshot) {
   }
 }
 
+// --- Open positions (Elder trade management) -----------------------------
+
+const VERDICT_LABEL = { hold: "hold", take_profits: "take profits", exit: "exit" };
+
+function positionsByAsset(snapshot) {
+  const map = new Map();
+  for (const p of snapshot.positions || []) map.set(p.asset, p);
+  return map;
+}
+
+function verdictBadge(verdict) {
+  return `<span class="badge verdict-${verdict}">${VERDICT_LABEL[verdict] || verdict}</span>`;
+}
+
+function renderPositions(snapshot) {
+  const section = document.getElementById("positions");
+  const positions = snapshot.positions || [];
+  if (!snapshot.position_address && positions.length === 0) return; // disabled
+  section.classList.remove("hidden");
+
+  const sub = document.getElementById("positions-sub");
+  sub.textContent = snapshot.position_address
+    ? `${positions.length} open · ${snapshot.position_address}`
+    : "";
+
+  const tbody = document.querySelector("#positions-table tbody");
+  tbody.innerHTML = "";
+  if (positions.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="11" class="reason">No open positions (or held coins are too new to evaluate).</td></tr>`;
+    return;
+  }
+  // Most urgent first: exit, then take profits, then hold.
+  const order = { exit: 0, take_profits: 1, hold: 2 };
+  for (const p of [...positions].sort((a, b) => order[a.verdict] - order[b.verdict])) {
+    const pnlClass = p.unrealized_pnl >= 0 ? "rr-good" : "rr-bad";
+    const ret = `${(p.return_pct * 100 >= 0 ? "+" : "") + (p.return_pct * 100).toFixed(1)}%`;
+    const target = `${fmt(p.target)}${p.target_reached ? ' <span class="hit">✓</span>' : ""}`;
+    const row = document.createElement("tr");
+    row.dataset.verdict = p.verdict;
+    row.innerHTML = `
+      <td><strong>${p.asset}</strong></td>
+      <td><span class="badge ${p.side === "long" ? "long" : "short"}">${p.side}</span></td>
+      <td>${fmt(p.entry)}</td>
+      <td>${fmt(p.current_price)}</td>
+      <td class="${pnlClass}">${fmt(p.unrealized_pnl, 6)}</td>
+      <td class="${pnlClass}">${ret}</td>
+      <td>${impulseDot(p.weekly_impulse)} / ${impulseDot(p.daily_impulse)}</td>
+      <td>${target}</td>
+      <td>${fmt(p.suggested_stop)}</td>
+      <td>${verdictBadge(p.verdict)}</td>
+      <td class="reason">${p.reasons.join(" · ")}</td>`;
+    tbody.appendChild(row);
+  }
+}
+
+function positionPanelHTML(p) {
+  const ret = `${(p.return_pct * 100 >= 0 ? "+" : "") + (p.return_pct * 100).toFixed(1)}%`;
+  return `
+    <div class="position-panel verdict-${p.verdict}">
+      <div class="position-head">
+        <span class="badge ${p.side === "long" ? "long" : "short"}">${p.side}</span>
+        Open position — Elder management: ${verdictBadge(p.verdict)}
+      </div>
+      <div class="position-grid">
+        <span>Entry <b>${fmt(p.entry)}</b></span>
+        <span>Price <b>${fmt(p.current_price)}</b></span>
+        <span>PnL <b>${fmt(p.unrealized_pnl, 6)} (${ret})</b></span>
+        <span>Target <b>${fmt(p.target)}${p.target_reached ? " ✓" : ""}</b></span>
+        <span>Trail stop <b>${fmt(p.suggested_stop)}</b></span>
+      </div>
+      <ul class="position-reasons">${p.reasons.map((r) => `<li>${r}</li>`).join("")}</ul>
+    </div>`;
+}
+
 function renderChart(container, data) {
   const chart = createChart(container, CHART_OPTS);
 
@@ -143,15 +217,21 @@ const LEGEND_HTML = `
 function renderCards(snapshot) {
   const cards = document.getElementById("cards");
   cards.innerHTML = "";
+  const positions = positionsByAsset(snapshot);
   for (const s of rankedSignals(snapshot)) {
     const card = document.createElement("section");
     card.className = "card";
     if (s.is_top_pick) card.classList.add("top-pick");
+    const pos = positions.get(s.asset);
+    if (pos) card.classList.add("has-position");
     card.dataset.action = s.action;
     card.dataset.asset = s.asset;
+    card.dataset.haspos = pos ? "1" : "";
     const pickTag = s.is_top_pick ? ' <span class="badge top-pick-badge">★ best trade</span>' : "";
+    const posTag = pos ? ' <span class="badge held">● held</span>' : "";
     card.innerHTML = `
-      <h2>${s.asset} <span class="badge ${s.action}">${s.action.replace("_", " ")}</span>${pickTag}</h2>
+      <h2>${s.asset} <span class="badge ${s.action}">${s.action.replace("_", " ")}</span>${pickTag}${posTag}</h2>
+      ${pos ? positionPanelHTML(pos) : ""}
       ${LEGEND_HTML}
       <div class="charts">
         <div><div class="chart-title">Weekly (tide)</div><div class="chart chart-w"></div></div>
@@ -180,7 +260,8 @@ function applyStandAsideFilter(snapshot) {
     if (out) hidden += 1;
   }
   for (const card of document.querySelectorAll("#cards .card")) {
-    const out = hide && card.dataset.action === "stand_aside";
+    // Always keep cards for held positions visible, even when standing aside.
+    const out = hide && card.dataset.action === "stand_aside" && !card.dataset.haspos;
     card.classList.toggle("hidden", out);
     if (!out) ensureChartsRendered(card, snapshot);
   }
@@ -224,6 +305,7 @@ async function main() {
     pickBanner.classList.remove("hidden");
   }
 
+  renderPositions(snapshot);
   renderTable(snapshot);
   renderCards(snapshot);
   applyStandAsideFilter(snapshot);

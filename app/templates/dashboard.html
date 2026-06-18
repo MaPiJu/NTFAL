@@ -17,6 +17,25 @@
   <div id="best-pick-banner" class="best-pick-banner hidden"></div>
 
   <main>
+    <section id="positions" class="hidden">
+      <h2 class="section-title">Open positions <span class="sub" id="positions-sub"></span></h2>
+      <p class="section-note">
+        Elder trade management for trades you already hold — read-only, fetched from
+        your public address. <strong>Verdict is informational only</strong>; you decide
+        and place any order manually.
+      </p>
+      <table id="positions-table">
+        <thead>
+          <tr>
+            <th>Asset</th><th>Side</th><th>Entry</th><th>Current price</th>
+            <th>Unrealized PnL</th><th>Return</th><th>Impulse W/D</th>
+            <th>Target</th><th>Trail stop</th><th>Verdict</th><th>Why</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
     <section id="signals">
       <div class="toolbar">
         <label class="filter">

@@ -15,9 +15,10 @@ from typing import Any
 import pandas as pd
 
 from config import WATCHLIST_ALL, Config
-from data.hyperliquid import HyperliquidClient, completed_bars
+from data.hyperliquid import HyperliquidClient, HyperliquidError, completed_bars
 from indicators import ema, force_index, impulse_color, macd_histogram
 from risk.sizing import position_size, six_percent_guard
+from strategy.trade_management import OpenPosition, assess_position, parse_positions
 from strategy.triple_screen import EMA_FAST, EMA_SLOW, Signal, evaluate_asset, select_best
 
 SNAPSHOT_FILENAME = "snapshot.json"
@@ -105,6 +106,59 @@ def expand_watchlist(watchlist: tuple[str, ...], client: HyperliquidClient) -> d
     return dict(sorted(sz_decimals.items()))
 
 
+def mask_address(address: str) -> str:
+    """Show only the first 6 and last 4 chars of a public address for display."""
+    return f"{address[:6]}…{address[-4:]}" if len(address) > 12 else address
+
+
+def fetch_open_positions(cfg: Config, client: HyperliquidClient) -> list[OpenPosition]:
+    """Read open positions for the configured public address (empty if disabled)."""
+    if not cfg.positions.address:
+        return []
+    state = client.clearinghouse_state(cfg.positions.address)
+    return parse_positions(state)
+
+
+def _position_frames(
+    cfg: Config,
+    client: HyperliquidClient,
+    coin: str,
+    now_ms: int,
+) -> tuple[pd.DataFrame, pd.DataFrame] | None:
+    """Completed weekly + daily bars for a held coin, or None if too new."""
+    weekly = completed_bars(
+        client.refresh(coin, cfg.scanner.weekly_interval, cfg.scanner.lookback_weeks), now_ms
+    )
+    daily = completed_bars(
+        client.refresh(coin, cfg.scanner.daily_interval, cfg.scanner.lookback_days), now_ms
+    )
+    if len(weekly) < 2 or len(daily) < 2:
+        return None
+    return weekly, daily
+
+
+def build_positions(
+    cfg: Config,
+    client: HyperliquidClient,
+    open_positions: list[OpenPosition],
+    frames: dict[str, tuple[pd.DataFrame, pd.DataFrame]],
+    now_ms: int,
+) -> list[dict[str, Any]]:
+    """Elder exit verdict per open position, reusing scan frames where available.
+
+    A held coin outside the watchlist (so not already refreshed) gets its candles
+    fetched on demand. Coins too new to evaluate are skipped silently.
+    """
+    out: list[dict[str, Any]] = []
+    for pos in open_positions:
+        wd = frames.get(pos.asset) or _position_frames(cfg, client, pos.asset, now_ms)
+        if wd is None:
+            continue
+        weekly, daily = wd
+        out.append(asdict(assess_position(pos, weekly, daily)))
+    return out
+
+
 def build_snapshot(
     cfg: Config,
     client: HyperliquidClient,
@@ -123,10 +177,19 @@ def build_snapshot(
         cfg.risk.open_trade_risk,
     )
 
+    # Open positions (read-only) drive the Elder trade-management section.
+    try:
+        open_positions = fetch_open_positions(cfg, client)
+    except HyperliquidError:
+        open_positions = []
+    held = {p.asset for p in open_positions}
+
     signals: list[dict[str, Any]] = []
     evaluated: list[Signal] = []  # parallel to `signals`, for cross-asset ranking
     charts: dict[str, Any] = {}
     skipped: list[str] = []
+    # Frames retained only for held coins, so build_positions can reuse them.
+    held_frames: dict[str, tuple[pd.DataFrame, pd.DataFrame]] = {}
     for coin in sz_decimals:
         if on_progress is not None:
             on_progress(coin)
@@ -144,6 +207,9 @@ def build_snapshot(
         if len(weekly) < 2 or len(daily) < 2:
             skipped.append(coin)
             continue
+
+        if coin in held:
+            held_frames[coin] = (weekly, daily)
 
         sig = evaluate_asset(coin, weekly, daily)
         evaluated.append(sig)
@@ -171,6 +237,9 @@ def build_snapshot(
     for row in signals:
         row["is_top_pick"] = row["asset"] == best_asset
 
+    # Elder trade management for whatever is already open.
+    positions = build_positions(cfg, client, open_positions, held_frames, now_ms)
+
     return {
         "generated_at": datetime.now(tz=UTC).isoformat(timespec="seconds"),
         "equity": cfg.risk.equity,
@@ -178,6 +247,8 @@ def build_snapshot(
         "guard": asdict(guard),
         "top_pick": best_asset,
         "signals": signals,
+        "positions": positions,
+        "position_address": mask_address(cfg.positions.address) if cfg.positions.address else None,
         "skipped": skipped,
         "charts": charts,
     }

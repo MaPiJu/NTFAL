@@ -142,6 +142,42 @@ td.reason { color: var(--muted); font-size: 12px; max-width: 320px; }
 .chart-title { color: var(--muted); font-size: 12px; margin-bottom: 4px; text-transform: uppercase; }
 .chart { width: 100%; }
 
+/* --- Open positions (Elder trade management) --- */
+#positions { margin-top: 8px; }
+.section-title { margin: 8px 0 2px; font-size: 16px; }
+.section-title .sub { font-size: 12px; color: var(--muted); font-weight: normal; margin-left: 6px; }
+.section-note { margin: 0 0 10px; color: var(--muted); font-size: 12px; max-width: 760px; }
+.hit { color: var(--green); font-weight: 700; }
+
+.badge.verdict-hold { background: rgba(139, 148, 158, 0.18); color: var(--text); }
+.badge.verdict-take_profits { background: rgba(255, 209, 102, 0.18); color: #ffd166; }
+.badge.verdict-exit { background: rgba(242, 54, 69, 0.18); color: var(--red); }
+.badge.held { background: rgba(41, 98, 255, 0.18); color: #6f9bff; }
+
+/* Held assets get a management panel on top of their card. */
+.card.has-position { border-color: #6f9bff; }
+.position-panel {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: rgba(41, 98, 255, 0.06);
+}
+.position-panel.verdict-exit { border-color: var(--red); background: rgba(242, 54, 69, 0.07); }
+.position-panel.verdict-take_profits { border-color: #ffd166; background: rgba(255, 209, 102, 0.07); }
+.position-head { font-weight: 600; margin-bottom: 8px; }
+.position-head .badge { vertical-align: 1px; }
+.position-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 18px;
+  font-size: 13px;
+  color: var(--muted);
+}
+.position-grid b { color: var(--text); font-weight: 600; }
+.position-reasons { margin: 8px 0 0; padding-left: 18px; color: var(--muted); font-size: 12px; }
+.position-reasons li { margin: 2px 0; }
+
 footer { padding: 16px 24px 24px; color: var(--muted); font-size: 12px; }
 footer a { color: var(--muted); }
 .attribution { margin-top: 4px; }

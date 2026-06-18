@@ -15,7 +15,7 @@ from data.hyperliquid import (
     completed_bars,
     parse_candles,
 )
-from tests.conftest import META, load_fixture, make_client
+from tests.conftest import META, load_fixture, make_clearinghouse_state, make_client
 
 
 def test_parse_candles_types_and_order():
@@ -154,6 +154,21 @@ def test_refresh_respects_5000_candle_limit(tmp_path, btc_fixtures):
     client.refresh("BTC", "1d", lookback_bars=999_999, now_ms=now_ms)
     req = log[-1]["req"]
     assert req["startTime"] == now_ms - MAX_CANDLES_PER_REQUEST * INTERVAL_MS["1d"]
+
+
+def test_clearinghouse_state_reads_public_positions(tmp_path, btc_fixtures):
+    addr = "0x" + "ab" * 20
+    state = make_clearinghouse_state([{"coin": "BTC", "szi": "0.5", "entryPx": "50000.0"}])
+    client = make_client(btc_fixtures, tmp_path, clearinghouse_states={addr: state})
+
+    out = client.clearinghouse_state(addr)
+    assert out["assetPositions"][0]["position"]["coin"] == "BTC"
+
+
+def test_clearinghouse_state_requires_address(tmp_path, btc_fixtures):
+    client = make_client(btc_fixtures, tmp_path)
+    with pytest.raises(HyperliquidError, match="address"):
+        client.clearinghouse_state("")
 
 
 def test_completed_bars_drops_open_bar():
