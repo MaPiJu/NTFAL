@@ -50,6 +50,33 @@ def test_parse_positions_empty():
     assert parse_positions({}) == []
 
 
+def test_parse_positions_carries_live_price_and_pnl():
+    state = make_clearinghouse_state(
+        [
+            {
+                "coin": "NIL",
+                "szi": "-4709.0",
+                "entryPx": "0.0424",
+                "positionValue": "189.0",
+                "unrealizedPnl": "10.55",
+            }
+        ]
+    )
+    (pos,) = parse_positions(state)
+    assert pos.unrealized_pnl == 10.55  # straight from the exchange
+    assert pos.mark_price == pytest.approx(189.0 / 4709.0)  # positionValue / size
+
+
+def test_live_pnl_and_price_override_daily_close():
+    daily = make_ohlcv([100.0 + i for i in range(60)])  # daily close 159
+    pos = OpenPosition("BTC", "long", entry=120.0, size=2.0, mark_price=170.0, unrealized_pnl=99.0)
+    tm = assess_position(pos, WEEKLY_UP_GREEN, daily)
+    # The displayed price/PnL come from the exchange, not the 159 daily close.
+    assert tm.current_price == 170.0
+    assert tm.unrealized_pnl == 99.0
+    assert tm.in_profit
+
+
 def test_long_in_uptrend_with_green_impulse_holds():
     # accelerating climb -> EMA13 and MACD-hist both rising -> green; trend up.
     daily = make_ohlcv(_accel(100.0, 60, 0.1))  # ends ~277, still below weekly value

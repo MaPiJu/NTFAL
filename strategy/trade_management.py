@@ -54,6 +54,10 @@ class OpenPosition:
     side: Side
     entry: float
     size: float  # absolute units of the asset (always positive)
+    # Live values from the exchange (read-only), used for the displayed price/PnL
+    # so they match what Hyperliquid shows. None falls back to the daily close.
+    mark_price: float | None = None
+    unrealized_pnl: float | None = None
 
 
 @dataclass(frozen=True)
@@ -76,28 +80,39 @@ class TradeManagement:
     reasons: list[str]
 
 
+def _to_float(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def parse_positions(state: Mapping[str, Any]) -> list[OpenPosition]:
     """Extract open perp positions from a Hyperliquid `clearinghouseState` payload.
 
     `szi` is the signed position size (negative = short); a zero size means the
-    position is closed and is skipped. Read-only: this only *reads* public account
-    state — no key, no signing, no order is ever involved.
+    position is closed and is skipped. The live `unrealizedPnl` and a mark price
+    derived from `positionValue` are carried through so the displayed PnL matches
+    the exchange. Read-only: this only *reads* public account state — no key, no
+    signing, no order is ever involved.
     """
     out: list[OpenPosition] = []
     for ap in state.get("assetPositions", []):
         p = ap.get("position") or {}
-        try:
-            szi = float(p.get("szi", 0) or 0)
-        except (TypeError, ValueError):
+        szi = _to_float(p.get("szi"))
+        if not szi:  # None or zero -> not an open position
             continue
-        if szi == 0:
-            continue
+        size = abs(szi)
+        pos_value = _to_float(p.get("positionValue"))
+        mark_price = pos_value / size if pos_value is not None and size else None
         out.append(
             OpenPosition(
                 asset=str(p["coin"]),
                 side="long" if szi > 0 else "short",
                 entry=float(p["entryPx"]),
-                size=abs(szi),
+                size=size,
+                mark_price=mark_price,
+                unrealized_pnl=_to_float(p.get("unrealizedPnl")),
             )
         )
     return out
@@ -143,15 +158,24 @@ def assess_position(
     """Elder exit verdict for one open position from completed weekly + daily bars.
 
     `weekly`/`daily` are OHLCV frames of completed bars (oldest first), the same
-    shape the Triple Screen consumes.
+    shape the Triple Screen consumes. The trend/Impulse verdict comes from those
+    *completed* bars; the price and PnL shown use the exchange's live mark price /
+    `unrealizedPnl` when available (falling back to the last daily close) so they
+    match what Hyperliquid displays.
     """
     w_imp = str(impulse_color(weekly["close"]).iloc[-1])
     d_imp = str(impulse_color(daily["close"]).iloc[-1])
     trend = weekly_trend(weekly["close"])
-    price = float(daily["close"].iloc[-1])
 
     direction = 1.0 if pos.side == "long" else -1.0
-    pnl = (price - pos.entry) * pos.size * direction
+    price = (
+        pos.mark_price if pos.mark_price and pos.mark_price > 0 else float(daily["close"].iloc[-1])
+    )
+    pnl = (
+        pos.unrealized_pnl
+        if pos.unrealized_pnl is not None
+        else (price - pos.entry) * pos.size * direction
+    )
     return_pct = (price / pos.entry - 1.0) * direction if pos.entry else 0.0
     in_profit = pnl > 0
 
