@@ -50,6 +50,36 @@ def test_parse_positions_empty():
     assert parse_positions({}) == []
 
 
+def test_parse_positions_carries_live_price_and_pnl():
+    state = make_clearinghouse_state(
+        [
+            {
+                "coin": "NIL",
+                "szi": "-4709.0",
+                "entryPx": "0.0424",
+                "positionValue": "189.0",
+                "unrealizedPnl": "10.55",
+            }
+        ]
+    )
+    (pos,) = parse_positions(state)
+    assert pos.unrealized_pnl == 10.55  # straight from the exchange
+    assert pos.mark_price == pytest.approx(189.0 / 4709.0)  # positionValue / size
+
+
+def test_live_and_elder_pnl_are_both_reported():
+    daily = make_ohlcv([100.0 + i for i in range(60)])  # daily close 159
+    pos = OpenPosition("BTC", "long", entry=120.0, size=2.0, mark_price=170.0, unrealized_pnl=99.0)
+    tm = assess_position(pos, WEEKLY_UP_GREEN, daily)
+    # Live view comes straight from the exchange.
+    assert tm.live_price == 170.0
+    assert tm.pnl_live == 99.0
+    # Elder view uses the completed daily close (159), independent of the mark.
+    assert tm.close_price == 159.0
+    assert tm.pnl_elder == pytest.approx((159.0 - 120.0) * 2.0)
+    assert tm.in_profit  # by the Elder PnL
+
+
 def test_long_in_uptrend_with_green_impulse_holds():
     # accelerating climb -> EMA13 and MACD-hist both rising -> green; trend up.
     daily = make_ohlcv(_accel(100.0, 60, 0.1))  # ends ~277, still below weekly value
@@ -136,12 +166,12 @@ def test_short_exits_when_weekly_tide_flips_up():
 def test_pnl_sign_by_side():
     daily = make_ohlcv([100.0 + i for i in range(60)])  # last close 159
     long = assess_position(OpenPosition("BTC", "long", 120.0, 2.0), WEEKLY_UP, daily)
-    assert long.unrealized_pnl == pytest.approx((159.0 - 120.0) * 2.0)
-    assert long.return_pct == pytest.approx(159.0 / 120.0 - 1.0)
+    assert long.pnl_elder == pytest.approx((159.0 - 120.0) * 2.0)
+    assert long.return_pct_elder == pytest.approx(159.0 / 120.0 - 1.0)
 
     short = assess_position(OpenPosition("BTC", "short", 120.0, 2.0), WEEKLY_UP, daily)
-    assert short.unrealized_pnl == pytest.approx((159.0 - 120.0) * 2.0 * -1.0)
-    assert short.return_pct == pytest.approx(1.0 - 159.0 / 120.0)
+    assert short.pnl_elder == pytest.approx((159.0 - 120.0) * 2.0 * -1.0)
+    assert short.return_pct_elder == pytest.approx(1.0 - 159.0 / 120.0)
 
 
 def test_safezone_stop_ratchets_to_breakeven_in_profit():

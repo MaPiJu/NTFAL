@@ -60,6 +60,12 @@ positions" table at the top of the dashboard and as a panel on the held asset's 
 is printed by `run.py`. As everywhere, it is **informational only** — you decide and place
 any order manually.
 
+Two PnL columns are shown for each position: **Elder** (computed from the last *completed*
+daily close — the same basis as the verdict) and **live** (the exchange mark price /
+`unrealizedPnl`, which matches what Hyperliquid shows in real time). The verdict and the
+"in profit" gate always use the Elder/close value, so they don't flicker with intraday
+noise; the live column is there to reconcile with your exchange screen.
+
 Indicators are exactly the ones in the spec — EMA13/EMA26, MACD-Histogram(12,26,9),
 2-EMA Force Index (EMA-13 FI shown for context), Impulse color. Nothing else.
 

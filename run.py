@@ -102,18 +102,19 @@ def print_positions_table(snapshot: dict[str, Any]) -> None:
         return f"{x:,.6g}" if x is not None else "—"
 
     header = (
-        f"{'ASSET':<14} {'SIDE':<6} {'ENTRY':>12} {'PRICE':>12} {'PnL':>12} "
-        f"{'RET%':>8} {'IMP W/D':<11} {'TARGET':>12} {'TRAIL STOP':>12} {'VERDICT':<13}"
+        f"{'ASSET':<14} {'SIDE':<6} {'ENTRY':>12} {'CLOSE':>12} {'MARK':>12} "
+        f"{'PnL ELDER':>12} {'PnL LIVE':>12} {'IMP W/D':<11} {'TARGET':>12} "
+        f"{'TRAIL STOP':>12} {'VERDICT':<13}"
     )
     print("\n" + header)
     print("-" * len(header))
     for p in positions:
-        ret = f"{p['return_pct'] * 100:+.1f}%"
         target = num(p["target"]) + ("✓" if p["target_reached"] else "")
         verdict = VERDICT_LABEL.get(p["verdict"], p["verdict"])
         print(
-            f"{p['asset']:<14} {p['side']:<6} {num(p['entry']):>12} {num(p['current_price']):>12} "
-            f"{p['unrealized_pnl']:>12,.2f} {ret:>8} "
+            f"{p['asset']:<14} {p['side']:<6} {num(p['entry']):>12} "
+            f"{num(p['close_price']):>12} {num(p['live_price']):>12} "
+            f"{p['pnl_elder']:>12,.2f} {p['pnl_live']:>12,.2f} "
             f"{p['weekly_impulse'] + '/' + p['daily_impulse']:<11} "
             f"{target:>12} {num(p['suggested_stop']):>12} {verdict:<13}"
         )

@@ -54,6 +54,10 @@ class OpenPosition:
     side: Side
     entry: float
     size: float  # absolute units of the asset (always positive)
+    # Live values from the exchange (read-only), used for the displayed price/PnL
+    # so they match what Hyperliquid shows. None falls back to the daily close.
+    mark_price: float | None = None
+    unrealized_pnl: float | None = None
 
 
 @dataclass(frozen=True)
@@ -62,13 +66,19 @@ class TradeManagement:
     side: Side
     entry: float
     size: float
-    current_price: float
-    unrealized_pnl: float  # in quote currency (USD): (price - entry) * size, signed by side
-    return_pct: float  # signed return in the trade's favor: long (p/e - 1), short (1 - p/e)
+    # Two views of the same position, by design:
+    #  - "Elder": the last *completed* daily close — the basis for the verdict.
+    #  - "live": the exchange mark price / unrealizedPnl — matches Hyperliquid now.
+    close_price: float  # last completed daily close (Elder basis)
+    live_price: float  # live mark price (falls back to close_price if unknown)
+    pnl_elder: float  # PnL at the daily close: (close - entry) * size, signed by side
+    pnl_live: float  # live unrealized PnL from the exchange (or from the mark price)
+    return_pct_elder: float  # signed return at the close, in the trade's favor
+    return_pct_live: float  # signed live return, in the trade's favor
     weekly_trend: Trend
     weekly_impulse: str
     daily_impulse: str
-    in_profit: bool
+    in_profit: bool  # by the Elder (close) PnL — keeps the verdict on completed bars
     target: float  # weekly value-zone edge (or channel) in the trade's direction
     target_reached: bool
     suggested_stop: float  # SafeZone trailing stop, ratcheted to >= break-even in profit
@@ -76,28 +86,39 @@ class TradeManagement:
     reasons: list[str]
 
 
+def _to_float(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def parse_positions(state: Mapping[str, Any]) -> list[OpenPosition]:
     """Extract open perp positions from a Hyperliquid `clearinghouseState` payload.
 
     `szi` is the signed position size (negative = short); a zero size means the
-    position is closed and is skipped. Read-only: this only *reads* public account
-    state — no key, no signing, no order is ever involved.
+    position is closed and is skipped. The live `unrealizedPnl` and a mark price
+    derived from `positionValue` are carried through so the displayed PnL matches
+    the exchange. Read-only: this only *reads* public account state — no key, no
+    signing, no order is ever involved.
     """
     out: list[OpenPosition] = []
     for ap in state.get("assetPositions", []):
         p = ap.get("position") or {}
-        try:
-            szi = float(p.get("szi", 0) or 0)
-        except (TypeError, ValueError):
+        szi = _to_float(p.get("szi"))
+        if not szi:  # None or zero -> not an open position
             continue
-        if szi == 0:
-            continue
+        size = abs(szi)
+        pos_value = _to_float(p.get("positionValue"))
+        mark_price = pos_value / size if pos_value is not None and size else None
         out.append(
             OpenPosition(
                 asset=str(p["coin"]),
                 side="long" if szi > 0 else "short",
                 entry=float(p["entryPx"]),
-                size=abs(szi),
+                size=size,
+                mark_price=mark_price,
+                unrealized_pnl=_to_float(p.get("unrealizedPnl")),
             )
         )
     return out
@@ -143,20 +164,32 @@ def assess_position(
     """Elder exit verdict for one open position from completed weekly + daily bars.
 
     `weekly`/`daily` are OHLCV frames of completed bars (oldest first), the same
-    shape the Triple Screen consumes.
+    shape the Triple Screen consumes. The verdict (trend/Impulse/target) is computed
+    on those *completed* bars — the "Elder" view, using the last daily close. The
+    result also carries a "live" price and PnL from the exchange (mark price /
+    `unrealizedPnl`) so the displayed numbers match Hyperliquid in real time.
     """
     w_imp = str(impulse_color(weekly["close"]).iloc[-1])
     d_imp = str(impulse_color(daily["close"]).iloc[-1])
     trend = weekly_trend(weekly["close"])
-    price = float(daily["close"].iloc[-1])
 
     direction = 1.0 if pos.side == "long" else -1.0
-    pnl = (price - pos.entry) * pos.size * direction
-    return_pct = (price / pos.entry - 1.0) * direction if pos.entry else 0.0
-    in_profit = pnl > 0
+    close_price = float(daily["close"].iloc[-1])
+    live_price = pos.mark_price if pos.mark_price and pos.mark_price > 0 else close_price
+
+    pnl_elder = (close_price - pos.entry) * pos.size * direction
+    pnl_live = (
+        pos.unrealized_pnl
+        if pos.unrealized_pnl is not None
+        else (live_price - pos.entry) * pos.size * direction
+    )
+    return_pct_elder = (close_price / pos.entry - 1.0) * direction if pos.entry else 0.0
+    return_pct_live = (live_price / pos.entry - 1.0) * direction if pos.entry else 0.0
+    # Verdict is on completed bars, so "in profit" uses the Elder (close) PnL.
+    in_profit = pnl_elder > 0
 
     target = _profit_target(pos, weekly)
-    target_reached = price >= target if pos.side == "long" else price <= target
+    target_reached = close_price >= target if pos.side == "long" else close_price <= target
     suggested_stop = safezone_stop(pos, daily, in_profit=in_profit)
 
     favorable_trend: Trend = "up" if pos.side == "long" else "down"
@@ -185,8 +218,8 @@ def assess_position(
         if target_reached:
             verdict = "take_profits"
             reasons.append(
-                f"price {price:.6g} reached the weekly value/channel target "
-                f"{target:.6g} — take profits"
+                f"daily close {close_price:.6g} reached the weekly value/channel "
+                f"target {target:.6g} — take profits"
             )
         # Permission to take profits once NEITHER screen still shows favorable
         # momentum (the green/red is gone on both the tide and the wave) and the
@@ -210,9 +243,12 @@ def assess_position(
         side=pos.side,
         entry=pos.entry,
         size=pos.size,
-        current_price=price,
-        unrealized_pnl=pnl,
-        return_pct=return_pct,
+        close_price=close_price,
+        live_price=live_price,
+        pnl_elder=pnl_elder,
+        pnl_live=pnl_live,
+        return_pct_elder=return_pct_elder,
+        return_pct_live=return_pct_live,
         weekly_trend=trend,
         weekly_impulse=w_imp,
         daily_impulse=d_imp,
