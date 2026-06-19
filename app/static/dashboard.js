@@ -106,14 +106,14 @@ function renderPositions(snapshot) {
   const tbody = document.querySelector("#positions-table tbody");
   tbody.innerHTML = "";
   if (positions.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="11" class="reason">No open positions (or held coins are too new to evaluate).</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="12" class="reason">No open positions (or held coins are too new to evaluate).</td></tr>`;
     return;
   }
   // Most urgent first: exit, then take profits, then hold.
   const order = { exit: 0, take_profits: 1, hold: 2 };
   for (const p of [...positions].sort((a, b) => order[a.verdict] - order[b.verdict])) {
-    const pnlClass = p.unrealized_pnl >= 0 ? "rr-good" : "rr-bad";
-    const ret = `${(p.return_pct * 100 >= 0 ? "+" : "") + (p.return_pct * 100).toFixed(1)}%`;
+    const elderCls = p.pnl_elder >= 0 ? "rr-good" : "rr-bad";
+    const liveCls = p.pnl_live >= 0 ? "rr-good" : "rr-bad";
     const target = `${fmt(p.target)}${p.target_reached ? ' <span class="hit">✓</span>' : ""}`;
     const row = document.createElement("tr");
     row.dataset.verdict = p.verdict;
@@ -121,9 +121,10 @@ function renderPositions(snapshot) {
       <td><strong>${p.asset}</strong></td>
       <td><span class="badge ${p.side === "long" ? "long" : "short"}">${p.side}</span></td>
       <td>${fmt(p.entry)}</td>
-      <td>${fmt(p.current_price)}</td>
-      <td class="${pnlClass}">${fmt(p.unrealized_pnl, 6)}</td>
-      <td class="${pnlClass}">${ret}</td>
+      <td>${fmt(p.close_price)}</td>
+      <td>${fmt(p.live_price)}</td>
+      <td class="${elderCls}">${fmt(p.pnl_elder, 6)}</td>
+      <td class="${liveCls}">${fmt(p.pnl_live, 6)}</td>
       <td>${impulseDot(p.weekly_impulse)} / ${impulseDot(p.daily_impulse)}</td>
       <td>${target}</td>
       <td>${fmt(p.suggested_stop)}</td>
@@ -133,8 +134,12 @@ function renderPositions(snapshot) {
   }
 }
 
+function pnlText(pnl, retPct) {
+  const ret = `${(retPct * 100 >= 0 ? "+" : "") + (retPct * 100).toFixed(1)}%`;
+  return `${fmt(pnl, 6)} (${ret})`;
+}
+
 function positionPanelHTML(p) {
-  const ret = `${(p.return_pct * 100 >= 0 ? "+" : "") + (p.return_pct * 100).toFixed(1)}%`;
   return `
     <div class="position-panel verdict-${p.verdict}">
       <div class="position-head">
@@ -143,8 +148,10 @@ function positionPanelHTML(p) {
       </div>
       <div class="position-grid">
         <span>Entry <b>${fmt(p.entry)}</b></span>
-        <span>Price <b>${fmt(p.current_price)}</b></span>
-        <span>PnL <b>${fmt(p.unrealized_pnl, 6)} (${ret})</b></span>
+        <span>Daily close <b>${fmt(p.close_price)}</b></span>
+        <span>Mark (live) <b>${fmt(p.live_price)}</b></span>
+        <span>PnL Elder <b>${pnlText(p.pnl_elder, p.return_pct_elder)}</b></span>
+        <span>PnL live <b>${pnlText(p.pnl_live, p.return_pct_live)}</b></span>
         <span>Target <b>${fmt(p.target)}${p.target_reached ? " ✓" : ""}</b></span>
         <span>Trail stop <b>${fmt(p.suggested_stop)}</b></span>
       </div>
