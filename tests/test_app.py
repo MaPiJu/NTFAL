@@ -8,7 +8,8 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.pipeline import build_snapshot
-from config import Config, PositionsConfig, RiskConfig, ScannerConfig
+from config import Config, JournalConfig, PositionsConfig, RiskConfig, ScannerConfig, StrategyConfig
+from journal import append_journal_entry
 from tests.conftest import make_clearinghouse_state, make_client
 
 
@@ -31,8 +32,23 @@ def make_config(cache_dir, watchlist=("BTC",), address="", **risk_overrides) -> 
             lookback_days=400,
             lookback_third_screen=300,
         ),
+        strategy=StrategyConfig(
+            flat_trend_slope_pct=0.001,
+            penetration_lookback_days=35,
+            channel_lookback_weeks=26,
+            min_reward_risk=2.0,
+            divergence_lookback=60,
+            rr_excellent=3.0,
+            strong_weekly_slope=0.03,
+            fi_scale_lookback=20,
+            score_reward_risk_weight=0.40,
+            score_impulse_weight=0.25,
+            score_tide_weight=0.20,
+            score_pullback_weight=0.15,
+        ),
         risk=RiskConfig(**risk),
         positions=PositionsConfig(address=address),
+        journal=JournalConfig(enabled=False, path=cache_dir / "journal.jsonl"),
         cache_dir=cache_dir,
     )
 
@@ -127,6 +143,7 @@ def test_open_position_gets_management_verdict(tmp_path, btc_fixtures):
     assert pos["entry"] == 50000.0
     assert pos["verdict"] in {"hold", "take_profits", "exit"}
     assert pos["reasons"]
+    assert pos["open_risk"] == abs(pos["entry"] - pos["suggested_stop"]) * pos["size"]
 
 
 def test_held_coin_outside_watchlist_is_fetched_on_demand(tmp_path, btc_fixtures):
@@ -153,6 +170,49 @@ def test_snapshot_reports_tripped_guard(tmp_path, btc_fixtures):
     assert snapshot["guard"]["blocked"] is True
     # no sizing suggestions while the 6% guard is active
     assert all(s["position_size"] is None for s in snapshot["signals"])
+
+
+def test_guard_uses_automatic_open_position_risk(tmp_path, btc_fixtures):
+    addr = "0x" + "ef" * 20
+    cfg = make_config(tmp_path, address=addr, month_realized_losses=0.0)
+    state = make_clearinghouse_state([{"coin": "BTC", "szi": "10.0", "entryPx": "50000.0"}])
+    client = make_client(btc_fixtures, tmp_path, clearinghouse_states={addr: state})
+    snapshot = build_snapshot(cfg, client)
+
+    (pos,) = snapshot["positions"]
+    assert snapshot["auto_open_trade_risk"] == pos["open_risk"]
+    assert snapshot["total_open_trade_risk"] == snapshot["auto_open_trade_risk"]
+    assert snapshot["guard"]["total_at_risk"] == snapshot["auto_open_trade_risk"]
+
+
+def test_strategy_thresholds_are_configurable(tmp_path, btc_fixtures):
+    cfg = make_config(tmp_path)
+    cfg = Config(
+        scanner=cfg.scanner,
+        strategy=StrategyConfig(**(cfg.strategy.__dict__ | {"flat_trend_slope_pct": 999.0})),
+        risk=cfg.risk,
+        positions=cfg.positions,
+        journal=cfg.journal,
+        cache_dir=cfg.cache_dir,
+    )
+    client = make_client(btc_fixtures, tmp_path)
+    snapshot = build_snapshot(cfg, client)
+    assert snapshot["signals"][0]["weekly_trend"] == "neutral"
+
+
+def test_journal_appends_compact_scan_entry(tmp_path, btc_fixtures):
+    cfg = make_config(tmp_path)
+    client = make_client(btc_fixtures, tmp_path)
+    snapshot = build_snapshot(cfg, client)
+    journal = tmp_path / "journal.jsonl"
+
+    append_journal_entry(snapshot, journal)
+
+    entry = json.loads(journal.read_text().splitlines()[0])
+    assert entry["generated_at"] == snapshot["generated_at"]
+    assert entry["top_pick"] == snapshot["top_pick"]
+    assert entry["signals"][0]["asset"] == "BTC"
+    assert "reason" in entry["signals"][0]
 
 
 def test_dashboard_endpoints(tmp_path, btc_fixtures, monkeypatch):

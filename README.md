@@ -31,7 +31,11 @@ charts so the operator can make a **discretionary** entry decision and place ord
   13-EMA Force Index are surfaced as Elder warnings.
 - **Risk:** 2% Rule (Iron Triangle sizing, default 1% risk per trade, hard cap 2%) and
   the 6% monthly guard that blocks all new entries once monthly losses + open risk reach
-  6% of the month-start equity.
+  6% of the month-start equity. When a public address is configured, open risk is
+  calculated automatically from each held position's current Elder stop; the manual
+  `open_trade_risk` field is only extra risk for positions the scanner cannot see.
+- **Journal:** each `run.py` refresh can append a compact JSONL entry with the top
+  pick, signal levels/reasons, open-position verdicts, stops and open risk.
 - **Trade management (open positions):** for trades you already hold, Elder's exit tools
   give a daily verdict — **hold**, **take profits**, or **exit** — from the same weekly +
   daily screens (see below).
@@ -136,8 +140,14 @@ Edit `config.toml`:
 - `risk.equity` — account equity used for sizing
 - `risk.risk_pct` — risk per trade (default `0.01` = 1%; hard-capped at 2%)
 - `risk.equity_at_month_start`, `risk.month_realized_losses`, `risk.open_trade_risk` —
-  manual bookkeeping inputs for the 6% Rule (the tool is read-only and does not track
-  your trades)
+  bookkeeping inputs for the 6% Rule. `open_trade_risk` is now an optional manual
+  add-on for trades not visible from the configured public address; visible
+  Hyperliquid positions are risked automatically from their Elder trailing stop.
+- `[strategy]` — tune the Elder scanner thresholds and ranking weights without editing
+  code: flat weekly slope cutoff, EMA-penetration/channel/divergence lookbacks,
+  minimum R:R, “excellent” R:R, weekly-tide strength scale, Force Index pullback
+  scale, and score weights.
+- `[journal]` — set `enabled` and `path` for the append-only JSONL scan journal.
 
 - `positions.address` — **public** wallet address (0x…) used to read your open positions
   for trade management. Read-only: a public address only, never a private key; nothing is

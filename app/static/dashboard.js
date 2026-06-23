@@ -130,7 +130,7 @@ function renderPositions(snapshot) {
       <td>${target}</td>
       <td>${fmt(p.suggested_stop)}</td>
       <td>${verdictBadge(p.verdict)}</td>
-      <td class="reason">${p.reasons.join(" · ")}</td>`;
+      <td class="reason">${p.reasons.join(" · ")}<br><strong>Open risk:</strong> $${fmt(p.open_risk, 8)}</td>`;
     tbody.appendChild(row);
   }
 }
@@ -291,7 +291,8 @@ async function main() {
   const snapshot = await resp.json();
   meta.textContent =
     `Generated ${snapshot.generated_at} · equity $${fmt(snapshot.equity, 8)} · ` +
-    `risk/trade ${(snapshot.risk_pct * 100).toFixed(1)}%`;
+    `risk/trade ${(snapshot.risk_pct * 100).toFixed(1)}% · ` +
+    `open risk $${fmt(snapshot.total_open_trade_risk ?? snapshot.guard.total_at_risk, 8)}`;
 
   const banner = document.getElementById("guard-banner");
   if (snapshot.guard.blocked) {

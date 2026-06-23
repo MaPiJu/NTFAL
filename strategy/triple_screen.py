@@ -19,6 +19,7 @@ from typing import Literal
 import pandas as pd
 
 from indicators import ema, force_index, impulse_color, macd_histogram
+from strategy.params import StrategyParams
 
 Action = Literal["long", "short", "stand_aside"]
 Trend = Literal["up", "down", "neutral"]
@@ -45,6 +46,7 @@ STRONG_WEEKLY_SLOPE = 0.03
 FI_SCALE_LOOKBACK = 20
 # Composite weights (sum to 1): reward:risk dominates, per the book.
 SCORE_WEIGHTS = {"reward_risk": 0.40, "impulse": 0.25, "tide": 0.20, "pullback": 0.15}
+DEFAULT_PARAMS = StrategyParams()
 
 
 @dataclass(frozen=True)
@@ -122,6 +124,15 @@ def average_penetration(
     return float(pen.mean())
 
 
+def _weights(params: StrategyParams) -> dict[str, float]:
+    return {
+        "reward_risk": params.score_reward_risk_weight,
+        "impulse": params.score_impulse_weight,
+        "tide": params.score_tide_weight,
+        "pullback": params.score_pullback_weight,
+    }
+
+
 def projected_ema(daily_close: pd.Series, span: int = EMA_FAST) -> float:
     """Tomorrow's EMA estimate: today_EMA + (today_EMA - yesterday_EMA)."""
     e = ema(daily_close, span)
@@ -145,8 +156,20 @@ def weekly_channel(weekly: pd.DataFrame, span: int = EMA_FAST) -> tuple[float, f
     small EMA and push the lower band — i.e. a short's target — below zero. A
     ratio whose mean is always < 1 keeps the lower band strictly positive.
     """
+    return _weekly_channel(weekly, span=span)
+
+
+def weekly_channel_with_params(
+    weekly: pd.DataFrame, params: StrategyParams, span: int = EMA_FAST
+) -> tuple[float, float]:
+    return _weekly_channel(weekly, span=span, lookback=params.channel_lookback_weeks)
+
+
+def _weekly_channel(
+    weekly: pd.DataFrame, span: int = EMA_FAST, lookback: int = CHANNEL_LOOKBACK_WEEKS
+) -> tuple[float, float]:
     e = ema(weekly["close"], span)
-    window = slice(-CHANNEL_LOOKBACK_WEEKS, None)
+    window = slice(-lookback, None)
     up = ((weekly["high"] - e) / e).clip(lower=0).iloc[window]
     down = ((e - weekly["low"]) / e).clip(lower=0).iloc[window]
     up = up[up > 0]
@@ -158,17 +181,17 @@ def weekly_channel(weekly: pd.DataFrame, span: int = EMA_FAST) -> tuple[float, f
 
 
 def _long_levels(
-    weekly: pd.DataFrame, daily: pd.DataFrame
+    weekly: pd.DataFrame, daily: pd.DataFrame, params: StrategyParams = DEFAULT_PARAMS
 ) -> tuple[float, float | None, float, float]:
     """(entry, entry_limit, stop, target) for a long setup."""
     prior_high = float(daily["high"].iloc[-1])
     tick = tick_size(prior_high)
     entry = prior_high + tick  # buy-stop 1 tick above prior day's high
 
-    pen = average_penetration(daily, "down")
+    pen = average_penetration(daily, "down", lookback=params.penetration_lookback_days)
     limit = projected_ema(daily["close"]) - pen if pen is not None else None
 
-    pen_stop = average_penetration(daily, "down")
+    pen_stop = average_penetration(daily, "down", lookback=params.penetration_lookback_days)
     stop_offset = pen_stop if pen_stop is not None else tick
     stop = float(daily["low"].iloc[-2:].min()) - stop_offset  # SafeZone-style daily stop
 
@@ -177,29 +200,29 @@ def _long_levels(
     e13 = float(ema(weekly["close"], EMA_FAST).iloc[-1])
     e26 = float(ema(weekly["close"], EMA_SLOW).iloc[-1])
     value_high = max(e13, e26)
-    target = value_high if value_high > entry else weekly_channel(weekly)[0]
+    target = value_high if value_high > entry else weekly_channel_with_params(weekly, params)[0]
     return entry, limit, stop, target
 
 
 def _short_levels(
-    weekly: pd.DataFrame, daily: pd.DataFrame
+    weekly: pd.DataFrame, daily: pd.DataFrame, params: StrategyParams = DEFAULT_PARAMS
 ) -> tuple[float, float | None, float, float]:
     """(entry, entry_limit, stop, target) for a short setup."""
     prior_low = float(daily["low"].iloc[-1])
     tick = tick_size(prior_low)
     entry = prior_low - tick  # sell-stop 1 tick below prior day's low
 
-    pen = average_penetration(daily, "up")
+    pen = average_penetration(daily, "up", lookback=params.penetration_lookback_days)
     limit = projected_ema(daily["close"]) + pen if pen is not None else None
 
-    pen_stop = average_penetration(daily, "up")
+    pen_stop = average_penetration(daily, "up", lookback=params.penetration_lookback_days)
     stop_offset = pen_stop if pen_stop is not None else tick
     stop = float(daily["high"].iloc[-2:].max()) + stop_offset
 
     e13 = float(ema(weekly["close"], EMA_FAST).iloc[-1])
     e26 = float(ema(weekly["close"], EMA_SLOW).iloc[-1])
     value_low = min(e13, e26)
-    target = value_low if value_low < entry else weekly_channel(weekly)[1]
+    target = value_low if value_low < entry else weekly_channel_with_params(weekly, params)[1]
     return entry, limit, stop, target
 
 
@@ -321,6 +344,14 @@ def pullback_quality(daily: pd.DataFrame) -> float:
     return _clamp01(abs(float(fi.iloc[-1])) / scale)
 
 
+def pullback_quality_with_params(daily: pd.DataFrame, params: StrategyParams) -> float:
+    fi = force_index(daily["close"], daily["volume"], span=2)
+    scale = float(fi.abs().iloc[-params.fi_scale_lookback :].mean())
+    if scale <= 0:
+        return 0.0
+    return _clamp01(abs(float(fi.iloc[-1])) / scale)
+
+
 def compute_quality_score(
     reward_risk: float | None,
     impulse_agreement: float,
@@ -337,6 +368,24 @@ def compute_quality_score(
     rr = _clamp01((reward_risk or 0.0) / RR_EXCELLENT)
     tide = _clamp01(tide_strength / STRONG_WEEKLY_SLOPE)
     w = SCORE_WEIGHTS
+    return (
+        w["reward_risk"] * rr
+        + w["impulse"] * impulse_agreement
+        + w["tide"] * tide
+        + w["pullback"] * _clamp01(pullback_depth)
+    )
+
+
+def compute_quality_score_with_params(
+    reward_risk: float | None,
+    impulse_agreement: float,
+    tide_strength: float,
+    pullback_depth: float,
+    params: StrategyParams,
+) -> float:
+    rr = _clamp01((reward_risk or 0.0) / params.rr_excellent)
+    tide = _clamp01(tide_strength / params.strong_weekly_slope)
+    w = _weights(params)
     return (
         w["reward_risk"] * rr
         + w["impulse"] * impulse_agreement
@@ -365,6 +414,7 @@ def evaluate_asset(
     weekly: pd.DataFrame,
     daily: pd.DataFrame,
     lower_timeframe: pd.DataFrame | None = None,
+    params: StrategyParams = DEFAULT_PARAMS,
 ) -> Signal:
     """Run the three screens + Impulse censorship for one asset.
 
@@ -373,10 +423,10 @@ def evaluate_asset(
     """
     w_imp = str(impulse_color(weekly["close"]).iloc[-1])
     d_imp = str(impulse_color(daily["close"]).iloc[-1])
-    trend = weekly_trend(weekly["close"])
+    trend = weekly_trend(weekly["close"], min_slope_pct=params.flat_trend_slope_pct)
     market_regime = "flat" if trend == "neutral" else "trending"
     fi2 = float(force_index(daily["close"], daily["volume"], span=2).iloc[-1])
-    divergences = detect_divergences(daily)
+    divergences = detect_divergences(daily, lookback=params.divergence_lookback)
 
     candidate: Action = "stand_aside"
     if trend == "up":
@@ -405,7 +455,7 @@ def evaluate_asset(
     entry = limit = stop = target = rr = None
     third_impulse = None
     if candidate == "long":
-        entry, limit, stop, target = _long_levels(weekly, daily)
+        entry, limit, stop, target = _long_levels(weekly, daily, params)
         entry, third_impulse = _third_screen_levels(candidate, lower_timeframe, entry)
         if third_impulse == "red":
             candidate = "stand_aside"
@@ -414,7 +464,7 @@ def evaluate_asset(
         elif entry > stop:
             rr = (target - entry) / (entry - stop)
     elif candidate == "short":
-        entry, limit, stop, target = _short_levels(weekly, daily)
+        entry, limit, stop, target = _short_levels(weekly, daily, params)
         entry, third_impulse = _third_screen_levels(candidate, lower_timeframe, entry)
         if third_impulse == "green":
             candidate = "stand_aside"
@@ -427,9 +477,9 @@ def evaluate_asset(
     score = None
     pull = 0.0
     if candidate in ("long", "short"):
-        pull = pullback_quality(daily)
-        score = compute_quality_score(
-            rr, impulse_confirmation(candidate, w_imp, d_imp), tide_strength, pull
+        pull = pullback_quality_with_params(daily, params)
+        score = compute_quality_score_with_params(
+            rr, impulse_confirmation(candidate, w_imp, d_imp), tide_strength, pull, params
         )
 
     return Signal(
@@ -445,7 +495,7 @@ def evaluate_asset(
         stop=stop,
         target=target,
         reward_risk=rr,
-        rr_ok=rr is not None and rr >= MIN_REWARD_RISK,
+        rr_ok=rr is not None and rr >= params.min_reward_risk,
         weekly_trend_strength=tide_strength,
         pullback_quality=pull,
         quality_score=score,

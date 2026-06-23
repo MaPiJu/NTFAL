@@ -20,6 +20,7 @@ from typing import Any
 from app.pipeline import SNAPSHOT_FILENAME, build_snapshot
 from config import Config, load_config
 from data.hyperliquid import HyperliquidClient
+from journal import append_journal_entry
 
 
 def print_signals_table(snapshot: dict[str, Any]) -> None:
@@ -109,7 +110,7 @@ def print_positions_table(snapshot: dict[str, Any]) -> None:
     header = (
         f"{'ASSET':<14} {'SIDE':<6} {'ENTRY':>12} {'CLOSE':>12} {'MARK':>12} "
         f"{'PnL ELDER':>12} {'PnL LIVE':>12} {'IMP W/D':<11} {'TARGET':>12} "
-        f"{'TRAIL STOP':>12} {'VERDICT':<13}"
+        f"{'TRAIL STOP':>12} {'OPEN RISK':>12} {'VERDICT':<13}"
     )
     print("\n" + header)
     print("-" * len(header))
@@ -121,7 +122,8 @@ def print_positions_table(snapshot: dict[str, Any]) -> None:
             f"{num(p['close_price']):>12} {num(p['live_price']):>12} "
             f"{p['pnl_elder']:>12,.2f} {p['pnl_live']:>12,.2f} "
             f"{p['weekly_impulse'] + '/' + p['daily_impulse']:<11} "
-            f"{target:>12} {num(p['suggested_stop']):>12} {verdict:<13}"
+            f"{target:>12} {num(p['suggested_stop']):>12} {num(p.get('open_risk')):>12} "
+            f"{verdict:<13}"
         )
     print()
     for p in positions:
@@ -139,6 +141,9 @@ def do_refresh(cfg: Config) -> dict[str, Any]:
     out = cfg.cache_dir / SNAPSHOT_FILENAME
     out.write_text(json.dumps(snapshot))
     print(f"snapshot written to {out}")
+    if cfg.journal.enabled:
+        append_journal_entry(snapshot, cfg.journal.path)
+        print(f"journal appended to {cfg.journal.path}")
     print_signals_table(snapshot)
     print_positions_table(snapshot)
     return snapshot
