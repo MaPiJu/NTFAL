@@ -26,8 +26,11 @@ class ScannerConfig:
     watchlist: tuple[str, ...]
     weekly_interval: str
     daily_interval: str
+    third_screen_interval: str
+    use_third_screen: bool
     lookback_weeks: int
     lookback_days: int
+    lookback_third_screen: int
 
 
 @dataclass(frozen=True)
@@ -74,8 +77,11 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> Config:
             watchlist=tuple(s["watchlist"]),
             weekly_interval=s.get("weekly_interval", "1w"),
             daily_interval=s.get("daily_interval", "1d"),
+            third_screen_interval=s.get("third_screen_interval", "4h"),
+            use_third_screen=bool(s.get("use_third_screen", False)),
             lookback_weeks=int(s.get("lookback_weeks", 260)),
             lookback_days=int(s.get("lookback_days", 500)),
+            lookback_third_screen=int(s.get("lookback_third_screen", 300)),
         ),
         risk=RiskConfig(
             equity=equity,

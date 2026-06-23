@@ -18,7 +18,7 @@ from typing import Literal
 
 import pandas as pd
 
-from indicators import ema, force_index, impulse_color
+from indicators import ema, force_index, impulse_color, macd_histogram
 
 Action = Literal["long", "short", "stand_aside"]
 Trend = Literal["up", "down", "neutral"]
@@ -32,6 +32,9 @@ PENETRATION_LOOKBACK_DAYS = 35
 # Weekly channel: average excursion of highs/lows beyond EMA13 over this window.
 CHANNEL_LOOKBACK_WEEKS = 26
 MIN_REWARD_RISK = 2.0
+# Treat tiny weekly EMA13 slopes as range/no-trend instead of a tradable tide.
+FLAT_TREND_SLOPE_PCT = 0.001
+DIVERGENCE_LOOKBACK = 60
 
 # --- Trade-quality ranking ("which setup is best?", Elder's selection logic) ---
 # Reward:risk is Elder's gatekeeper (2:1 floor); 3:1 or better earns full credit.
@@ -62,6 +65,9 @@ class Signal:
     weekly_trend_strength: float  # scale-free |slope| of the weekly EMA13
     pullback_quality: float  # 0-1 depth of today's daily Force-Index pullback
     quality_score: float | None  # composite Elder rank, None when standing aside
+    market_regime: str  # trending / flat, derived from the weekly EMA13 slope filter
+    third_screen_impulse: str | None  # optional lower-timeframe Impulse used for entry timing
+    divergences: list[str]  # Elder MACD-Histogram / Force Index divergence warnings
 
 
 def tick_size(price: float) -> float:
@@ -71,12 +77,23 @@ def tick_size(price: float) -> float:
     return 10.0 ** (math.floor(math.log10(price)) - (PRICE_SIG_FIGS - 1))
 
 
-def weekly_trend(weekly_close: pd.Series, span: int = EMA_FAST) -> Trend:
-    """First screen: the tide = slope of the weekly EMA13."""
+def weekly_trend(
+    weekly_close: pd.Series,
+    span: int = EMA_FAST,
+    min_slope_pct: float = FLAT_TREND_SLOPE_PCT,
+) -> Trend:
+    """First screen: the tide = slope of the weekly EMA13.
+
+    Tiny EMA slopes are classified as neutral so sideways markets do not become
+    accidental up/down trends because of floating-point noise or one small bar.
+    """
     e = ema(weekly_close, span)
     if len(e) < 2:
         return "neutral"
     diff = float(e.iloc[-1] - e.iloc[-2])
+    base = abs(float(e.iloc[-1]))
+    if base == 0 or abs(diff) / base < min_slope_pct:
+        return "neutral"
     if diff > 0:
         return "up"
     if diff < 0:
@@ -151,7 +168,9 @@ def _long_levels(
     pen = average_penetration(daily, "down")
     limit = projected_ema(daily["close"]) - pen if pen is not None else None
 
-    stop = float(daily["low"].iloc[-2:].min()) - tick  # daily stop below recent lows
+    pen_stop = average_penetration(daily, "down")
+    stop_offset = pen_stop if pen_stop is not None else tick
+    stop = float(daily["low"].iloc[-2:].min()) - stop_offset  # SafeZone-style daily stop
 
     # Target: weekly value zone (between EMA13 and EMA26); if price already
     # trades above value, fall back to the weekly upper channel.
@@ -173,13 +192,93 @@ def _short_levels(
     pen = average_penetration(daily, "up")
     limit = projected_ema(daily["close"]) + pen if pen is not None else None
 
-    stop = float(daily["high"].iloc[-2:].max()) + tick
+    pen_stop = average_penetration(daily, "up")
+    stop_offset = pen_stop if pen_stop is not None else tick
+    stop = float(daily["high"].iloc[-2:].max()) + stop_offset
 
     e13 = float(ema(weekly["close"], EMA_FAST).iloc[-1])
     e26 = float(ema(weekly["close"], EMA_SLOW).iloc[-1])
     value_low = min(e13, e26)
     target = value_low if value_low < entry else weekly_channel(weekly)[1]
     return entry, limit, stop, target
+
+
+def _last_pivot(values: pd.Series, *, kind: Literal["low", "high"]) -> tuple[int, float] | None:
+    if values.empty or values.isna().all():
+        return None
+    idx = int(values.idxmin() if kind == "low" else values.idxmax())
+    return idx, float(values.loc[idx])
+
+
+def _divergence_for_indicator(
+    close: pd.Series, indicator: pd.Series, name: str, lookback: int = DIVERGENCE_LOOKBACK
+) -> list[str]:
+    """Detect simple Elder-style price/indicator divergences on recent swings.
+
+    Bullish: latest price low undercuts a prior low while the indicator makes a
+    higher low. Bearish: latest price high exceeds a prior high while the
+    indicator makes a lower high. This is intentionally conservative and only
+    emits warnings; it does not create trades by itself.
+    """
+    df = pd.DataFrame({"close": close, "indicator": indicator}).dropna().tail(lookback)
+    if len(df) < 10:
+        return []
+    df = df.reset_index(drop=True)
+    split = max(3, len(df) // 2)
+    prev = df.iloc[:split]
+    recent = df.iloc[split:]
+    out: list[str] = []
+
+    prev_low = _last_pivot(prev["close"], kind="low")
+    recent_low = _last_pivot(recent["close"], kind="low")
+    if prev_low and recent_low:
+        pi, pc = prev_low
+        ri, rc = recent_low
+        if rc < pc and float(recent["indicator"].loc[ri]) > float(prev["indicator"].loc[pi]):
+            out.append(f"bullish {name} divergence")
+
+    prev_high = _last_pivot(prev["close"], kind="high")
+    recent_high = _last_pivot(recent["close"], kind="high")
+    if prev_high and recent_high:
+        pi, pc = prev_high
+        ri, rc = recent_high
+        if rc > pc and float(recent["indicator"].loc[ri]) < float(prev["indicator"].loc[pi]):
+            out.append(f"bearish {name} divergence")
+    return out
+
+
+def detect_divergences(daily: pd.DataFrame, lookback: int = DIVERGENCE_LOOKBACK) -> list[str]:
+    """Recent Elder divergence warnings from MACD-Histogram and 13-EMA Force Index."""
+    close = daily["close"]
+    volume = daily["volume"]
+    out: list[str] = []
+    out.extend(_divergence_for_indicator(close, macd_histogram(close), "MACD-Histogram", lookback))
+    out.extend(
+        _divergence_for_indicator(
+            close, force_index(close, volume, span=13), "Force Index", lookback
+        )
+    )
+    return out
+
+
+def _third_screen_levels(
+    action: Action, lower_timeframe: pd.DataFrame | None, fallback_entry: float
+) -> tuple[float, str | None]:
+    """Optional lower-timeframe trigger for the third screen.
+
+    When 4h bars are supplied, time the stop-entry from the latest completed 4h
+    bar instead of the daily bar; otherwise preserve the daily trigger.
+    """
+    if lower_timeframe is None or lower_timeframe.empty:
+        return fallback_entry, None
+    imp = str(impulse_color(lower_timeframe["close"]).iloc[-1])
+    if action == "long":
+        px = float(lower_timeframe["high"].iloc[-1])
+        return px + tick_size(px), imp
+    if action == "short":
+        px = float(lower_timeframe["low"].iloc[-1])
+        return px - tick_size(px), imp
+    return fallback_entry, imp
 
 
 def _clamp01(x: float) -> float:
@@ -261,7 +360,12 @@ def select_best(signals: Sequence[Signal]) -> Signal | None:
     )
 
 
-def evaluate_asset(asset: str, weekly: pd.DataFrame, daily: pd.DataFrame) -> Signal:
+def evaluate_asset(
+    asset: str,
+    weekly: pd.DataFrame,
+    daily: pd.DataFrame,
+    lower_timeframe: pd.DataFrame | None = None,
+) -> Signal:
     """Run the three screens + Impulse censorship for one asset.
 
     `weekly` and `daily` must be OHLCV frames of *completed* bars
@@ -270,7 +374,9 @@ def evaluate_asset(asset: str, weekly: pd.DataFrame, daily: pd.DataFrame) -> Sig
     w_imp = str(impulse_color(weekly["close"]).iloc[-1])
     d_imp = str(impulse_color(daily["close"]).iloc[-1])
     trend = weekly_trend(weekly["close"])
+    market_regime = "flat" if trend == "neutral" else "trending"
     fi2 = float(force_index(daily["close"], daily["volume"], span=2).iloc[-1])
+    divergences = detect_divergences(daily)
 
     candidate: Action = "stand_aside"
     if trend == "up":
@@ -297,13 +403,24 @@ def evaluate_asset(asset: str, weekly: pd.DataFrame, daily: pd.DataFrame) -> Sig
         reason = f"short vetoed by Impulse (weekly={w_imp}, daily={d_imp}: green forbids shorts)"
 
     entry = limit = stop = target = rr = None
+    third_impulse = None
     if candidate == "long":
         entry, limit, stop, target = _long_levels(weekly, daily)
-        if entry > stop:
+        entry, third_impulse = _third_screen_levels(candidate, lower_timeframe, entry)
+        if third_impulse == "red":
+            candidate = "stand_aside"
+            reason = "long vetoed by 4h third-screen Impulse red"
+            entry = limit = stop = target = rr = None
+        elif entry > stop:
             rr = (target - entry) / (entry - stop)
     elif candidate == "short":
         entry, limit, stop, target = _short_levels(weekly, daily)
-        if stop > entry:
+        entry, third_impulse = _third_screen_levels(candidate, lower_timeframe, entry)
+        if third_impulse == "green":
+            candidate = "stand_aside"
+            reason = "short vetoed by 4h third-screen Impulse green"
+            entry = limit = stop = target = rr = None
+        elif stop > entry:
             rr = (entry - target) / (stop - entry)
 
     tide_strength = weekly_slope_strength(weekly["close"])
@@ -332,4 +449,7 @@ def evaluate_asset(asset: str, weekly: pd.DataFrame, daily: pd.DataFrame) -> Sig
         weekly_trend_strength=tide_strength,
         pullback_quality=pull,
         quality_score=score,
+        market_regime=market_regime,
+        third_screen_impulse=third_impulse,
+        divergences=divergences,
     )

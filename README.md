@@ -12,12 +12,14 @@ charts so the operator can make a **discretionary** entry decision and place ord
 
 ## How it works
 
-- **First screen (tide):** weekly chart — strategic bias from the slope of the weekly EMA13.
+- **First screen (tide):** weekly chart — strategic bias from the slope of the weekly EMA13, with tiny slopes treated as **flat/no-trend** so ranges do not become false signals.
 - **Second screen (wave):** daily chart — the 2-EMA Force Index looks for pullbacks
   *against* the daily wave but *with* the weekly tide.
 - **Third screen (entry):** buy-stop 1 tick above the prior day's high (longs) /
   sell-stop 1 tick below the prior day's low (shorts), plus an alternative limit at the
-  projected EMA13 offset by the average pullback penetration.
+  projected EMA13 offset by the average pullback penetration. Optionally enable a true
+  lower-timeframe third screen (`4h` by default) to time the stop-entry from the latest
+  completed 4h high/low and veto entries against the 4h Impulse.
 - **Impulse censorship (applied last):** any **red** Impulse (weekly or daily) forbids
   longs; any **green** forbids shorts.
 - **Best-trade ranking:** every validated setup gets a 0–100 quality score blending
@@ -25,6 +27,8 @@ charts so the operator can make a **discretionary** entry decision and place ord
   Impulse agreement across both screens, weekly-tide strength, and daily pullback depth.
   The single highest-scoring setup that clears the 2:1 floor is flagged as the **best
   trade** (`★`); the table is sorted best-first. The 6% guard suppresses any pick.
+- **Divergences:** recent bullish/bearish divergences between price and MACD-Histogram /
+  13-EMA Force Index are surfaced as Elder warnings.
 - **Risk:** 2% Rule (Iron Triangle sizing, default 1% risk per trade, hard cap 2%) and
   the 6% monthly guard that blocks all new entries once monthly losses + open risk reach
   6% of the month-start equity.
@@ -67,7 +71,8 @@ daily close — the same basis as the verdict) and **live** (the exchange mark p
 noise; the live column is there to reconcile with your exchange screen.
 
 Indicators are exactly the ones in the spec — EMA13/EMA26, MACD-Histogram(12,26,9),
-2-EMA Force Index (EMA-13 FI shown for context), Impulse color. Nothing else.
+2-EMA Force Index (EMA-13 FI shown for context), Impulse color. Divergence warnings reuse
+MACD-Histogram and Force Index; no extra indicators are introduced.
 
 ## Install
 
@@ -126,6 +131,8 @@ Edit `config.toml`:
   assets are excluded; the refresh fires two requests per asset, so full universes
   take a few minutes and assets too new to have two completed weekly/daily bars are
   listed as skipped.
+- `scanner.use_third_screen` / `scanner.third_screen_interval` — optional lower-timeframe
+  entry timing, disabled by default and set to `4h` when enabled.
 - `risk.equity` — account equity used for sizing
 - `risk.risk_pct` — risk per trade (default `0.01` = 1%; hard-capped at 2%)
 - `risk.equity_at_month_start`, `risk.month_realized_losses`, `risk.open_trade_risk` —

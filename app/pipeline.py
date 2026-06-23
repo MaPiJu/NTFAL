@@ -201,6 +201,16 @@ def build_snapshot(
             client.refresh(coin, cfg.scanner.daily_interval, cfg.scanner.lookback_days),
             now_ms,
         )
+        third = None
+        if cfg.scanner.use_third_screen:
+            third = completed_bars(
+                client.refresh(
+                    coin,
+                    cfg.scanner.third_screen_interval,
+                    cfg.scanner.lookback_third_screen,
+                ),
+                now_ms,
+            )
 
         # Fresh listings without two completed bars per timeframe can't be
         # evaluated (no slope, no prior-day levels) — report, don't crash.
@@ -211,7 +221,7 @@ def build_snapshot(
         if coin in held:
             held_frames[coin] = (weekly, daily)
 
-        sig = evaluate_asset(coin, weekly, daily)
+        sig = evaluate_asset(coin, weekly, daily, third)
         evaluated.append(sig)
         row = asdict(sig)
         row["position_size"] = None
@@ -229,6 +239,8 @@ def build_snapshot(
         signals.append(row)
 
         charts[coin] = {"weekly": chart_payload(weekly), "daily": chart_payload(daily)}
+        if third is not None and len(third) >= 2:
+            charts[coin]["third_screen"] = chart_payload(third)
 
     # "Which trade do I take?" — rank the validated setups and flag the single
     # best. While the 6% guard is active no new entry is allowed, so no pick.

@@ -53,7 +53,7 @@ def print_signals_table(snapshot: dict[str, Any]) -> None:
 
     # 14-wide asset column: tradfi names like "xyz:ALUMINIUM" are longer than tickers.
     header = (
-        f"{'ASSET':<14} {'TIDE':<7} {'IMP W/D':<11} {'FI(2)':>14} {'ACTION':<13} "
+        f"{'ASSET':<14} {'REGIME':<8} {'TIDE':<7} {'IMP W/D/4H':<14} {'FI(2)':>14} {'ACTION':<13} "
         f"{'PRICE':>12} {'ENTRY':>12} {'LIMIT':>12} {'STOP':>12} {'TARGET':>12} "
         f"{'R:R':>7} {'SCORE':>6} {'SIZE':>10}"
     )
@@ -66,9 +66,12 @@ def print_signals_table(snapshot: dict[str, Any]) -> None:
         size = num(s["position_size"]["size"]) if s["position_size"] else "—"
         score = f"{s['quality_score'] * 100:.0f}" if s.get("quality_score") is not None else "—"
         action = s["action"] + (" ★" if s.get("is_top_pick") else "")
+        impulses = "/".join(
+            [s["weekly_impulse"], s["daily_impulse"], s.get("third_screen_impulse") or "—"]
+        )
         print(
-            f"{s['asset']:<14} {s['weekly_trend']:<7} "
-            f"{s['weekly_impulse'] + '/' + s['daily_impulse']:<11} "
+            f"{s['asset']:<14} {s.get('market_regime', '—'):<8} {s['weekly_trend']:<7} "
+            f"{impulses:<14} "
             f"{s['force_index_2']:>14,.4g} {action:<13} "
             f"{num(s.get('last_close')):>12} "
             f"{num(s['entry']):>12} {num(s['entry_limit']):>12} {num(s['stop']):>12} "
@@ -76,7 +79,9 @@ def print_signals_table(snapshot: dict[str, Any]) -> None:
         )
     print()
     for s in snapshot["signals"]:
-        print(f"  {s['asset']}: {s['reason']}")
+        divs = s.get("divergences") or []
+        suffix = f" · divergences: {', '.join(divs)}" if divs else ""
+        print(f"  {s['asset']}: {s['reason']}{suffix}")
     if snapshot.get("skipped"):
         print(f"\nskipped (not enough history yet): {', '.join(snapshot['skipped'])}")
     print("\nInformational only — not financial advice; no orders are placed.\n")

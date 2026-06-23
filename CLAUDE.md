@@ -23,10 +23,10 @@ orders **manually**.
 
 ## Strategy Spec (canonical — do not drift)
 Timeframes follow Elder's "factor of ~5", adapted to a 24/7 daily swing trader:
-- **First screen (the tide)** = **weekly** (`1w`). Decide strategic bias: bull / bear / neutral.
+- **First screen (the tide)** = **weekly** (`1w`). Decide strategic bias: bull / bear / neutral; tiny EMA13 slopes are treated as flat/no-trend.
 - **Second screen (the wave)** = **daily** (`1d`). Counter-trend oscillator finds entries
   *against* the short-term wave but *with* the weekly tide.
-- **Third screen (entry)** = entry technique on the daily (or a quick look at `4h`).
+- **Third screen (entry)** = entry technique on the daily, with optional true lower-timeframe timing on `4h`.
 
 Indicators and canonical parameters (per the book's figures/text):
 - `EMA_fast = 13`, `EMA_slow = 26` (exponential).
@@ -65,6 +65,8 @@ exit tools only — **no new indicators**. Per held position, produce a verdict
 - **HOLD** otherwise; always surface a **SafeZone trailing-stop** suggestion (behind the
   recent daily extreme by the average EMA penetration, ratcheted to ≥ break-even in profit).
 Output is informational only; a human exits manually.
+
+Divergence warnings reuse Elder indicators only: recent price/indicator disagreement on MACD-Histogram or 13-EMA Force Index is surfaced in the signal reasons/dashboard, without introducing new indicators.
 
 "Average penetration": over the last ~4–6 weeks, measure how far pullbacks pierce below
 (uptrend) / above (downtrend) the fast EMA; average those penetrations; project tomorrow's
