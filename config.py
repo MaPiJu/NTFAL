@@ -34,6 +34,22 @@ class ScannerConfig:
 
 
 @dataclass(frozen=True)
+class StrategyConfig:
+    flat_trend_slope_pct: float
+    penetration_lookback_days: int
+    channel_lookback_weeks: int
+    min_reward_risk: float
+    divergence_lookback: int
+    rr_excellent: float
+    strong_weekly_slope: float
+    fi_scale_lookback: int
+    score_reward_risk_weight: float
+    score_impulse_weight: float
+    score_tide_weight: float
+    score_pullback_weight: float
+
+
+@dataclass(frozen=True)
 class RiskConfig:
     equity: float
     risk_pct: float
@@ -51,10 +67,18 @@ class PositionsConfig:
 
 
 @dataclass(frozen=True)
+class JournalConfig:
+    enabled: bool
+    path: Path
+
+
+@dataclass(frozen=True)
 class Config:
     scanner: ScannerConfig
+    strategy: StrategyConfig
     risk: RiskConfig
     positions: PositionsConfig
+    journal: JournalConfig
     cache_dir: Path
 
 
@@ -63,8 +87,10 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> Config:
     raw = tomllib.loads(path.read_text())
 
     s = raw["scanner"]
+    st = raw.get("strategy", {})
     r = raw["risk"]
     p = raw.get("positions", {})
+    j = raw.get("journal", {})
 
     equity = float(os.environ.get("EQUITY", r["equity"]))
     risk_pct = float(os.environ.get("RISK_PCT", r["risk_pct"]))
@@ -83,6 +109,20 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> Config:
             lookback_days=int(s.get("lookback_days", 500)),
             lookback_third_screen=int(s.get("lookback_third_screen", 300)),
         ),
+        strategy=StrategyConfig(
+            flat_trend_slope_pct=float(st.get("flat_trend_slope_pct", 0.001)),
+            penetration_lookback_days=int(st.get("penetration_lookback_days", 35)),
+            channel_lookback_weeks=int(st.get("channel_lookback_weeks", 26)),
+            min_reward_risk=float(st.get("min_reward_risk", 2.0)),
+            divergence_lookback=int(st.get("divergence_lookback", 60)),
+            rr_excellent=float(st.get("rr_excellent", 3.0)),
+            strong_weekly_slope=float(st.get("strong_weekly_slope", 0.03)),
+            fi_scale_lookback=int(st.get("fi_scale_lookback", 20)),
+            score_reward_risk_weight=float(st.get("score_reward_risk_weight", 0.40)),
+            score_impulse_weight=float(st.get("score_impulse_weight", 0.25)),
+            score_tide_weight=float(st.get("score_tide_weight", 0.20)),
+            score_pullback_weight=float(st.get("score_pullback_weight", 0.15)),
+        ),
         risk=RiskConfig(
             equity=equity,
             risk_pct=risk_pct,
@@ -91,5 +131,9 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> Config:
             open_trade_risk=float(r.get("open_trade_risk", 0.0)),
         ),
         positions=PositionsConfig(address=address),
+        journal=JournalConfig(
+            enabled=bool(j.get("enabled", True)),
+            path=Path(j.get("path", "cache/trading_journal.jsonl")),
+        ),
         cache_dir=Path(raw.get("cache", {}).get("dir", "cache")),
     )

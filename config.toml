@@ -22,17 +22,34 @@ lookback_weeks = 260
 lookback_days = 500
 lookback_third_screen = 300
 
+[strategy]
+# Strategy thresholds/weights. Defaults mirror the Elder scanner's built-in
+# behavior; tune here instead of editing code.
+flat_trend_slope_pct = 0.001
+penetration_lookback_days = 35
+channel_lookback_weeks = 26
+min_reward_risk = 2.0
+divergence_lookback = 60
+rr_excellent = 3.0
+strong_weekly_slope = 0.03
+fi_scale_lookback = 20
+score_reward_risk_weight = 0.40
+score_impulse_weight = 0.25
+score_tide_weight = 0.20
+score_pullback_weight = 0.15
+
 [risk]
 # Account equity in USD (used by the 2% Iron Triangle sizing).
 equity = 10000.0
 # Risk per trade as a fraction of equity. Default 1%, HARD CAP 2% — values
 # above 0.02 are clamped, never silently exceeded.
 risk_pct = 0.01
-# 6% Rule bookkeeping — this tool is read-only and does not track your trades,
-# so update these by hand (or leave at 0 if flat):
+# 6% Rule bookkeeping:
 #   equity_at_month_start: equity on the 1st of the current month
 #   month_realized_losses: realized losses so far this month (positive number)
-#   open_trade_risk:       sum of (entry - stop) * size over open positions
+#   open_trade_risk:       optional manual extra risk for trades not visible from
+#                          the configured Hyperliquid address. Visible positions
+#                          are now risked automatically from the Elder stop.
 equity_at_month_start = 10000.0
 month_realized_losses = 0.0
 open_trade_risk = 0.0
@@ -45,6 +62,12 @@ open_trade_risk = 0.0
 # signed and no order is ever placed. Leave empty to disable trade management.
 # May also be set via the HL_ADDRESS environment variable (see .env.example).
 address = ""
+
+[journal]
+# Append one compact JSONL entry per `run.py` refresh: top pick, actionable
+# signals, open-position verdicts, stops, risks and reasons.
+enabled = true
+path = "cache/trading_journal.jsonl"
 
 [cache]
 dir = "cache"

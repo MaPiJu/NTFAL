@@ -34,15 +34,18 @@ from typing import Any, Literal
 import pandas as pd
 
 from indicators import ema, impulse_color
+from strategy.params import StrategyParams
 from strategy.triple_screen import (
     EMA_FAST,
     EMA_SLOW,
     Trend,
     average_penetration,
     tick_size,
-    weekly_channel,
+    weekly_channel_with_params,
     weekly_trend,
 )
+
+DEFAULT_PARAMS = StrategyParams()
 
 Side = Literal["long", "short"]
 Verdict = Literal["hold", "take_profits", "exit"]
@@ -124,19 +127,31 @@ def parse_positions(state: Mapping[str, Any]) -> list[OpenPosition]:
     return out
 
 
-def _profit_target(pos: OpenPosition, weekly: pd.DataFrame) -> float:
+def _profit_target(
+    pos: OpenPosition, weekly: pd.DataFrame, params: StrategyParams = DEFAULT_PARAMS
+) -> float:
     """Weekly value-zone edge in the trade's direction, or the weekly channel
     band when price already trades beyond value (mirrors the entry targets)."""
     e13 = float(ema(weekly["close"], EMA_FAST).iloc[-1])
     e26 = float(ema(weekly["close"], EMA_SLOW).iloc[-1])
     if pos.side == "long":
         value_edge = max(e13, e26)
-        return value_edge if value_edge > pos.entry else weekly_channel(weekly)[0]
+        if value_edge > pos.entry:
+            return value_edge
+        return weekly_channel_with_params(weekly, params)[0]
     value_edge = min(e13, e26)
-    return value_edge if value_edge < pos.entry else weekly_channel(weekly)[1]
+    if value_edge < pos.entry:
+        return value_edge
+    return weekly_channel_with_params(weekly, params)[1]
 
 
-def safezone_stop(pos: OpenPosition, daily: pd.DataFrame, *, in_profit: bool) -> float:
+def safezone_stop(
+    pos: OpenPosition,
+    daily: pd.DataFrame,
+    *,
+    in_profit: bool,
+    params: StrategyParams = DEFAULT_PARAMS,
+) -> float:
     """Elder SafeZone-style trailing stop: place it behind the recent daily extreme
     by the average EMA penetration, ratcheted to break-even once the trade profits.
 
@@ -147,19 +162,22 @@ def safezone_stop(pos: OpenPosition, daily: pd.DataFrame, *, in_profit: bool) ->
     """
     if pos.side == "long":
         base = float(daily["low"].iloc[-2:].min())
-        pen = average_penetration(daily, "down")
+        pen = average_penetration(daily, "down", lookback=params.penetration_lookback_days)
         offset = pen if pen is not None else tick_size(base)
         stop = base - offset
         return max(stop, pos.entry) if in_profit else stop
     base = float(daily["high"].iloc[-2:].max())
-    pen = average_penetration(daily, "up")
+    pen = average_penetration(daily, "up", lookback=params.penetration_lookback_days)
     offset = pen if pen is not None else tick_size(base)
     stop = base + offset
     return min(stop, pos.entry) if in_profit else stop
 
 
 def assess_position(
-    pos: OpenPosition, weekly: pd.DataFrame, daily: pd.DataFrame
+    pos: OpenPosition,
+    weekly: pd.DataFrame,
+    daily: pd.DataFrame,
+    params: StrategyParams = DEFAULT_PARAMS,
 ) -> TradeManagement:
     """Elder exit verdict for one open position from completed weekly + daily bars.
 
@@ -171,7 +189,7 @@ def assess_position(
     """
     w_imp = str(impulse_color(weekly["close"]).iloc[-1])
     d_imp = str(impulse_color(daily["close"]).iloc[-1])
-    trend = weekly_trend(weekly["close"])
+    trend = weekly_trend(weekly["close"], min_slope_pct=params.flat_trend_slope_pct)
 
     direction = 1.0 if pos.side == "long" else -1.0
     close_price = float(daily["close"].iloc[-1])
@@ -188,9 +206,9 @@ def assess_position(
     # Verdict is on completed bars, so "in profit" uses the Elder (close) PnL.
     in_profit = pnl_elder > 0
 
-    target = _profit_target(pos, weekly)
+    target = _profit_target(pos, weekly, params)
     target_reached = close_price >= target if pos.side == "long" else close_price <= target
-    suggested_stop = safezone_stop(pos, daily, in_profit=in_profit)
+    suggested_stop = safezone_stop(pos, daily, in_profit=in_profit, params=params)
 
     favorable_trend: Trend = "up" if pos.side == "long" else "down"
     favorable_imp = "green" if pos.side == "long" else "red"

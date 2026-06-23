@@ -18,6 +18,7 @@ from config import WATCHLIST_ALL, Config
 from data.hyperliquid import HyperliquidClient, HyperliquidError, completed_bars
 from indicators import ema, force_index, impulse_color, macd_histogram
 from risk.sizing import position_size, six_percent_guard
+from strategy.params import StrategyParams
 from strategy.trade_management import OpenPosition, assess_position, parse_positions
 from strategy.triple_screen import EMA_FAST, EMA_SLOW, Signal, evaluate_asset, select_best
 
@@ -119,6 +120,16 @@ def fetch_open_positions(cfg: Config, client: HyperliquidClient) -> list[OpenPos
     return parse_positions(state)
 
 
+def strategy_params(cfg: Config) -> StrategyParams:
+    return StrategyParams(**cfg.strategy.__dict__)
+
+
+def position_open_risk(position: dict[str, Any]) -> float:
+    """Risk still open using the current Elder/SafeZone stop suggestion."""
+    per_unit = abs(float(position["entry"]) - float(position["suggested_stop"]))
+    return per_unit * float(position["size"])
+
+
 def _position_frames(
     cfg: Config,
     client: HyperliquidClient,
@@ -143,6 +154,7 @@ def build_positions(
     open_positions: list[OpenPosition],
     frames: dict[str, tuple[pd.DataFrame, pd.DataFrame]],
     now_ms: int,
+    params: StrategyParams,
 ) -> list[dict[str, Any]]:
     """Elder exit verdict per open position, reusing scan frames where available.
 
@@ -155,7 +167,7 @@ def build_positions(
         if wd is None:
             continue
         weekly, daily = wd
-        out.append(asdict(assess_position(pos, weekly, daily)))
+        out.append(asdict(assess_position(pos, weekly, daily, params)))
     return out
 
 
@@ -170,12 +182,8 @@ def build_snapshot(
     whole HIP-3 dex (e.g. "xyz:*" for the tradfi perps).
     """
     now_ms = int(time.time() * 1000)
+    params = strategy_params(cfg)
     sz_decimals = expand_watchlist(cfg.scanner.watchlist, client)
-    guard = six_percent_guard(
-        cfg.risk.equity_at_month_start,
-        cfg.risk.month_realized_losses,
-        cfg.risk.open_trade_risk,
-    )
 
     # Open positions (read-only) drive the Elder trade-management section.
     try:
@@ -221,26 +229,41 @@ def build_snapshot(
         if coin in held:
             held_frames[coin] = (weekly, daily)
 
-        sig = evaluate_asset(coin, weekly, daily, third)
+        sig = evaluate_asset(coin, weekly, daily, third, params)
         evaluated.append(sig)
         row = asdict(sig)
         row["position_size"] = None
-        if sig.action != "stand_aside" and sig.entry and sig.stop and not guard.blocked:
-            row["position_size"] = asdict(
-                position_size(
-                    cfg.risk.equity,
-                    sig.entry,
-                    sig.stop,
-                    cfg.risk.risk_pct,
-                    sz_decimals=sz_decimals[coin],
-                )
-            )
         row["last_close"] = float(daily["close"].iloc[-1]) if not daily.empty else None
         signals.append(row)
 
         charts[coin] = {"weekly": chart_payload(weekly), "daily": chart_payload(daily)}
         if third is not None and len(third) >= 2:
             charts[coin]["third_screen"] = chart_payload(third)
+
+    # Elder trade management for whatever is already open. This is built before
+    # the final 6% guard so open risk can be derived from the current stop levels.
+    positions = build_positions(cfg, client, open_positions, held_frames, now_ms, params)
+    auto_open_trade_risk = sum(position_open_risk(p) for p in positions)
+    total_open_trade_risk = cfg.risk.open_trade_risk + auto_open_trade_risk
+    guard = six_percent_guard(
+        cfg.risk.equity_at_month_start,
+        cfg.risk.month_realized_losses,
+        total_open_trade_risk,
+    )
+    for p in positions:
+        p["open_risk"] = position_open_risk(p)
+
+    for row in signals:
+        if row["action"] != "stand_aside" and row["entry"] and row["stop"] and not guard.blocked:
+            row["position_size"] = asdict(
+                position_size(
+                    cfg.risk.equity,
+                    row["entry"],
+                    row["stop"],
+                    cfg.risk.risk_pct,
+                    sz_decimals=sz_decimals[row["asset"]],
+                )
+            )
 
     # "Which trade do I take?" — rank the validated setups and flag the single
     # best. While the 6% guard is active no new entry is allowed, so no pick.
@@ -249,14 +272,14 @@ def build_snapshot(
     for row in signals:
         row["is_top_pick"] = row["asset"] == best_asset
 
-    # Elder trade management for whatever is already open.
-    positions = build_positions(cfg, client, open_positions, held_frames, now_ms)
-
     return {
         "generated_at": datetime.now(tz=UTC).isoformat(timespec="seconds"),
         "equity": cfg.risk.equity,
         "risk_pct": cfg.risk.risk_pct,
         "guard": asdict(guard),
+        "manual_open_trade_risk": cfg.risk.open_trade_risk,
+        "auto_open_trade_risk": auto_open_trade_risk,
+        "total_open_trade_risk": total_open_trade_risk,
         "top_pick": best_asset,
         "signals": signals,
         "positions": positions,
