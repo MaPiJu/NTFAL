@@ -8,8 +8,10 @@ from indicators import ema
 from strategy.triple_screen import (
     EMA_FAST,
     Signal,
+    _long_levels,
     average_penetration,
     compute_quality_score,
+    detect_divergences,
     evaluate_asset,
     impulse_confirmation,
     projected_ema,
@@ -53,7 +55,7 @@ def test_uptrend_pullback_goes_long():
     # buy-stop one tick above the prior day's high
     prior_high = float(daily["high"].iloc[-1])
     assert sig.entry == pytest.approx(prior_high + tick_size(prior_high))
-    # protective stop one tick below the lower of the last two daily lows
+    # no EMA penetration in this synthetic trend: SafeZone falls back to one tick
     expected_stop = float(daily["low"].iloc[-2:].min()) - tick_size(prior_high)
     assert sig.stop == pytest.approx(expected_stop)
     assert sig.target is not None and sig.target > sig.entry
@@ -176,6 +178,9 @@ def _mk_signal(asset: str, action: str, rr: float | None, score: float | None, r
         weekly_trend_strength=0.02,
         pullback_quality=0.5,
         quality_score=score,
+        market_regime="trending",
+        third_screen_impulse=None,
+        divergences=[],
     )
 
 
@@ -202,3 +207,60 @@ def test_average_penetration_and_projection():
     assert average_penetration(daily, "down") == pytest.approx(2.0)
     assert average_penetration(daily, "up") is None  # highs never pierce the EMA
     assert projected_ema(daily["close"]) == pytest.approx(100.0)
+
+
+def test_tiny_weekly_slope_is_treated_as_flat_market():
+    weekly = make_ohlcv([100.0 + 0.001 * i for i in range(40)], freq="W")
+    daily = make_ohlcv([100.0 + i for i in range(60)] + [156.0])
+
+    sig = evaluate_asset("BTC", weekly, daily)
+
+    assert sig.action == "stand_aside"
+    assert sig.weekly_trend == "neutral"
+    assert sig.market_regime == "flat"
+    assert "neutral" in sig.reason
+
+
+def test_optional_4h_third_screen_sets_entry_and_can_veto():
+    daily = make_ohlcv([100.0 + i for i in range(60)] + [156.0])
+    four_h = make_ohlcv([150.0 + i * 0.1 for i in range(30)], freq="4h")
+
+    sig = evaluate_asset("BTC", WEEKLY_UP, daily, four_h)
+
+    last_4h_high = float(four_h["high"].iloc[-1])
+    assert sig.third_screen_impulse in {"green", "red", "blue"}
+    assert sig.entry == pytest.approx(last_4h_high + tick_size(last_4h_high))
+
+    falling_4h = make_ohlcv([180.0 - 0.1 * i * i for i in range(30)], freq="4h")
+    vetoed = evaluate_asset("BTC", WEEKLY_UP, daily, falling_4h)
+    assert vetoed.action == "stand_aside"
+    assert "4h third-screen" in vetoed.reason
+
+
+def test_safezone_initial_stop_uses_average_penetration():
+    closes = [100.0] * 47
+    lows = [100.0] * 47
+    lows[-5], lows[-3], lows[-2] = 98.0, 97.0, 99.0
+    highs = [101.0] * 47
+    daily = make_ohlcv(closes, lows=lows, highs=highs)
+
+    entry, _limit, stop, _target = _long_levels(WEEKLY_UP, daily)
+
+    assert average_penetration(daily, "down") == pytest.approx(2.0)
+    assert stop == pytest.approx(min(lows[-2:]) - 2.0)
+    assert entry > stop
+
+
+def test_detect_divergences_flags_bullish_force_index_divergence():
+    closes = (
+        [120.0 - i for i in range(30)]
+        + [91.0 + 0.5 * i for i in range(10)]
+        + [95.0 - i for i in range(10)]
+    )
+    # The second lower low prints on much lighter volume, so Force Index improves.
+    volumes = [1000.0] * 30 + [900.0] * 10 + [100.0] * 10
+    daily = make_ohlcv(closes, volumes=volumes)
+
+    divs = detect_divergences(daily)
+
+    assert any(d.startswith("bullish") for d in divs)

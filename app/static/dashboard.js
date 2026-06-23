@@ -61,8 +61,9 @@ function renderTable(snapshot) {
     if (s.is_top_pick) row.classList.add("top-pick");
     row.innerHTML = `
       <td><strong>${s.asset}</strong></td>
+      <td>${s.market_regime ?? "—"}</td>
       <td>${s.weekly_trend}</td>
-      <td>${impulseDot(s.weekly_impulse)} / ${impulseDot(s.daily_impulse)}</td>
+      <td>${impulseDot(s.weekly_impulse)} / ${impulseDot(s.daily_impulse)}${s.third_screen_impulse ? ` / ${impulseDot(s.third_screen_impulse)}` : ""}</td>
       <td>${fmt(s.force_index_2, 4)}</td>
       <td><span class="badge ${s.action}">${s.action.replace("_", " ")}</span></td>
       <td>${fmt(s.last_close)}</td>
@@ -73,7 +74,7 @@ function renderTable(snapshot) {
       <td>${rrCell}</td>
       <td>${scoreCell(s)}</td>
       <td>${size}</td>
-      <td class="reason">${s.reason}</td>`;
+      <td class="reason">${s.reason}${(s.divergences || []).length ? `<br><strong>Divergences:</strong> ${s.divergences.join(", ")}` : ""}</td>`;
     tbody.appendChild(row);
   }
 }
@@ -243,6 +244,7 @@ function renderCards(snapshot) {
       <div class="charts">
         <div><div class="chart-title">Weekly (tide)</div><div class="chart chart-w"></div></div>
         <div><div class="chart-title">Daily (wave)</div><div class="chart chart-d"></div></div>
+        ${snapshot.charts[s.asset].third_screen ? '<div><div class="chart-title">4h (optional third screen)</div><div class="chart chart-4h"></div></div>' : ''}
       </div>`;
     cards.appendChild(card);
   }
@@ -255,6 +257,7 @@ function ensureChartsRendered(card, snapshot) {
   const assetCharts = snapshot.charts[card.dataset.asset];
   renderChart(card.querySelector(".chart-w"), assetCharts.weekly);
   renderChart(card.querySelector(".chart-d"), assetCharts.daily);
+  if (assetCharts.third_screen) renderChart(card.querySelector(".chart-4h"), assetCharts.third_screen);
   card.dataset.rendered = "1";
 }
 

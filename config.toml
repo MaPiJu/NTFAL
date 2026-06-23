@@ -12,9 +12,15 @@
 watchlist = ["*", "xyz:*"]
 weekly_interval = "1w"
 daily_interval = "1d"
+# Optional true third screen for lower-timeframe entry timing. Disabled by
+# default: when enabled, the scanner fetches 4h bars and uses their latest
+# completed high/low plus Impulse color to time the stop-entry.
+use_third_screen = false
+third_screen_interval = "4h"
 # History depth (bars) to keep cached. The API serves at most 5000 candles.
 lookback_weeks = 260
 lookback_days = 500
+lookback_third_screen = 300
 
 [risk]
 # Account equity in USD (used by the 2% Iron Triangle sizing).
