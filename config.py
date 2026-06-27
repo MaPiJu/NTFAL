@@ -35,18 +35,22 @@ class ScannerConfig:
 
 @dataclass(frozen=True)
 class StrategyConfig:
-    flat_trend_slope_pct: float
-    penetration_lookback_days: int
-    channel_lookback_weeks: int
-    min_reward_risk: float
-    divergence_lookback: int
-    rr_excellent: float
-    strong_weekly_slope: float
-    fi_scale_lookback: int
-    score_reward_risk_weight: float
-    score_impulse_weight: float
-    score_tide_weight: float
-    score_pullback_weight: float
+    flat_trend_slope_pct: float = 0.001
+    penetration_lookback_days: int = 35
+    channel_lookback_weeks: int = 26
+    min_reward_risk: float = 2.0
+    divergence_lookback: int = 60
+    rr_excellent: float = 3.0
+    strong_weekly_slope: float = 0.03
+    fi_scale_lookback: int = 20
+    value_zone_max_distance_pct: float = 0.03
+    safezone_lookback_days: int = 20
+    safezone_factor: float = 2.0
+    entry_order_expire_days: int = 2
+    score_reward_risk_weight: float = 0.40
+    score_impulse_weight: float = 0.25
+    score_tide_weight: float = 0.20
+    score_pullback_weight: float = 0.15
 
 
 @dataclass(frozen=True)
@@ -118,6 +122,10 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> Config:
             rr_excellent=float(st.get("rr_excellent", 3.0)),
             strong_weekly_slope=float(st.get("strong_weekly_slope", 0.03)),
             fi_scale_lookback=int(st.get("fi_scale_lookback", 20)),
+            value_zone_max_distance_pct=float(st.get("value_zone_max_distance_pct", 0.03)),
+            safezone_lookback_days=int(st.get("safezone_lookback_days", 20)),
+            safezone_factor=float(st.get("safezone_factor", 2.0)),
+            entry_order_expire_days=int(st.get("entry_order_expire_days", 2)),
             score_reward_risk_weight=float(st.get("score_reward_risk_weight", 0.40)),
             score_impulse_weight=float(st.get("score_impulse_weight", 0.25)),
             score_tide_weight=float(st.get("score_tide_weight", 0.20)),
