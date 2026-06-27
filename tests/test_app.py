@@ -163,6 +163,26 @@ def test_held_coin_outside_watchlist_is_fetched_on_demand(tmp_path, btc_fixtures
     assert pos["asset"] == "ETH" and pos["side"] == "short"
 
 
+def test_position_on_builder_dex_is_found(tmp_path, btc_fixtures):
+    # A position held on a HIP-3 builder dex ("xyz") lives in a *separate*
+    # clearinghouse and is invisible to the native lookup; the watchlist's
+    # "xyz:*" entry must drive a per-dex query so it still gets a verdict.
+    fixtures = dict(btc_fixtures)
+    fixtures[("xyz:GOLD", "1w")] = btc_fixtures[("BTC", "1w")]
+    fixtures[("xyz:GOLD", "1d")] = btc_fixtures[("BTC", "1d")]
+    addr = "0x" + "12" * 20
+    cfg = make_config(tmp_path, watchlist=("*", "xyz:*"), address=addr)
+    xyz_state = make_clearinghouse_state([{"coin": "xyz:GOLD", "szi": "2.0", "entryPx": "2000.0"}])
+    client = make_client(fixtures, tmp_path, clearinghouse_states={(addr, "xyz"): xyz_state})
+    snapshot = build_snapshot(cfg, client)
+
+    (pos,) = snapshot["positions"]
+    assert pos["asset"] == "xyz:GOLD"
+    assert pos["side"] == "long"
+    assert pos["entry"] == 2000.0
+    assert pos["verdict"] in {"hold", "take_profits", "exit"}
+
+
 def test_snapshot_reports_tripped_guard(tmp_path, btc_fixtures):
     cfg = make_config(tmp_path, month_realized_losses=700.0)
     client = make_client(btc_fixtures, tmp_path)

@@ -80,6 +80,10 @@ class Signal:
     divergences: list[str]  # Elder MACD-Histogram / Force Index divergence warnings
     value_zone_status: str  # in_value / near_value / extended
     entry_order_plan: str | None  # how to roll/expire the theoretical stop-entry
+    # Second entry technique: stop & reward:risk for the limit (pullback) fill,
+    # which differ from the breakout entry's. None when there is no limit entry.
+    entry_limit_stop: float | None = None
+    reward_risk_limit: float | None = None
 
 
 def tick_size(price: float) -> float:
@@ -217,21 +221,58 @@ def average_adverse_noise(
     return float(noise.mean())
 
 
+def _safezone_stop_from_base(
+    daily: pd.DataFrame,
+    side: Literal["long", "short"],
+    base: float,
+    params: StrategyParams = DEFAULT_PARAMS,
+) -> float:
+    """SafeZone adverse-noise buffer applied below/above a given anchor `base`."""
+    if side == "long":
+        noise = average_adverse_noise(daily, side, params.safezone_lookback_days)
+        offset = (noise * params.safezone_factor_long) if noise is not None else tick_size(base)
+        return base - offset
+    noise = average_adverse_noise(daily, side, params.safezone_lookback_days)
+    offset = (noise * params.safezone_factor_short) if noise is not None else tick_size(base)
+    return base + offset
+
+
 def safezone_initial_stop(
     daily: pd.DataFrame,
     side: Literal["long", "short"],
     params: StrategyParams = DEFAULT_PARAMS,
 ) -> float:
-    """Initial protective stop using Elder's SafeZone adverse-noise method."""
+    """Initial protective stop using Elder's SafeZone adverse-noise method.
+
+    Anchored to the recent daily extreme (2-bar low for longs, high for shorts) —
+    the stop that pairs with the buy-stop / sell-stop (breakout) entry.
+    """
     if side == "long":
         base = float(daily["low"].iloc[-2:].min())
-        noise = average_adverse_noise(daily, side, params.safezone_lookback_days)
-        offset = (noise * params.safezone_factor_long) if noise is not None else tick_size(base)
-        return base - offset
-    base = float(daily["high"].iloc[-2:].max())
-    noise = average_adverse_noise(daily, side, params.safezone_lookback_days)
-    offset = (noise * params.safezone_factor_short) if noise is not None else tick_size(base)
-    return base + offset
+    else:
+        base = float(daily["high"].iloc[-2:].max())
+    return _safezone_stop_from_base(daily, side, base, params)
+
+
+def safezone_stop_for_limit(
+    daily: pd.DataFrame,
+    side: Literal["long", "short"],
+    limit: float,
+    params: StrategyParams = DEFAULT_PARAMS,
+) -> float:
+    """SafeZone stop recalibrated to a limit (pullback) fill.
+
+    A deep pullback can fill *below* the recent daily low (long) — beyond the
+    breakout stop — so the SafeZone buffer is anchored to whichever is more
+    protective, the recent extreme or the limit fill itself. This keeps the stop
+    on the correct side of the limit entry, and collapses to the breakout stop
+    when the limit sits inside the recent range.
+    """
+    if side == "long":
+        base = min(float(daily["low"].iloc[-2:].min()), limit)
+    else:
+        base = max(float(daily["high"].iloc[-2:].max()), limit)
+    return _safezone_stop_from_base(daily, side, base, params)
 
 
 def theoretical_entry_order_plan(
@@ -664,6 +705,16 @@ def evaluate_asset(
         elif stop > entry:
             rr = (entry - target) / (stop - entry)
 
+    # Stop & reward:risk for the limit (pullback) entry — recalibrated to that
+    # fill, since a deep pullback can clear the breakout stop.
+    limit_stop = limit_rr = None
+    if candidate in ("long", "short") and limit is not None and target is not None:
+        limit_stop = safezone_stop_for_limit(daily, candidate, limit, params)
+        if candidate == "long" and limit > limit_stop:
+            limit_rr = (target - limit) / (limit - limit_stop)
+        elif candidate == "short" and limit_stop > limit:
+            limit_rr = (limit - target) / (limit_stop - limit)
+
     tide_strength = weekly_slope_strength(weekly["close"])
     score = None
     pull = 0.0
@@ -696,4 +747,6 @@ def evaluate_asset(
         divergences=divergences,
         value_zone_status=vz_status,
         entry_order_plan=order_plan,
+        entry_limit_stop=limit_stop,
+        reward_risk_limit=limit_rr,
     )

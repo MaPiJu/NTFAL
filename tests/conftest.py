@@ -72,7 +72,13 @@ def make_client(
             return httpx.Response(200, json=served)
         if payload["type"] == "clearinghouseState":
             states = clearinghouse_states or {}
-            return httpx.Response(200, json=states.get(payload["user"], {"assetPositions": []}))
+            user, dex = payload["user"], payload.get("dex", "")
+            # States may be keyed by user (native clearinghouse) or by
+            # (user, dex) for a HIP-3 builder dex like "xyz".
+            state = states.get((user, dex))
+            if state is None and not dex:
+                state = states.get(user)
+            return httpx.Response(200, json=state or {"assetPositions": []})
         return httpx.Response(400, json={"error": "unexpected request"})
 
     http = httpx.Client(transport=httpx.MockTransport(handler))
