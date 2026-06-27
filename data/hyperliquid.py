@@ -162,16 +162,23 @@ class HyperliquidClient:
 
     # -- account (read-only) ------------------------------------------------
 
-    def clearinghouse_state(self, address: str) -> dict[str, Any]:
+    def clearinghouse_state(self, address: str, dex: str = "") -> dict[str, Any]:
         """Public `clearinghouseState` for a wallet address: open positions + margin.
 
         This is a read-only account lookup against the public info endpoint — it
         takes only a public address, never a private key, and signs nothing. Used
         to surface the operator's OPEN positions for Elder trade management.
+
+        `clearinghouseState` is per-dex: '' is the native (crypto) clearinghouse;
+        HIP-3 builder dexes like 'xyz' carry tradfi perps and must be queried
+        explicitly (their positions never show up in the native response).
         """
         if not address:
             raise HyperliquidError("a public wallet address is required")
-        state = self._info({"type": "clearinghouseState", "user": address})
+        payload: dict[str, Any] = {"type": "clearinghouseState", "user": address}
+        if dex:
+            payload["dex"] = dex
+        state = self._info(payload)
         if not isinstance(state, dict):
             raise HyperliquidError(f"unexpected clearinghouseState payload for {address}")
         return state

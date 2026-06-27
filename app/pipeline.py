@@ -15,7 +15,7 @@ from typing import Any
 import pandas as pd
 
 from config import WATCHLIST_ALL, Config
-from data.hyperliquid import HyperliquidClient, HyperliquidError, completed_bars
+from data.hyperliquid import HyperliquidClient, HyperliquidError, coin_dex, completed_bars
 from indicators import ema, force_index, impulse_color, macd_histogram
 from risk.sizing import position_size, six_percent_guard
 from strategy.params import StrategyParams
@@ -112,12 +112,35 @@ def mask_address(address: str) -> str:
     return f"{address[:6]}…{address[-4:]}" if len(address) > 12 else address
 
 
+def watchlist_dexes(watchlist: tuple[str, ...]) -> list[str]:
+    """The perp dexes referenced by the watchlist, '' (native) first.
+
+    `clearinghouseState` is per-dex, so to find every open position we query the
+    native clearinghouse plus each HIP-3 builder dex the operator watches
+    ("xyz:*" / "xyz:GOLD" -> "xyz"). Without this, positions on a builder dex
+    (e.g. the tradfi "xyz" universe) are invisible.
+    """
+    dexes = {coin_dex(item) for item in watchlist}
+    dexes.add("")  # always include the native clearinghouse
+    return sorted(dexes)
+
+
 def fetch_open_positions(cfg: Config, client: HyperliquidClient) -> list[OpenPosition]:
-    """Read open positions for the configured public address (empty if disabled)."""
+    """Read open positions for the configured public address (empty if disabled).
+
+    Positions are gathered across the native clearinghouse and every HIP-3 dex
+    the watchlist references; a failure on one dex doesn't drop the others.
+    """
     if not cfg.positions.address:
         return []
-    state = client.clearinghouse_state(cfg.positions.address)
-    return parse_positions(state)
+    out: list[OpenPosition] = []
+    for dex in watchlist_dexes(cfg.scanner.watchlist):
+        try:
+            state = client.clearinghouse_state(cfg.positions.address, dex=dex)
+        except HyperliquidError:
+            continue
+        out.extend(parse_positions(state))
+    return out
 
 
 def strategy_params(cfg: Config) -> StrategyParams:
