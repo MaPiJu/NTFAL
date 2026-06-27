@@ -73,10 +73,11 @@ exit tools only — **no new indicators**. Per held position, produce a verdict
   still shows the favorable Impulse color (both blue) **and** the trade is in profit —
   Elder's "permission to take profits" once the green/red is gone.
 - **HOLD** otherwise; always surface a **SafeZone trailing-stop** suggestion (behind the
-  recent daily extreme by the average EMA penetration, ratcheted to ≥ break-even in profit).
+  recent daily extreme by the average adverse daily noise × a factor — **2 for longs, 3 for
+  shorts** per Elder, since shorting near highs is noisier — ratcheted to ≥ break-even in profit).
 Output is informational only; a human exits manually.
 
-Divergence warnings reuse Elder indicators only: recent price/indicator disagreement on MACD-Histogram or 13-EMA Force Index is surfaced in the signal reasons/dashboard, without introducing new indicators. A divergence counts only when the indicator **crosses its zero line between the two extremes** (Elder's "absolute must", p.103) — no crossover, no divergence.
+Divergence warnings reuse Elder indicators only: recent price/indicator disagreement on MACD-Histogram or 13-EMA Force Index is surfaced in the signal reasons/dashboard, without introducing new indicators. A divergence counts only when the indicator **crosses its zero line between the two extremes** (Elder's "absolute must", p.103) — no crossover, no divergence — and only when the two extremes sit ~20–40 bars apart (Elder/Lovvorn, p.104).
 
 "Average penetration": over the last ~4–6 weeks, measure how far pullbacks pierce below
 (uptrend) / above (downtrend) the fast EMA; average those penetrations; project tomorrow's
@@ -89,7 +90,9 @@ EMA (`today_EMA + (today_EMA − yesterday_EMA)`) and offset by that average to 
 - **6% Rule:** if `month_realized_losses + sum(open_trade_risk) >= 0.06 * equity_at_month_start`,
   block all new-entry suggestions for the rest of the month (flag clearly in the UI).
 - **Targets:** profit target on the **weekly** value zone (between EMA13 and EMA26) or a
-  weekly channel; **stop** on the **daily**. Reward:risk target ≥ **2:1**; flag setups below it.
+  weekly **channel** (Elder's percentage envelope around the slow **EMA26**, fit to contain
+  ~95% of recent bars) when price already trades beyond value; **stop** on the **daily**.
+  Reward:risk target ≥ **2:1**; flag setups below it.
 
 ## Architecture
 - `data/hyperliquid.py` — public `info` client (`httpx`); `candleSnapshot` per coin/interval;

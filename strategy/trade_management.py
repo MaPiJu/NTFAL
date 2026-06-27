@@ -161,12 +161,12 @@ def safezone_stop(
     if pos.side == "long":
         base = float(daily["low"].iloc[-2:].min())
         noise = average_adverse_noise(daily, "long", params.safezone_lookback_days)
-        offset = (noise * params.safezone_factor) if noise is not None else tick_size(base)
+        offset = (noise * params.safezone_factor_long) if noise is not None else tick_size(base)
         stop = base - offset
         return max(stop, pos.entry) if in_profit else stop
     base = float(daily["high"].iloc[-2:].max())
     noise = average_adverse_noise(daily, "short", params.safezone_lookback_days)
-    offset = (noise * params.safezone_factor) if noise is not None else tick_size(base)
+    offset = (noise * params.safezone_factor_short) if noise is not None else tick_size(base)
     stop = base + offset
     return min(stop, pos.entry) if in_profit else stop
 

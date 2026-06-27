@@ -9,6 +9,7 @@ from indicators import ema
 from strategy.params import StrategyParams
 from strategy.triple_screen import (
     EMA_FAST,
+    EMA_SLOW,
     Signal,
     _divergence_for_indicator,
     _long_levels,
@@ -25,6 +26,7 @@ from strategy.triple_screen import (
     value_zone_extension,
     value_zone_status,
     weekly_channel,
+    weekly_channel_with_params,
     weekly_trend,
 )
 from tests.conftest import make_ohlcv
@@ -166,11 +168,33 @@ def test_divergence_requires_zero_line_crossover():
     ind = pd.Series([-1.0] * 20)
     ind[5], ind[15] = -5.0, -2.0  # shallower second low, but never above zero
 
-    assert _divergence_for_indicator(close, ind, "TEST") == []
+    # min_separation=0 isolates the zero-line rule from the 20-40 bar spacing gate.
+    assert _divergence_for_indicator(close, ind, "TEST", min_separation=0) == []
 
     ind_crossed = ind.copy()
     ind_crossed[10] = 0.5  # a rally pokes the indicator above zero between the lows
-    assert _divergence_for_indicator(close, ind_crossed, "TEST") == ["bullish TEST divergence"]
+    assert _divergence_for_indicator(close, ind_crossed, "TEST", min_separation=0) == [
+        "bullish TEST divergence"
+    ]
+
+
+def test_divergence_requires_minimum_separation():
+    # Same valid bullish shape (crosses zero between the two lows), but the lows are
+    # only 10 bars apart — below Elder/Lovvorn's 20-bar floor (p.104), so it is not
+    # flagged. Lower the floor and the very same shape is flagged.
+    close = pd.Series(
+        [110, 108, 106, 104, 102, 100, 102, 104, 106, 108,
+         106, 104, 102, 100, 98, 96, 98, 100, 102, 104],
+        dtype=float,
+    )  # fmt: skip
+    ind = pd.Series([-1.0] * 20)
+    ind[5], ind[15] = -5.0, -2.0
+    ind[10] = 0.5  # crosses zero between the two lows (10 bars apart)
+
+    assert _divergence_for_indicator(close, ind, "TEST", min_separation=20) == []
+    assert _divergence_for_indicator(close, ind, "TEST", min_separation=5) == [
+        "bullish TEST divergence"
+    ]
 
 
 def test_entry_order_plan_rolls_and_expires():
@@ -254,10 +278,34 @@ def test_weekly_channel_lower_band_stays_positive_after_a_crash():
     weekly = make_ohlcv(closes, lows=lows, highs=highs, freq="W")
 
     upper, lower = weekly_channel(weekly)
-    ema_last = float(ema(weekly["close"], EMA_FAST).iloc[-1])
+    e26 = float(ema(weekly["close"], EMA_SLOW).iloc[-1])  # Elder's channel backbone
 
     assert lower > 0  # the bug was a negative lower band (negative short target)
-    assert lower < ema_last <= upper
+    assert lower < e26 <= upper
+
+
+def test_weekly_channel_backbone_is_slow_ema26():
+    # Elder draws the channel parallel to the SLOW EMA26, not the fast EMA13. In a
+    # clean uptrend the lows stay above the slow EMA, so the lower band collapses
+    # onto the backbone — pinning it to EMA26.
+    weekly = make_ohlcv([100.0 + 2.0 * i for i in range(40)], freq="W")
+    _upper, lower = weekly_channel(weekly)
+    e13 = float(ema(weekly["close"], EMA_FAST).iloc[-1])
+    e26 = float(ema(weekly["close"], EMA_SLOW).iloc[-1])
+
+    assert lower == pytest.approx(e26)
+    assert lower != pytest.approx(e13)
+
+
+def test_weekly_channel_widens_with_containment():
+    # Higher containment -> wider channel (Elder fits ~95%, p.183). Up-excursions
+    # spike every 5th bar, so the 95th percentile sits well above the median.
+    highs = [100.0 + (10.0 if i % 5 == 0 else 1.0) for i in range(40)]
+    weekly = make_ohlcv([100.0] * 40, lows=[100.0] * 40, highs=highs, freq="W")
+
+    narrow_upper, _ = weekly_channel_with_params(weekly, StrategyParams(channel_containment=0.50))
+    wide_upper, _ = weekly_channel_with_params(weekly, StrategyParams(channel_containment=0.95))
+    assert wide_upper > narrow_upper
 
 
 def test_quality_score_rewards_better_reward_risk():
@@ -367,6 +415,18 @@ def test_safezone_initial_stop_uses_average_adverse_noise():
     assert average_adverse_noise(daily, "long", 20) == pytest.approx(2.5)
     assert stop == pytest.approx(min(lows[-2:]) - 2.5 * 2.0)
     assert entry > stop
+
+
+def test_safezone_short_stop_uses_wider_factor():
+    # Elder p.220: shorts use a wider SafeZone factor (3) than longs (2), since
+    # shorting near the highs is noisier and downtrends move faster.
+    highs = [100.0] * 47
+    highs[-5], highs[-3], highs[-2] = 102.0, 103.0, 101.0  # upside noise 2 and 3 -> avg 2.5
+    daily = make_ohlcv([100.0] * 47, lows=[99.0] * 47, highs=highs)
+
+    assert average_adverse_noise(daily, "short", 20) == pytest.approx(2.5)
+    base = max(highs[-2:])  # SafeZone trails behind the recent two-bar high
+    assert safezone_initial_stop(daily, "short") == pytest.approx(base + 2.5 * 3.0)
 
 
 def test_detect_divergences_flags_bullish_force_index_divergence():
