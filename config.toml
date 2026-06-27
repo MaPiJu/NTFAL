@@ -27,9 +27,20 @@ lookback_third_screen = 300
 # behavior; tune here instead of editing code.
 flat_trend_slope_pct = 0.001
 penetration_lookback_days = 35
+# Elder's 2nd-screen caveat (p.158): skip the daily Force Index buy/short signal
+# when FI(2) prints a NEW multi-week low (longs) / high (shorts) — the move is
+# accelerating, not a pullback. Lookback in daily bars (~3-4 weeks).
+force_index_extreme_lookback_days = 25
 channel_lookback_weeks = 26
+# Elder fits the channel (around the slow EMA26) so it contains ~95% of the last
+# `channel_lookback_weeks` bars (p.183); used as the fallback profit target.
+channel_containment = 0.95
 min_reward_risk = 2.0
 divergence_lookback = 60
+# Elder/Lovvorn (p.104): only flag a divergence when its two extremes are this
+# many bars apart (most tradable at 20-40; the closer to 20 the better).
+divergence_min_separation = 20
+divergence_max_separation = 40
 rr_excellent = 3.0
 strong_weekly_slope = 0.03
 fi_scale_lookback = 20
@@ -37,9 +48,11 @@ fi_scale_lookback = 20
 # value zone before a new entry is actionable. 0.03 = max 3% beyond the zone.
 value_zone_max_distance_pct = 0.03
 # Elder SafeZone-style stops: average adverse daily noise over the lookback,
-# multiplied by the factor, behind the recent daily extreme.
+# multiplied by the factor, behind the recent daily extreme. Shorts use a wider
+# factor than longs (Elder p.220: >=3 vs >=2 — shorting near highs is noisier).
 safezone_lookback_days = 20
-safezone_factor = 2.0
+safezone_factor_long = 2.0
+safezone_factor_short = 3.0
 # The theoretical stop-entry is valid only for this many completed daily bars;
 # if still unfilled it should be rolled to the latest high/low while conditions hold.
 entry_order_expire_days = 2

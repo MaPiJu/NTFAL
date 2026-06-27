@@ -30,12 +30,20 @@ EMA_SLOW = 26
 PRICE_SIG_FIGS = 5
 # "last ~4-6 weeks" of daily bars on a 24/7 market.
 PENETRATION_LOOKBACK_DAYS = 35
-# Weekly channel: average excursion of highs/lows beyond EMA13 over this window.
+# Elder's 2nd-screen caveat: a Force Index signal is void if FI(2) also prints a
+# new multi-week extreme (accelerating move, not a pullback). ~3-4 weeks of bars.
+FORCE_INDEX_EXTREME_LOOKBACK = 25
+# Weekly channel: containment-quantile excursion of highs/lows beyond the slow
+# EMA26 over this window (Elder's percentage envelope, p.183).
 CHANNEL_LOOKBACK_WEEKS = 26
+CHANNEL_CONTAINMENT = 0.95
 MIN_REWARD_RISK = 2.0
 # Treat tiny weekly EMA13 slopes as range/no-trend instead of a tradable tide.
 FLAT_TREND_SLOPE_PCT = 0.001
 DIVERGENCE_LOOKBACK = 60
+# Elder/Lovvorn (p.104): the two divergence extremes should be 20-40 bars apart.
+DIVERGENCE_MIN_SEPARATION = 20
+DIVERGENCE_MAX_SEPARATION = 40
 
 # --- Trade-quality ranking ("which setup is best?", Elder's selection logic) ---
 # Reward:risk is Elder's gatekeeper (2:1 floor); 3:1 or better earns full credit.
@@ -126,6 +134,29 @@ def average_penetration(
     return float(pen.mean())
 
 
+def force_index_new_extreme(
+    fi2: pd.Series,
+    side: Literal["long", "short"],
+    lookback: int = FORCE_INDEX_EXTREME_LOOKBACK,
+) -> bool:
+    """Elder's second-screen caveat (book p.158): the daily Force Index signal is
+    void when FI(2) prints a *new multi-week extreme*.
+
+    A buy signal is valid only while the 2-day Force Index dips below zero "as
+    long as it doesn't fall to a new multi-week low" — a fresh low means the
+    decline is accelerating, not a pullback to buy (p.131). Mirror image for
+    shorts and new highs. Returns True when today's FI(2) breaks the prior
+    `lookback` bars' extreme, i.e. the signal should be skipped.
+    """
+    if len(fi2) < 2:
+        return False
+    now = float(fi2.iloc[-1])
+    prior = fi2.iloc[-(lookback + 1) : -1]
+    if prior.empty:
+        return False
+    return now < float(prior.min()) if side == "long" else now > float(prior.max())
+
+
 def value_zone_status(daily: pd.DataFrame, max_distance_pct: float = 0.03) -> str:
     """Classify the last daily close versus Elder's daily EMA13-EMA26 value zone.
 
@@ -142,6 +173,25 @@ def value_zone_status(daily: pd.DataFrame, max_distance_pct: float = 0.03) -> st
     if close > high:
         return "near_value" if (close - high) / high <= max_distance_pct else "extended"
     return "near_value" if (low - close) / low <= max_distance_pct else "extended"
+
+
+def value_zone_extension(daily: pd.DataFrame) -> Literal["above", "below", "inside"]:
+    """Which side of the daily EMA13-EMA26 value zone the last close sits on.
+
+    Makes the "extended" veto directional. Elder only warns against *chasing* —
+    buying after price has run above value, or shorting after it has broken below
+    value. A pullback extended the *other* way (a long far below value, a short
+    far above) is a bargain, so it must not be vetoed by the value-zone filter.
+    """
+    close = float(daily["close"].iloc[-1])
+    e13 = float(ema(daily["close"], EMA_FAST).iloc[-1])
+    e26 = float(ema(daily["close"], EMA_SLOW).iloc[-1])
+    low, high = sorted((e13, e26))
+    if close > high:
+        return "above"
+    if close < low:
+        return "below"
+    return "inside"
 
 
 def average_adverse_noise(
@@ -176,11 +226,11 @@ def safezone_initial_stop(
     if side == "long":
         base = float(daily["low"].iloc[-2:].min())
         noise = average_adverse_noise(daily, side, params.safezone_lookback_days)
-        offset = (noise * params.safezone_factor) if noise is not None else tick_size(base)
+        offset = (noise * params.safezone_factor_long) if noise is not None else tick_size(base)
         return base - offset
     base = float(daily["high"].iloc[-2:].max())
     noise = average_adverse_noise(daily, side, params.safezone_lookback_days)
-    offset = (noise * params.safezone_factor) if noise is not None else tick_size(base)
+    offset = (noise * params.safezone_factor_short) if noise is not None else tick_size(base)
     return base + offset
 
 
@@ -218,42 +268,51 @@ def projected_ema(daily_close: pd.Series, span: int = EMA_FAST) -> float:
     return float(2 * e.iloc[-1] - e.iloc[-2])
 
 
-def weekly_channel(weekly: pd.DataFrame, span: int = EMA_FAST) -> tuple[float, float]:
-    """(upper, lower) weekly channel around EMA13 — Elder's percentage envelope.
+def weekly_channel(weekly: pd.DataFrame, span: int = EMA_SLOW) -> tuple[float, float]:
+    """(upper, lower) weekly channel around the slow EMA26 — Elder's percentage
+    envelope (p.183), used as a fallback target when price already trades beyond
+    the weekly value zone.
 
-    Used as a fallback target when price already trades beyond the weekly value
-    zone. The half-widths are the average **relative** excursion of weekly highs
-    above / lows below the EMA (penetration / EMA at that bar) over the channel
-    lookback, projected onto today's EMA.
+    Elder draws the channel parallel to the *slower* EMA and widens it until it
+    contains ~95% of recent bars. Each half-width is the `containment`-quantile of
+    the **relative** excursion of weekly highs above / lows below the EMA
+    (penetration / EMA at that bar) over the lookback, projected onto today's EMA.
 
     Measuring the excursion as a *ratio* (not an absolute price distance) keeps the
-    channel proportional to today's price. An absolute offset, averaged over many
-    weeks, mixes in penetrations from when the asset traded far higher; for a coin
-    that has since crashed those stale, oversized distances could exceed today's
-    small EMA and push the lower band — i.e. a short's target — below zero. A
-    ratio whose mean is always < 1 keeps the lower band strictly positive.
+    channel proportional to today's price and the lower band strictly positive even
+    for a coin that has since crashed — a deliberate 24/7 adaptation that fits the
+    two sides independently rather than as one symmetric coefficient.
     """
     return _weekly_channel(weekly, span=span)
 
 
 def weekly_channel_with_params(
-    weekly: pd.DataFrame, params: StrategyParams, span: int = EMA_FAST
+    weekly: pd.DataFrame, params: StrategyParams, span: int = EMA_SLOW
 ) -> tuple[float, float]:
-    return _weekly_channel(weekly, span=span, lookback=params.channel_lookback_weeks)
+    return _weekly_channel(
+        weekly,
+        span=span,
+        lookback=params.channel_lookback_weeks,
+        containment=params.channel_containment,
+    )
 
 
 def _weekly_channel(
-    weekly: pd.DataFrame, span: int = EMA_FAST, lookback: int = CHANNEL_LOOKBACK_WEEKS
+    weekly: pd.DataFrame,
+    span: int = EMA_SLOW,
+    lookback: int = CHANNEL_LOOKBACK_WEEKS,
+    containment: float = CHANNEL_CONTAINMENT,
 ) -> tuple[float, float]:
     e = ema(weekly["close"], span)
     window = slice(-lookback, None)
+    # Relative excursion of each bar's high above / low below the EMA (0 when the
+    # bar doesn't poke out). The containment-quantile leaves ~(1-containment) of
+    # bars outside the channel — Elder's "contains ~95% of bars" fit (p.183).
     up = ((weekly["high"] - e) / e).clip(lower=0).iloc[window]
     down = ((e - weekly["low"]) / e).clip(lower=0).iloc[window]
-    up = up[up > 0]
-    down = down[down > 0]
     last = float(e.iloc[-1])
-    upper = last * (1.0 + (float(up.mean()) if not up.empty else 0.0))
-    lower = last * (1.0 - (float(down.mean()) if not down.empty else 0.0))
+    upper = last * (1.0 + (float(up.quantile(containment)) if not up.empty else 0.0))
+    lower = last * (1.0 - (float(down.quantile(containment)) if not down.empty else 0.0))
     return upper, lower
 
 
@@ -307,14 +366,21 @@ def _last_pivot(values: pd.Series, *, kind: Literal["low", "high"]) -> tuple[int
 
 
 def _divergence_for_indicator(
-    close: pd.Series, indicator: pd.Series, name: str, lookback: int = DIVERGENCE_LOOKBACK
+    close: pd.Series,
+    indicator: pd.Series,
+    name: str,
+    lookback: int = DIVERGENCE_LOOKBACK,
+    min_separation: int = DIVERGENCE_MIN_SEPARATION,
+    max_separation: int = DIVERGENCE_MAX_SEPARATION,
 ) -> list[str]:
     """Detect simple Elder-style price/indicator divergences on recent swings.
 
     Bullish: latest price low undercuts a prior low while the indicator makes a
     higher low. Bearish: latest price high exceeds a prior high while the
-    indicator makes a lower high. This is intentionally conservative and only
-    emits warnings; it does not create trades by itself.
+    indicator makes a lower high. Two Elder validity gates apply: the indicator
+    must cross its zero line between the two extremes (p.103), and the extremes
+    must sit `min_separation`-`max_separation` bars apart (p.104). Intentionally
+    conservative and warning-only; it never creates trades by itself.
     """
     df = pd.DataFrame({"close": close, "indicator": indicator}).dropna().tail(lookback)
     if len(df) < 10:
@@ -323,6 +389,7 @@ def _divergence_for_indicator(
     split = max(3, len(df) // 2)
     prev = df.iloc[:split]
     recent = df.iloc[split:]
+    ind = df["indicator"]
     out: list[str] = []
 
     prev_low = _last_pivot(prev["close"], kind="low")
@@ -330,7 +397,12 @@ def _divergence_for_indicator(
     if prev_low and recent_low:
         pi, pc = prev_low
         ri, rc = recent_low
-        if rc < pc and float(recent["indicator"].loc[ri]) > float(prev["indicator"].loc[pi]):
+        # Elder (p.103): the indicator MUST cross back above its zero line between
+        # the two bottoms ("an absolute must"); and (p.104) the bottoms must be
+        # 20-40 bars apart to be tradable. Either gate failing => no divergence.
+        crossed_zero = bool((ind.loc[pi:ri] > 0).any())
+        spaced = min_separation <= (ri - pi) <= max_separation
+        if rc < pc and float(ind.loc[ri]) > float(ind.loc[pi]) and crossed_zero and spaced:
             out.append(f"bullish {name} divergence")
 
     prev_high = _last_pivot(prev["close"], kind="high")
@@ -338,22 +410,34 @@ def _divergence_for_indicator(
     if prev_high and recent_high:
         pi, pc = prev_high
         ri, rc = recent_high
-        if rc > pc and float(recent["indicator"].loc[ri]) < float(prev["indicator"].loc[pi]):
+        # Mirror image: the indicator must drop below its zero line between the
+        # two tops, and the tops must be 20-40 bars apart.
+        crossed_zero = bool((ind.loc[pi:ri] < 0).any())
+        spaced = min_separation <= (ri - pi) <= max_separation
+        if rc > pc and float(ind.loc[ri]) < float(ind.loc[pi]) and crossed_zero and spaced:
             out.append(f"bearish {name} divergence")
     return out
 
 
-def detect_divergences(daily: pd.DataFrame, lookback: int = DIVERGENCE_LOOKBACK) -> list[str]:
+def detect_divergences(
+    daily: pd.DataFrame,
+    lookback: int = DIVERGENCE_LOOKBACK,
+    min_separation: int = DIVERGENCE_MIN_SEPARATION,
+    max_separation: int = DIVERGENCE_MAX_SEPARATION,
+) -> list[str]:
     """Recent Elder divergence warnings from MACD-Histogram and 13-EMA Force Index."""
     close = daily["close"]
     volume = daily["volume"]
     out: list[str] = []
-    out.extend(_divergence_for_indicator(close, macd_histogram(close), "MACD-Histogram", lookback))
-    out.extend(
-        _divergence_for_indicator(
-            close, force_index(close, volume, span=13), "Force Index", lookback
+    for series, label in (
+        (macd_histogram(close), "MACD-Histogram"),
+        (force_index(close, volume, span=13), "Force Index"),
+    ):
+        out.extend(
+            _divergence_for_indicator(
+                close, series, label, lookback, min_separation, max_separation
+            )
         )
-    )
     return out
 
 
@@ -498,23 +582,40 @@ def evaluate_asset(
     d_imp = str(impulse_color(daily["close"]).iloc[-1])
     trend = weekly_trend(weekly["close"], min_slope_pct=params.flat_trend_slope_pct)
     market_regime = "flat" if trend == "neutral" else "trending"
-    fi2 = float(force_index(daily["close"], daily["volume"], span=2).iloc[-1])
-    divergences = detect_divergences(daily, lookback=params.divergence_lookback)
+    fi2_series = force_index(daily["close"], daily["volume"], span=2)
+    fi2 = float(fi2_series.iloc[-1])
+    fi_lookback = params.force_index_extreme_lookback_days
+    divergences = detect_divergences(
+        daily,
+        lookback=params.divergence_lookback,
+        min_separation=params.divergence_min_separation,
+        max_separation=params.divergence_max_separation,
+    )
     vz_status = value_zone_status(daily, params.value_zone_max_distance_pct)
 
     candidate: Action = "stand_aside"
     if trend == "up":
-        if fi2 < 0:
+        if fi2 >= 0:
+            reason = "weekly tide up but Force Index not below zero — chasing, stand aside"
+        elif force_index_new_extreme(fi2_series, "long", fi_lookback):
+            reason = (
+                "weekly tide up, but daily Force Index is at a new multi-week low — "
+                "the decline is accelerating, not a pullback to buy; stand aside"
+            )
+        else:
             candidate = "long"
             reason = "weekly tide up, daily 2-EMA Force Index below zero (pullback to buy)"
-        else:
-            reason = "weekly tide up but Force Index not below zero — chasing, stand aside"
     elif trend == "down":
-        if fi2 > 0:
+        if fi2 <= 0:
+            reason = "weekly tide down but Force Index not above zero — stand aside"
+        elif force_index_new_extreme(fi2_series, "short", fi_lookback):
+            reason = (
+                "weekly tide down, but daily Force Index is at a new multi-week high — "
+                "the rally is accelerating, not a pullback to sell; stand aside"
+            )
+        else:
             candidate = "short"
             reason = "weekly tide down, daily 2-EMA Force Index above zero (rally to sell)"
-        else:
-            reason = "weekly tide down but Force Index not above zero — stand aside"
     else:
         reason = "weekly tide neutral — stand aside"
 
@@ -526,12 +627,21 @@ def evaluate_asset(
         candidate = "stand_aside"
         reason = f"short vetoed by Impulse (weekly={w_imp}, daily={d_imp}: green forbids shorts)"
     elif candidate in ("long", "short") and vz_status == "extended":
-        vetoed = candidate
-        candidate = "stand_aside"
-        reason = (
-            f"{vetoed} vetoed: daily close is extended from the EMA13-EMA26 value zone "
-            f"(status={vz_status})"
+        # The "extended" veto is directional (Elder only warns against *chasing*):
+        # veto a long only when price is extended ABOVE value, a short only when
+        # extended BELOW. A pullback the other way is a bargain — its falling-knife
+        # guard is the Force-Index new-extreme filter above, not this veto.
+        zone_side = value_zone_extension(daily)
+        chasing = (candidate == "long" and zone_side == "above") or (
+            candidate == "short" and zone_side == "below"
         )
+        if chasing:
+            vetoed = candidate
+            candidate = "stand_aside"
+            reason = (
+                f"{vetoed} vetoed: daily close is extended {zone_side} the EMA13-EMA26 "
+                f"value zone (chasing)"
+            )
 
     entry = limit = stop = target = rr = None
     third_impulse = None

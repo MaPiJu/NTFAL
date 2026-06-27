@@ -46,6 +46,16 @@ Triple Screen decision logic:
 | Down         | rises **above** 0       | **Go short** | sell-stop 1 tick below prior day low, or limit at `EMA13 + avg upside penetration` |
 | Down         | falling / below 0       | Stand aside  | none |
 
+**Second-screen caveat (Elder, p.158):** take the daily Force Index signal only while
+FI(2) is **not** also printing a *new multi-week low* (longs) / *high* (shorts) — a fresh
+extreme means the move is accelerating, not a pullback, so stand aside.
+
+**Value-zone filter is directional (no chasing):** enter on a pullback *to* value, never
+chasing. A long is vetoed only when the daily close is extended **above** the EMA13–EMA26
+value zone; a short only when extended **below** it. A pullback extended the *other* way is
+an Elder bargain (its falling-knife guard is the new-extreme caveat above), so it is **not**
+vetoed by the value zone.
+
 **Impulse censorship overlay (applied last):** if weekly **or** daily Impulse is **red**,
 longs are forbidden; if weekly **or** daily Impulse is **green**, shorts are forbidden.
 The Impulse system says what *not* to do — it filters the table above.
@@ -63,10 +73,11 @@ exit tools only — **no new indicators**. Per held position, produce a verdict
   still shows the favorable Impulse color (both blue) **and** the trade is in profit —
   Elder's "permission to take profits" once the green/red is gone.
 - **HOLD** otherwise; always surface a **SafeZone trailing-stop** suggestion (behind the
-  recent daily extreme by the average EMA penetration, ratcheted to ≥ break-even in profit).
+  recent daily extreme by the average adverse daily noise × a factor — **2 for longs, 3 for
+  shorts** per Elder, since shorting near highs is noisier — ratcheted to ≥ break-even in profit).
 Output is informational only; a human exits manually.
 
-Divergence warnings reuse Elder indicators only: recent price/indicator disagreement on MACD-Histogram or 13-EMA Force Index is surfaced in the signal reasons/dashboard, without introducing new indicators.
+Divergence warnings reuse Elder indicators only: recent price/indicator disagreement on MACD-Histogram or 13-EMA Force Index is surfaced in the signal reasons/dashboard, without introducing new indicators. A divergence counts only when the indicator **crosses its zero line between the two extremes** (Elder's "absolute must", p.103) — no crossover, no divergence — and only when the two extremes sit ~20–40 bars apart (Elder/Lovvorn, p.104).
 
 "Average penetration": over the last ~4–6 weeks, measure how far pullbacks pierce below
 (uptrend) / above (downtrend) the fast EMA; average those penetrations; project tomorrow's
@@ -79,7 +90,9 @@ EMA (`today_EMA + (today_EMA − yesterday_EMA)`) and offset by that average to 
 - **6% Rule:** if `month_realized_losses + sum(open_trade_risk) >= 0.06 * equity_at_month_start`,
   block all new-entry suggestions for the rest of the month (flag clearly in the UI).
 - **Targets:** profit target on the **weekly** value zone (between EMA13 and EMA26) or a
-  weekly channel; **stop** on the **daily**. Reward:risk target ≥ **2:1**; flag setups below it.
+  weekly **channel** (Elder's percentage envelope around the slow **EMA26**, fit to contain
+  ~95% of recent bars) when price already trades beyond value; **stop** on the **daily**.
+  Reward:risk target ≥ **2:1**; flag setups below it.
 
 ## Architecture
 - `data/hyperliquid.py` — public `info` client (`httpx`); `candleSnapshot` per coin/interval;
