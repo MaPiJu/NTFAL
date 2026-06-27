@@ -21,6 +21,7 @@ from strategy.triple_screen import (
     impulse_confirmation,
     projected_ema,
     safezone_initial_stop,
+    safezone_stop_for_limit,
     select_best,
     tick_size,
     value_zone_extension,
@@ -96,6 +97,28 @@ def test_uptrend_pullback_goes_long():
     assert sig.reward_risk is not None and sig.reward_risk > 0
     # the prior pullback pierced EMA13, so Elder's average-penetration limit is set
     assert sig.entry_limit is not None
+    # the limit entry carries its own SafeZone stop & reward:risk, distinct from
+    # the breakout pair, and consistent with each other (stop below the fill)
+    assert sig.entry_limit_stop == pytest.approx(
+        safezone_stop_for_limit(daily, "long", sig.entry_limit)
+    )
+    assert sig.entry_limit_stop < sig.entry_limit
+    assert sig.reward_risk_limit == pytest.approx(
+        (sig.target - sig.entry_limit) / (sig.entry_limit - sig.entry_limit_stop)
+    )
+
+
+def test_limit_stop_anchors_below_a_deep_pullback_fill():
+    # A limit fill below the recent daily low must take its SafeZone stop below
+    # the *fill*, not the (higher) breakout stop, so the stop stays usable.
+    daily = DAILY_LONG
+    deep_limit = float(daily["low"].iloc[-2:].min()) - 5.0  # below the recent low
+    breakout_stop = safezone_initial_stop(daily, "long")
+    limit_stop = safezone_stop_for_limit(daily, "long", deep_limit)
+    assert limit_stop < deep_limit < breakout_stop
+    # a limit inside the recent range collapses back to the breakout stop
+    shallow_limit = float(daily["low"].iloc[-2:].min()) + 5.0
+    assert safezone_stop_for_limit(daily, "long", shallow_limit) == pytest.approx(breakout_stop)
 
 
 def test_value_zone_filter_rejects_extended_long_above_value():

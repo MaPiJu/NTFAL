@@ -55,6 +55,8 @@ function renderTable(snapshot) {
       rr === null
         ? "—"
         : `<span class="${s.rr_ok ? "rr-good" : "rr-bad"}">${rr.toFixed(2)}${s.rr_ok ? "" : " ⚠"}</span>`;
+    const limitRr = s.reward_risk_limit;
+    const limitRrCell = limitRr === null || limitRr === undefined ? "—" : limitRr.toFixed(2);
     const size = s.position_size ? fmt(s.position_size.size, 6) : "—";
     const row = document.createElement("tr");
     row.dataset.action = s.action;
@@ -68,10 +70,12 @@ function renderTable(snapshot) {
       <td><span class="badge ${s.action}">${s.action.replace("_", " ")}</span></td>
       <td>${fmt(s.last_close)}</td>
       <td>${fmt(s.entry)}</td>
-      <td>${fmt(s.entry_limit)}</td>
       <td>${fmt(s.stop)}</td>
-      <td>${fmt(s.target)}</td>
       <td>${rrCell}</td>
+      <td>${fmt(s.entry_limit)}</td>
+      <td>${fmt(s.entry_limit_stop)}</td>
+      <td>${limitRrCell}</td>
+      <td>${fmt(s.target)}</td>
       <td>${scoreCell(s)}</td>
       <td>${size}</td>
       <td class="reason">${s.reason}<br><strong>Value zone:</strong> ${(s.value_zone_status || "—").replace("_", " ")}${s.entry_order_plan ? `<br><strong>Order plan:</strong> ${s.entry_order_plan}` : ""}${(s.divergences || []).length ? `<br><strong>Divergences:</strong> ${s.divergences.join(", ")}` : ""}</td>`;
