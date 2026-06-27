@@ -46,6 +46,16 @@ Triple Screen decision logic:
 | Down         | rises **above** 0       | **Go short** | sell-stop 1 tick below prior day low, or limit at `EMA13 + avg upside penetration` |
 | Down         | falling / below 0       | Stand aside  | none |
 
+**Second-screen caveat (Elder, p.158):** take the daily Force Index signal only while
+FI(2) is **not** also printing a *new multi-week low* (longs) / *high* (shorts) — a fresh
+extreme means the move is accelerating, not a pullback, so stand aside.
+
+**Value-zone filter is directional (no chasing):** enter on a pullback *to* value, never
+chasing. A long is vetoed only when the daily close is extended **above** the EMA13–EMA26
+value zone; a short only when extended **below** it. A pullback extended the *other* way is
+an Elder bargain (its falling-knife guard is the new-extreme caveat above), so it is **not**
+vetoed by the value zone.
+
 **Impulse censorship overlay (applied last):** if weekly **or** daily Impulse is **red**,
 longs are forbidden; if weekly **or** daily Impulse is **green**, shorts are forbidden.
 The Impulse system says what *not* to do — it filters the table above.
@@ -66,7 +76,7 @@ exit tools only — **no new indicators**. Per held position, produce a verdict
   recent daily extreme by the average EMA penetration, ratcheted to ≥ break-even in profit).
 Output is informational only; a human exits manually.
 
-Divergence warnings reuse Elder indicators only: recent price/indicator disagreement on MACD-Histogram or 13-EMA Force Index is surfaced in the signal reasons/dashboard, without introducing new indicators.
+Divergence warnings reuse Elder indicators only: recent price/indicator disagreement on MACD-Histogram or 13-EMA Force Index is surfaced in the signal reasons/dashboard, without introducing new indicators. A divergence counts only when the indicator **crosses its zero line between the two extremes** (Elder's "absolute must", p.103) — no crossover, no divergence.
 
 "Average penetration": over the last ~4–6 weeks, measure how far pullbacks pierce below
 (uptrend) / above (downtrend) the fast EMA; average those penetrations; project tomorrow's

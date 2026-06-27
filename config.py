@@ -37,6 +37,7 @@ class ScannerConfig:
 class StrategyConfig:
     flat_trend_slope_pct: float = 0.001
     penetration_lookback_days: int = 35
+    force_index_extreme_lookback_days: int = 25
     channel_lookback_weeks: int = 26
     min_reward_risk: float = 2.0
     divergence_lookback: int = 60
@@ -116,6 +117,7 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> Config:
         strategy=StrategyConfig(
             flat_trend_slope_pct=float(st.get("flat_trend_slope_pct", 0.001)),
             penetration_lookback_days=int(st.get("penetration_lookback_days", 35)),
+            force_index_extreme_lookback_days=int(st.get("force_index_extreme_lookback_days", 25)),
             channel_lookback_weeks=int(st.get("channel_lookback_weeks", 26)),
             min_reward_risk=float(st.get("min_reward_risk", 2.0)),
             divergence_lookback=int(st.get("divergence_lookback", 60)),

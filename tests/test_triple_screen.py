@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pandas as pd
 import pytest
 
 from indicators import ema
@@ -9,6 +10,7 @@ from strategy.params import StrategyParams
 from strategy.triple_screen import (
     EMA_FAST,
     Signal,
+    _divergence_for_indicator,
     _long_levels,
     average_adverse_noise,
     average_penetration,
@@ -20,6 +22,7 @@ from strategy.triple_screen import (
     safezone_initial_stop,
     select_best,
     tick_size,
+    value_zone_extension,
     value_zone_status,
     weekly_channel,
     weekly_trend,
@@ -29,6 +32,32 @@ from tests.conftest import make_ohlcv
 WEEKLY_UP = make_ohlcv([100.0 + 2 * i for i in range(40)], freq="W")
 WEEKLY_DOWN = make_ohlcv([300.0 - 2 * i for i in range(40)], freq="W")
 WEEKLY_FLAT = make_ohlcv([100.0] * 40, freq="W")
+
+# Realistic swing fixtures. A *healthy* pullback (or rally) is preceded by an
+# earlier counter-move, so the entry bar's 2-day Force Index is NOT a fresh
+# multi-week extreme — the case Elder's second screen actually trades (p.158).
+DAILY_LONG = make_ohlcv(
+    [100.0 + i for i in range(34)]
+    + [130.0, 128.0]  # a normal prior pullback (sets the recent FI low)
+    + [128.0 + i for i in range(1, 13)]  # uptrend resumes
+    + [139.0]  # mild pullback to value -> 2-day Force Index dips below zero
+)
+DAILY_SHORT = make_ohlcv(
+    [300.0 - 2 * i for i in range(34)]
+    + [238.0, 241.0]  # a normal prior rally (sets the recent FI high)
+    + [241.0 - 2 * i for i in range(1, 13)]  # downtrend resumes
+    + [220.0]  # mild rally -> 2-day Force Index rises above zero
+)
+# Uptrend, then a sustained decline that turns the daily Impulse red. An early
+# high-volume down spike keeps the Force Index off a new multi-week low, so the
+# Impulse censor (not the new-extreme filter) is what forbids the long.
+DAILY_RED = make_ohlcv(
+    [100.0 + i for i in range(45)]
+    + [140.0]
+    + [142.0 + i for i in range(0, 7)]
+    + [146.0, 143.0, 140.0, 137.0, 134.0],
+    volumes=[1000.0] * 45 + [10000.0] + [1000.0] * 7 + [1000.0] * 5,
+)
 
 
 def test_tick_size():
@@ -46,9 +75,9 @@ def test_weekly_trend():
 
 
 def test_uptrend_pullback_goes_long():
-    # steady daily uptrend, last bar dips -> 2-EMA Force Index below zero
-    closes = [100.0 + i for i in range(60)] + [156.0]
-    daily = make_ohlcv(closes)
+    # healthy uptrend with a prior pullback, then a mild pullback to value ->
+    # 2-EMA Force Index dips below zero without printing a new multi-week low
+    daily = DAILY_LONG
 
     sig = evaluate_asset("BTC", WEEKLY_UP, daily)
 
@@ -63,26 +92,89 @@ def test_uptrend_pullback_goes_long():
     assert average_adverse_noise(daily, "long", 20) is not None
     assert sig.target is not None and sig.target > sig.entry
     assert sig.reward_risk is not None and sig.reward_risk > 0
-    # strong trend: lows never pierce EMA13, so no penetration-based limit
-    assert sig.entry_limit is None
+    # the prior pullback pierced EMA13, so Elder's average-penetration limit is set
+    assert sig.entry_limit is not None
 
 
-def test_value_zone_filter_rejects_extended_pullback():
-    daily = make_ohlcv([100.0 + i for i in range(60)] + [156.0])
+def test_value_zone_filter_rejects_extended_long_above_value():
+    # Strong uptrend; the last bar dips (Force Index < 0) but price is still far
+    # ABOVE the EMA13-EMA26 value zone — Elder calls that chasing. An earlier,
+    # deeper dip keeps today's Force Index off a new multi-week low, so it is the
+    # *value-zone* veto (not the new-extreme filter) that stands us aside.
+    daily = make_ohlcv(
+        [100.0 + 2 * i for i in range(40)] + [166.0] + [168.0 + 2 * i for i in range(12)] + [186.0]
+    )
     params = StrategyParams(value_zone_max_distance_pct=0.0)
 
     assert value_zone_status(daily, max_distance_pct=0.0) == "extended"
+    assert value_zone_extension(daily) == "above"
     sig = evaluate_asset("BTC", WEEKLY_UP, daily, params=params)
 
     assert sig.action == "stand_aside"
     assert sig.value_zone_status == "extended"
-    assert "value zone" in sig.reason
+    assert "value zone" in sig.reason and "chasing" in sig.reason
+
+
+def test_force_index_new_multiweek_low_blocks_long():
+    # Gentle uptrend, then a sharp final dip that prints a fresh multi-week low of
+    # the 2-day Force Index. Elder (p.158): a buy signal is void when the Force
+    # Index falls to a new multi-week low — the decline is accelerating.
+    closes = [100.0 + 0.7 * i for i in range(50)]
+    closes.append(closes[-1] - 3.0)
+    daily = make_ohlcv(closes)
+
+    blocked = evaluate_asset("BTC", WEEKLY_UP, daily)
+    assert blocked.action == "stand_aside"
+    assert "multi-week low" in blocked.reason
+    assert blocked.entry is None
+
+    # Disable the caveat (lookback 0) and the very same bar is a tradable long,
+    # proving the new-extreme filter — not Impulse or the value zone — blocked it.
+    off = StrategyParams(force_index_extreme_lookback_days=0)
+    allowed = evaluate_asset("BTC", WEEKLY_UP, daily, params=off)
+    assert allowed.action == "long"
+
+
+def test_value_zone_veto_is_directional_long_below_value():
+    # A pullback that dips just BELOW the value zone is an Elder bargain, not
+    # chasing, so the directional veto must let the long through (its falling-knife
+    # guard is the Force-Index new-low filter, which this bar clears). An earlier
+    # deeper dip keeps today's Force Index off a new multi-week low.
+    closes = [100.0 + 1.0 * i for i in range(40)] + [119.0]
+    closes += [119.0 + i for i in range(1, 9)] + [124.0]
+    daily = make_ohlcv(closes)
+    params = StrategyParams(value_zone_max_distance_pct=0.0)
+
+    assert value_zone_extension(daily) == "below"
+    assert value_zone_status(daily, max_distance_pct=0.0) == "extended"
+    sig = evaluate_asset("BTC", WEEKLY_UP, daily, params=params)
+
+    assert sig.action == "long"
+    assert "pullback to buy" in sig.reason
+    assert sig.entry is not None and sig.stop is not None
+
+
+def test_divergence_requires_zero_line_crossover():
+    # Two successively lower price lows with a shallower second indicator low is
+    # the divergence *shape* — but Elder (p.103) requires the indicator to cross
+    # back above its zero line between the two bottoms ("an absolute must").
+    close = pd.Series(
+        [110, 108, 106, 104, 102, 100, 102, 104, 106, 108,
+         106, 104, 102, 100, 98, 96, 98, 100, 102, 104],
+        dtype=float,
+    )  # fmt: skip
+    ind = pd.Series([-1.0] * 20)
+    ind[5], ind[15] = -5.0, -2.0  # shallower second low, but never above zero
+
+    assert _divergence_for_indicator(close, ind, "TEST") == []
+
+    ind_crossed = ind.copy()
+    ind_crossed[10] = 0.5  # a rally pokes the indicator above zero between the lows
+    assert _divergence_for_indicator(close, ind_crossed, "TEST") == ["bullish TEST divergence"]
 
 
 def test_entry_order_plan_rolls_and_expires():
-    daily = make_ohlcv([100.0 + i for i in range(60)] + [156.0])
-
-    sig = evaluate_asset("BTC", WEEKLY_UP, daily)
+    sig = evaluate_asset("BTC", WEEKLY_UP, DAILY_LONG)
 
     assert sig.entry_order_plan is not None
     assert "roll it daily" in sig.entry_order_plan
@@ -98,9 +190,9 @@ def test_uptrend_without_pullback_stands_aside():
 
 
 def test_downtrend_rally_goes_short():
-    # steady fall, then a two-bar rally -> FI(2) above zero
-    closes = [300.0 - 2 * i for i in range(50)] + [205.0, 208.0]
-    daily = make_ohlcv(closes)
+    # downtrend with a prior rally, then a mild rally to value -> FI(2) rises above
+    # zero without printing a new multi-week high
+    daily = DAILY_SHORT
 
     sig = evaluate_asset("ETH", WEEKLY_DOWN, daily)
 
@@ -112,7 +204,7 @@ def test_downtrend_rally_goes_short():
     assert sig.entry == pytest.approx(prior_low - tick_size(prior_low))
     assert sig.stop == pytest.approx(safezone_initial_stop(daily, "short"))
     assert sig.target is not None
-    # in this steep synthetic fall, price is far below weekly value -> R:R flagged
+    # price is still below the weekly value zone here -> R:R below 2:1, flagged
     assert sig.rr_ok is False
 
 
@@ -132,15 +224,14 @@ def test_range_stands_aside():
 
 
 def test_impulse_red_vetoes_long():
-    # weekly tide up, daily FI(2) negative -> table says long...
-    closes = [100.0 + i for i in range(60)]
-    for j in range(1, 16):  # accelerating sell-off: EMA13 and MACD-hist both fall
-        closes.append(closes[-1] - j)
-    daily = make_ohlcv(closes)
+    # weekly tide up and FI(2) below zero (the table says long), but a sustained
+    # daily decline turns the daily Impulse red. An earlier high-volume down spike
+    # keeps FI off a new multi-week low, so it is the Impulse censor — not the
+    # new-extreme filter — that vetoes the long.
+    daily = DAILY_RED
 
     sig = evaluate_asset("BTC", WEEKLY_UP, daily)
 
-    # ...but the hard daily sell-off turns the daily Impulse red -> vetoed.
     assert sig.daily_impulse == "red"
     assert sig.force_index_2 < 0
     assert sig.action == "stand_aside"
@@ -248,7 +339,7 @@ def test_tiny_weekly_slope_is_treated_as_flat_market():
 
 
 def test_optional_4h_third_screen_sets_entry_and_can_veto():
-    daily = make_ohlcv([100.0 + i for i in range(60)] + [156.0])
+    daily = DAILY_LONG
     four_h = make_ohlcv([150.0 + i * 0.1 for i in range(30)], freq="4h")
 
     sig = evaluate_asset("BTC", WEEKLY_UP, daily, four_h)

@@ -27,6 +27,10 @@ lookback_third_screen = 300
 # behavior; tune here instead of editing code.
 flat_trend_slope_pct = 0.001
 penetration_lookback_days = 35
+# Elder's 2nd-screen caveat (p.158): skip the daily Force Index buy/short signal
+# when FI(2) prints a NEW multi-week low (longs) / high (shorts) — the move is
+# accelerating, not a pullback. Lookback in daily bars (~3-4 weeks).
+force_index_extreme_lookback_days = 25
 channel_lookback_weeks = 26
 min_reward_risk = 2.0
 divergence_lookback = 60

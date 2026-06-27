@@ -13,6 +13,9 @@ from dataclasses import dataclass
 class StrategyParams:
     flat_trend_slope_pct: float = 0.001
     penetration_lookback_days: int = 35
+    # Elder's 2nd-screen caveat: void the Force Index signal when FI(2) prints a
+    # new multi-week extreme (accelerating move, not a pullback). ~3-4 weeks.
+    force_index_extreme_lookback_days: int = 25
     channel_lookback_weeks: int = 26
     min_reward_risk: float = 2.0
     divergence_lookback: int = 60
