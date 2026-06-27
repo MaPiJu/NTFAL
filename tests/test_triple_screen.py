@@ -5,18 +5,22 @@ from __future__ import annotations
 import pytest
 
 from indicators import ema
+from strategy.params import StrategyParams
 from strategy.triple_screen import (
     EMA_FAST,
     Signal,
     _long_levels,
+    average_adverse_noise,
     average_penetration,
     compute_quality_score,
     detect_divergences,
     evaluate_asset,
     impulse_confirmation,
     projected_ema,
+    safezone_initial_stop,
     select_best,
     tick_size,
+    value_zone_status,
     weekly_channel,
     weekly_trend,
 )
@@ -55,13 +59,34 @@ def test_uptrend_pullback_goes_long():
     # buy-stop one tick above the prior day's high
     prior_high = float(daily["high"].iloc[-1])
     assert sig.entry == pytest.approx(prior_high + tick_size(prior_high))
-    # no EMA penetration in this synthetic trend: SafeZone falls back to one tick
-    expected_stop = float(daily["low"].iloc[-2:].min()) - tick_size(prior_high)
-    assert sig.stop == pytest.approx(expected_stop)
+    assert sig.stop == pytest.approx(safezone_initial_stop(daily, "long"))
+    assert average_adverse_noise(daily, "long", 20) is not None
     assert sig.target is not None and sig.target > sig.entry
     assert sig.reward_risk is not None and sig.reward_risk > 0
     # strong trend: lows never pierce EMA13, so no penetration-based limit
     assert sig.entry_limit is None
+
+
+def test_value_zone_filter_rejects_extended_pullback():
+    daily = make_ohlcv([100.0 + i for i in range(60)] + [156.0])
+    params = StrategyParams(value_zone_max_distance_pct=0.0)
+
+    assert value_zone_status(daily, max_distance_pct=0.0) == "extended"
+    sig = evaluate_asset("BTC", WEEKLY_UP, daily, params=params)
+
+    assert sig.action == "stand_aside"
+    assert sig.value_zone_status == "extended"
+    assert "value zone" in sig.reason
+
+
+def test_entry_order_plan_rolls_and_expires():
+    daily = make_ohlcv([100.0 + i for i in range(60)] + [156.0])
+
+    sig = evaluate_asset("BTC", WEEKLY_UP, daily)
+
+    assert sig.entry_order_plan is not None
+    assert "roll it daily" in sig.entry_order_plan
+    assert "expire after" in sig.entry_order_plan
 
 
 def test_uptrend_without_pullback_stands_aside():
@@ -85,8 +110,7 @@ def test_downtrend_rally_goes_short():
     assert sig.daily_impulse != "green"
     prior_low = float(daily["low"].iloc[-1])
     assert sig.entry == pytest.approx(prior_low - tick_size(prior_low))
-    expected_stop = float(daily["high"].iloc[-2:].max()) + tick_size(prior_low)
-    assert sig.stop == pytest.approx(expected_stop)
+    assert sig.stop == pytest.approx(safezone_initial_stop(daily, "short"))
     assert sig.target is not None
     # in this steep synthetic fall, price is far below weekly value -> R:R flagged
     assert sig.rr_ok is False
@@ -181,6 +205,8 @@ def _mk_signal(asset: str, action: str, rr: float | None, score: float | None, r
         market_regime="trending",
         third_screen_impulse=None,
         divergences=[],
+        value_zone_status="in_value",
+        entry_order_plan=None,
     )
 
 
@@ -237,7 +263,7 @@ def test_optional_4h_third_screen_sets_entry_and_can_veto():
     assert "4h third-screen" in vetoed.reason
 
 
-def test_safezone_initial_stop_uses_average_penetration():
+def test_safezone_initial_stop_uses_average_adverse_noise():
     closes = [100.0] * 47
     lows = [100.0] * 47
     lows[-5], lows[-3], lows[-2] = 98.0, 97.0, 99.0
@@ -247,7 +273,8 @@ def test_safezone_initial_stop_uses_average_penetration():
     entry, _limit, stop, _target = _long_levels(WEEKLY_UP, daily)
 
     assert average_penetration(daily, "down") == pytest.approx(2.0)
-    assert stop == pytest.approx(min(lows[-2:]) - 2.0)
+    assert average_adverse_noise(daily, "long", 20) == pytest.approx(2.5)
+    assert stop == pytest.approx(min(lows[-2:]) - 2.5 * 2.0)
     assert entry > stop
 
 

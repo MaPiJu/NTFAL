@@ -74,7 +74,7 @@ function renderTable(snapshot) {
       <td>${rrCell}</td>
       <td>${scoreCell(s)}</td>
       <td>${size}</td>
-      <td class="reason">${s.reason}${(s.divergences || []).length ? `<br><strong>Divergences:</strong> ${s.divergences.join(", ")}` : ""}</td>`;
+      <td class="reason">${s.reason}<br><strong>Value zone:</strong> ${(s.value_zone_status || "—").replace("_", " ")}${s.entry_order_plan ? `<br><strong>Order plan:</strong> ${s.entry_order_plan}` : ""}${(s.divergences || []).length ? `<br><strong>Divergences:</strong> ${s.divergences.join(", ")}` : ""}</td>`;
     tbody.appendChild(row);
   }
 }

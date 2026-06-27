@@ -33,6 +33,16 @@ divergence_lookback = 60
 rr_excellent = 3.0
 strong_weekly_slope = 0.03
 fi_scale_lookback = 20
+# Require the latest completed daily close to be in/near the daily EMA13-EMA26
+# value zone before a new entry is actionable. 0.03 = max 3% beyond the zone.
+value_zone_max_distance_pct = 0.03
+# Elder SafeZone-style stops: average adverse daily noise over the lookback,
+# multiplied by the factor, behind the recent daily extreme.
+safezone_lookback_days = 20
+safezone_factor = 2.0
+# The theoretical stop-entry is valid only for this many completed daily bars;
+# if still unfilled it should be rolled to the latest high/low while conditions hold.
+entry_order_expire_days = 2
 score_reward_risk_weight = 0.40
 score_impulse_weight = 0.25
 score_tide_weight = 0.20

@@ -19,6 +19,10 @@ class StrategyParams:
     rr_excellent: float = 3.0
     strong_weekly_slope: float = 0.03
     fi_scale_lookback: int = 20
+    value_zone_max_distance_pct: float = 0.03
+    safezone_lookback_days: int = 20
+    safezone_factor: float = 2.0
+    entry_order_expire_days: int = 2
     score_reward_risk_weight: float = 0.40
     score_impulse_weight: float = 0.25
     score_tide_weight: float = 0.20
