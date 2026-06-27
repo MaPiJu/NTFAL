@@ -70,6 +70,8 @@ class Signal:
     market_regime: str  # trending / flat, derived from the weekly EMA13 slope filter
     third_screen_impulse: str | None  # optional lower-timeframe Impulse used for entry timing
     divergences: list[str]  # Elder MACD-Histogram / Force Index divergence warnings
+    value_zone_status: str  # in_value / near_value / extended
+    entry_order_plan: str | None  # how to roll/expire the theoretical stop-entry
 
 
 def tick_size(price: float) -> float:
@@ -122,6 +124,81 @@ def average_penetration(
     if pen.empty:
         return None
     return float(pen.mean())
+
+
+def value_zone_status(daily: pd.DataFrame, max_distance_pct: float = 0.03) -> str:
+    """Classify the last daily close versus Elder's daily EMA13-EMA26 value zone.
+
+    The Triple Screen should enter on pullbacks to value, not after price has
+    already run away. "Near" allows a small configurable overshoot so strong
+    trends are not rejected for being a few ticks outside the zone.
+    """
+    close = float(daily["close"].iloc[-1])
+    e13 = float(ema(daily["close"], EMA_FAST).iloc[-1])
+    e26 = float(ema(daily["close"], EMA_SLOW).iloc[-1])
+    low, high = sorted((e13, e26))
+    if low <= close <= high:
+        return "in_value"
+    if close > high:
+        return "near_value" if (close - high) / high <= max_distance_pct else "extended"
+    return "near_value" if (low - close) / low <= max_distance_pct else "extended"
+
+
+def average_adverse_noise(
+    daily: pd.DataFrame,
+    side: Literal["long", "short"],
+    lookback: int,
+) -> float | None:
+    """Elder SafeZone noise: average adverse one-bar extreme expansion.
+
+    Longs care about downside noise (today's low undercuts yesterday's low).
+    Shorts care about upside noise (today's high exceeds yesterday's high).
+    Bars without adverse noise are ignored, matching SafeZone's intent to measure
+    normal counter-trend noise instead of all volatility.
+    """
+    if side == "long":
+        noise = (daily["low"].shift(1) - daily["low"]).clip(lower=0)
+    else:
+        noise = (daily["high"] - daily["high"].shift(1)).clip(lower=0)
+    noise = noise.dropna().iloc[-lookback:]
+    noise = noise[noise > 0]
+    if noise.empty:
+        return None
+    return float(noise.mean())
+
+
+def safezone_initial_stop(
+    daily: pd.DataFrame,
+    side: Literal["long", "short"],
+    params: StrategyParams = DEFAULT_PARAMS,
+) -> float:
+    """Initial protective stop using Elder's SafeZone adverse-noise method."""
+    if side == "long":
+        base = float(daily["low"].iloc[-2:].min())
+        noise = average_adverse_noise(daily, side, params.safezone_lookback_days)
+        offset = (noise * params.safezone_factor) if noise is not None else tick_size(base)
+        return base - offset
+    base = float(daily["high"].iloc[-2:].max())
+    noise = average_adverse_noise(daily, side, params.safezone_lookback_days)
+    offset = (noise * params.safezone_factor) if noise is not None else tick_size(base)
+    return base + offset
+
+
+def theoretical_entry_order_plan(
+    action: Action,
+    entry: float | None,
+    params: StrategyParams = DEFAULT_PARAMS,
+) -> str | None:
+    """Human-readable lifecycle for the stop-entry order Elder would trail."""
+    if action not in ("long", "short") or entry is None:
+        return None
+    direction = "buy-stop" if action == "long" else "sell-stop"
+    return (
+        f"Place a theoretical {direction} at {entry:.6g}; if not filled, roll it daily "
+        f"to the latest completed bar's {'high + 1 tick' if action == 'long' else 'low - 1 tick'} "
+        f"while the weekly tide, Force Index pullback, value-zone filter and Impulse veto "
+        f"remain valid; expire after {params.entry_order_expire_days} completed daily bars."
+    )
 
 
 def _weights(params: StrategyParams) -> dict[str, float]:
@@ -191,9 +268,7 @@ def _long_levels(
     pen = average_penetration(daily, "down", lookback=params.penetration_lookback_days)
     limit = projected_ema(daily["close"]) - pen if pen is not None else None
 
-    pen_stop = average_penetration(daily, "down", lookback=params.penetration_lookback_days)
-    stop_offset = pen_stop if pen_stop is not None else tick
-    stop = float(daily["low"].iloc[-2:].min()) - stop_offset  # SafeZone-style daily stop
+    stop = safezone_initial_stop(daily, "long", params)
 
     # Target: weekly value zone (between EMA13 and EMA26); if price already
     # trades above value, fall back to the weekly upper channel.
@@ -215,9 +290,7 @@ def _short_levels(
     pen = average_penetration(daily, "up", lookback=params.penetration_lookback_days)
     limit = projected_ema(daily["close"]) + pen if pen is not None else None
 
-    pen_stop = average_penetration(daily, "up", lookback=params.penetration_lookback_days)
-    stop_offset = pen_stop if pen_stop is not None else tick
-    stop = float(daily["high"].iloc[-2:].max()) + stop_offset
+    stop = safezone_initial_stop(daily, "short", params)
 
     e13 = float(ema(weekly["close"], EMA_FAST).iloc[-1])
     e26 = float(ema(weekly["close"], EMA_SLOW).iloc[-1])
@@ -427,6 +500,7 @@ def evaluate_asset(
     market_regime = "flat" if trend == "neutral" else "trending"
     fi2 = float(force_index(daily["close"], daily["volume"], span=2).iloc[-1])
     divergences = detect_divergences(daily, lookback=params.divergence_lookback)
+    vz_status = value_zone_status(daily, params.value_zone_max_distance_pct)
 
     candidate: Action = "stand_aside"
     if trend == "up":
@@ -451,6 +525,13 @@ def evaluate_asset(
     elif candidate == "short" and "green" in (w_imp, d_imp):
         candidate = "stand_aside"
         reason = f"short vetoed by Impulse (weekly={w_imp}, daily={d_imp}: green forbids shorts)"
+    elif candidate in ("long", "short") and vz_status == "extended":
+        vetoed = candidate
+        candidate = "stand_aside"
+        reason = (
+            f"{vetoed} vetoed: daily close is extended from the EMA13-EMA26 value zone "
+            f"(status={vz_status})"
+        )
 
     entry = limit = stop = target = rr = None
     third_impulse = None
@@ -481,6 +562,7 @@ def evaluate_asset(
         score = compute_quality_score_with_params(
             rr, impulse_confirmation(candidate, w_imp, d_imp), tide_strength, pull, params
         )
+    order_plan = theoretical_entry_order_plan(candidate, entry, params)
 
     return Signal(
         asset=asset,
@@ -502,4 +584,6 @@ def evaluate_asset(
         market_regime=market_regime,
         third_screen_impulse=third_impulse,
         divergences=divergences,
+        value_zone_status=vz_status,
+        entry_order_plan=order_plan,
     )

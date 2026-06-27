@@ -39,7 +39,7 @@ from strategy.triple_screen import (
     EMA_FAST,
     EMA_SLOW,
     Trend,
-    average_penetration,
+    average_adverse_noise,
     tick_size,
     weekly_channel_with_params,
     weekly_trend,
@@ -152,23 +152,21 @@ def safezone_stop(
     in_profit: bool,
     params: StrategyParams = DEFAULT_PARAMS,
 ) -> float:
-    """Elder SafeZone-style trailing stop: place it behind the recent daily extreme
-    by the average EMA penetration, ratcheted to break-even once the trade profits.
+    """Elder SafeZone trailing stop behind the recent daily extreme.
 
-    Long: below the lower of the last two daily lows, minus the average downside
-    penetration of EMA13; short: above the higher of the last two highs, plus the
-    average upside penetration. Reuses the project's `average_penetration` (the same
-    basis the entry logic uses) so no new indicator is introduced.
+    Longs subtract average downside noise (lows undercutting prior lows); shorts
+    add average upside noise (highs exceeding prior highs). The stop is ratcheted
+    to break-even once the completed daily close puts the trade in profit.
     """
     if pos.side == "long":
         base = float(daily["low"].iloc[-2:].min())
-        pen = average_penetration(daily, "down", lookback=params.penetration_lookback_days)
-        offset = pen if pen is not None else tick_size(base)
+        noise = average_adverse_noise(daily, "long", params.safezone_lookback_days)
+        offset = (noise * params.safezone_factor) if noise is not None else tick_size(base)
         stop = base - offset
         return max(stop, pos.entry) if in_profit else stop
     base = float(daily["high"].iloc[-2:].max())
-    pen = average_penetration(daily, "up", lookback=params.penetration_lookback_days)
-    offset = pen if pen is not None else tick_size(base)
+    noise = average_adverse_noise(daily, "short", params.safezone_lookback_days)
+    offset = (noise * params.safezone_factor) if noise is not None else tick_size(base)
     stop = base + offset
     return min(stop, pos.entry) if in_profit else stop
 

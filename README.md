@@ -14,12 +14,17 @@ charts so the operator can make a **discretionary** entry decision and place ord
 
 - **First screen (tide):** weekly chart — strategic bias from the slope of the weekly EMA13, with tiny slopes treated as **flat/no-trend** so ranges do not become false signals.
 - **Second screen (wave):** daily chart — the 2-EMA Force Index looks for pullbacks
-  *against* the daily wave but *with* the weekly tide.
+  *against* the daily wave but *with* the weekly tide, and the latest completed daily
+  close must be in or near the daily EMA13-EMA26 **value zone** so the scanner does
+  not chase extended prices.
 - **Third screen (entry):** buy-stop 1 tick above the prior day's high (longs) /
   sell-stop 1 tick below the prior day's low (shorts), plus an alternative limit at the
-  projected EMA13 offset by the average pullback penetration. Optionally enable a true
-  lower-timeframe third screen (`4h` by default) to time the stop-entry from the latest
-  completed 4h high/low and veto entries against the 4h Impulse.
+  projected EMA13 offset by the average pullback penetration. The stop-entry is treated
+  as a theoretical Elder order: if unfilled it is rolled to the latest completed bar's
+  high/low while the setup remains valid, and it expires after the configured number
+  of completed daily bars. Optionally enable a true lower-timeframe third screen (`4h`
+  by default) to time the stop-entry from the latest completed 4h high/low and veto
+  entries against the 4h Impulse.
 - **Impulse censorship (applied last):** any **red** Impulse (weekly or daily) forbids
   longs; any **green** forbids shorts.
 - **Best-trade ranking:** every validated setup gets a 0–100 quality score blending
@@ -36,6 +41,9 @@ charts so the operator can make a **discretionary** entry decision and place ord
   `open_trade_risk` field is only extra risk for positions the scanner cannot see.
 - **Journal:** each `run.py` refresh can append a compact JSONL entry with the top
   pick, signal levels/reasons, open-position verdicts, stops and open risk.
+- **SafeZone stops:** protective and trailing stops use Elder-style adverse daily noise
+  (average downside low undercuts for longs / upside high breakouts for shorts), not
+  simple volatility; profitable trades are ratcheted to at least break-even.
 - **Trade management (open positions):** for trades you already hold, Elder's exit tools
   give a daily verdict — **hold**, **take profits**, or **exit** — from the same weekly +
   daily screens (see below).
@@ -145,6 +153,7 @@ Edit `config.toml`:
   Hyperliquid positions are risked automatically from their Elder trailing stop.
 - `[strategy]` — tune the Elder scanner thresholds and ranking weights without editing
   code: flat weekly slope cutoff, EMA-penetration/channel/divergence lookbacks,
+  value-zone proximity, SafeZone lookback/factor, theoretical stop-order expiry,
   minimum R:R, “excellent” R:R, weekly-tide strength scale, Force Index pullback
   scale, and score weights.
 - `[journal]` — set `enabled` and `path` for the append-only JSONL scan journal.

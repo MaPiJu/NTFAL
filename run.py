@@ -82,7 +82,9 @@ def print_signals_table(snapshot: dict[str, Any]) -> None:
     for s in snapshot["signals"]:
         divs = s.get("divergences") or []
         suffix = f" · divergences: {', '.join(divs)}" if divs else ""
-        print(f"  {s['asset']}: {s['reason']}{suffix}")
+        vz = s.get("value_zone_status", "—")
+        order = f" · order: {s['entry_order_plan']}" if s.get("entry_order_plan") else ""
+        print(f"  {s['asset']}: {s['reason']} · value zone: {vz}{order}{suffix}")
     if snapshot.get("skipped"):
         print(f"\nskipped (not enough history yet): {', '.join(snapshot['skipped'])}")
     print("\nInformational only — not financial advice; no orders are placed.\n")
