@@ -7,7 +7,7 @@ import json
 from fastapi.testclient import TestClient
 
 from app.main import app
-from app.pipeline import build_snapshot
+from app.pipeline import build_snapshot, live_price_alert
 from config import Config, JournalConfig, PositionsConfig, RiskConfig, ScannerConfig, StrategyConfig
 from journal import append_journal_entry
 from tests.conftest import make_clearinghouse_state, make_client
@@ -53,6 +53,27 @@ def make_config(cache_dir, watchlist=("BTC",), address="", **risk_overrides) -> 
     )
 
 
+def test_live_price_alert_flags_chasing_and_void_setups():
+    # Long setup: entry 105, stop 95, target 130 (computed on the closed bar).
+    assert live_price_alert("long", 100.0, 105.0, 95.0, 130.0) is None  # still waiting
+    # Live ran through the buy-stop -> entering now is chasing.
+    assert "don't chase" in live_price_alert("long", 110.0, 105.0, 95.0, 130.0)
+    # Live already at the target -> nothing left to capture.
+    assert "spent" in live_price_alert("long", 130.0, 105.0, 95.0, 130.0)
+    # Live collapsed past the stop -> the premise is void.
+    assert "void" in live_price_alert("long", 90.0, 105.0, 95.0, 130.0)
+
+    # Short setup: entry 95, stop 105, target 70 (mirror image).
+    assert live_price_alert("short", 100.0, 95.0, 105.0, 70.0) is None
+    assert "don't chase" in live_price_alert("short", 90.0, 95.0, 105.0, 70.0)
+    assert "spent" in live_price_alert("short", 70.0, 95.0, 105.0, 70.0)
+    assert "void" in live_price_alert("short", 110.0, 95.0, 105.0, 70.0)
+
+    # Non-actionable rows and missing data never warn.
+    assert live_price_alert("stand_aside", 100.0, None, None, None) is None
+    assert live_price_alert("long", None, 105.0, 95.0, 130.0) is None
+
+
 def test_build_snapshot_from_fixtures(tmp_path, btc_fixtures):
     cfg = make_config(tmp_path)
     client = make_client(btc_fixtures, tmp_path)
@@ -66,6 +87,8 @@ def test_build_snapshot_from_fixtures(tmp_path, btc_fixtures):
     assert sig["weekly_impulse"] in {"green", "red", "blue"}
     # new fields surfaced for the dashboard / ranking
     assert "last_close" in sig and "quality_score" in sig and "is_top_pick" in sig
+    # live price (still-open daily bar) + a stale-price/chasing alert
+    assert "live_price" in sig and "price_alert" in sig
     # the top pick (if any) must be a tradable, R:R-passing setup
     if snapshot["top_pick"] is not None:
         pick = next(s for s in snapshot["signals"] if s["asset"] == snapshot["top_pick"])

@@ -86,6 +86,41 @@ def chart_payload(df: pd.DataFrame) -> dict[str, Any]:
     }
 
 
+def live_price_alert(
+    action: str,
+    live: float | None,
+    entry: float | None,
+    stop: float | None,
+    target: float | None,
+) -> str | None:
+    """Warn when the live price has already run past the setup's key levels.
+
+    Signals are computed on the last *completed* daily bar; on a 24/7 market the
+    live price (the still-open bar's close) can drift far from it before the next
+    refresh. This flags when acting on the stale signal would mean chasing — the
+    live price has already cleared the buy-stop/sell-stop entry — or when the
+    setup is already spent (live beyond the target) or void (live beyond the
+    stop). Returns None for non-actionable rows or when there is nothing to warn.
+    """
+    if action not in ("long", "short") or live is None:
+        return None
+    if action == "long":
+        if target is not None and live >= target:
+            return "target already reached — setup spent, do not enter"
+        if stop is not None and live <= stop:
+            return "live price below the stop — setup void"
+        if entry is not None and live >= entry:
+            return "entry already triggered live — don't chase, wait for a pullback"
+    else:
+        if target is not None and live <= target:
+            return "target already reached — setup spent, do not enter"
+        if stop is not None and live >= stop:
+            return "live price above the stop — setup void"
+        if entry is not None and live <= entry:
+            return "entry already triggered live — don't chase, wait for a pullback"
+    return None
+
+
 def expand_watchlist(watchlist: tuple[str, ...], client: HyperliquidClient) -> dict[str, int]:
     """Resolve watchlist entries to {coin: szDecimals}, sorted by name.
 
@@ -228,10 +263,10 @@ def build_snapshot(
             client.refresh(coin, cfg.scanner.weekly_interval, cfg.scanner.lookback_weeks),
             now_ms,
         )
-        daily = completed_bars(
-            client.refresh(coin, cfg.scanner.daily_interval, cfg.scanner.lookback_days),
-            now_ms,
-        )
+        # Keep the raw daily frame (including the still-open bar) so we can read a
+        # live price; the strategy itself only ever sees completed bars.
+        daily_all = client.refresh(coin, cfg.scanner.daily_interval, cfg.scanner.lookback_days)
+        daily = completed_bars(daily_all, now_ms)
         third = None
         if cfg.scanner.use_third_screen:
             third = completed_bars(
@@ -257,6 +292,13 @@ def build_snapshot(
         row = asdict(sig)
         row["position_size"] = None
         row["last_close"] = float(daily["close"].iloc[-1]) if not daily.empty else None
+        # Live price = the still-open daily bar's close (falls back to the last
+        # completed close when there is no open bar). Lets the operator see how
+        # far price has drifted from the basis the signal was computed on.
+        row["live_price"] = float(daily_all["close"].iloc[-1]) if not daily_all.empty else None
+        row["price_alert"] = live_price_alert(
+            sig.action, row["live_price"], sig.entry, sig.stop, sig.target
+        )
         signals.append(row)
 
         charts[coin] = {"weekly": chart_payload(weekly), "daily": chart_payload(daily)}
