@@ -39,6 +39,20 @@ function rankedSignals(snapshot) {
   });
 }
 
+// Live mark (still-open daily bar) + how far it has drifted from the closed-bar
+// basis the signal was computed on. A drifted/alerting row is flagged so the
+// operator does not act on a stale signal.
+function markCell(s) {
+  if (s.live_price === null || s.live_price === undefined) return "—";
+  let drift = "";
+  if (s.last_close) {
+    const pct = (s.live_price / s.last_close - 1) * 100;
+    drift = ` <span class="drift">(${pct >= 0 ? "+" : ""}${pct.toFixed(1)}%)</span>`;
+  }
+  const cls = s.price_alert ? ' class="rr-bad"' : "";
+  return `<span${cls} title="${s.price_alert || ""}">${fmt(s.live_price)}${drift}</span>`;
+}
+
 function scoreCell(s) {
   if (s.quality_score === null || s.quality_score === undefined) return "—";
   const pct = Math.round(s.quality_score * 100);
@@ -67,8 +81,9 @@ function renderTable(snapshot) {
       <td>${s.weekly_trend}</td>
       <td>${impulseDot(s.weekly_impulse)} / ${impulseDot(s.daily_impulse)}${s.third_screen_impulse ? ` / ${impulseDot(s.third_screen_impulse)}` : ""}</td>
       <td>${fmt(s.force_index_2, 4)}</td>
-      <td><span class="badge ${s.action}">${s.action.replace("_", " ")}</span></td>
+      <td><span class="badge ${s.action}">${s.action.replace("_", " ")}${s.price_alert ? " ⚠" : ""}</span></td>
       <td>${fmt(s.last_close)}</td>
+      <td>${markCell(s)}</td>
       <td>${fmt(s.entry)}</td>
       <td>${fmt(s.stop)}</td>
       <td>${rrCell}</td>
@@ -78,7 +93,7 @@ function renderTable(snapshot) {
       <td>${fmt(s.target)}</td>
       <td>${scoreCell(s)}</td>
       <td>${size}</td>
-      <td class="reason">${s.reason}<br><strong>Value zone:</strong> ${(s.value_zone_status || "—").replace("_", " ")}${s.entry_order_plan ? `<br><strong>Order plan:</strong> ${s.entry_order_plan}` : ""}${(s.divergences || []).length ? `<br><strong>Divergences:</strong> ${s.divergences.join(", ")}` : ""}</td>`;
+      <td class="reason">${s.reason}<br><strong>Value zone:</strong> ${(s.value_zone_status || "—").replace("_", " ")}${s.price_alert ? `<br><strong>⚠ Live price:</strong> ${s.price_alert}` : ""}${s.entry_order_plan ? `<br><strong>Order plan:</strong> ${s.entry_order_plan}` : ""}${(s.divergences || []).length ? `<br><strong>Divergences:</strong> ${s.divergences.join(", ")}` : ""}</td>`;
     tbody.appendChild(row);
   }
 }

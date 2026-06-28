@@ -55,7 +55,7 @@ def print_signals_table(snapshot: dict[str, Any]) -> None:
     # 14-wide asset column: tradfi names like "xyz:ALUMINIUM" are longer than tickers.
     header = (
         f"{'ASSET':<14} {'REGIME':<8} {'TIDE':<7} {'IMP W/D/4H':<14} {'FI(2)':>14} {'ACTION':<13} "
-        f"{'PRICE':>12} {'ENTRY':>12} {'STOP':>12} {'R:R':>7} "
+        f"{'CLOSE':>12} {'MARK':>12} {'DRIFT':>7} {'ENTRY':>12} {'STOP':>12} {'R:R':>7} "
         f"{'LIMIT':>12} {'LIM STOP':>12} {'LIM R:R':>7} {'TARGET':>12} "
         f"{'SCORE':>6} {'SIZE':>10}"
     )
@@ -68,15 +68,21 @@ def print_signals_table(snapshot: dict[str, Any]) -> None:
         lim_rr = f"{s['reward_risk_limit']:.2f}" if s.get("reward_risk_limit") is not None else "—"
         size = num(s["position_size"]["size"]) if s["position_size"] else "—"
         score = f"{s['quality_score'] * 100:.0f}" if s.get("quality_score") is not None else "—"
-        action = s["action"] + (" ★" if s.get("is_top_pick") else "")
+        action = (
+            s["action"]
+            + (" ⚠" if s.get("price_alert") else "")
+            + (" ★" if s.get("is_top_pick") else "")
+        )
         impulses = "/".join(
             [s["weekly_impulse"], s["daily_impulse"], s.get("third_screen_impulse") or "—"]
         )
+        close, mark = s.get("last_close"), s.get("live_price")
+        drift = f"{(mark / close - 1) * 100:+.1f}%" if close and mark else "—"
         print(
             f"{s['asset']:<14} {s.get('market_regime', '—'):<8} {s['weekly_trend']:<7} "
             f"{impulses:<14} "
             f"{s['force_index_2']:>14,.4g} {action:<13} "
-            f"{num(s.get('last_close')):>12} "
+            f"{num(close):>12} {num(mark):>12} {drift:>7} "
             f"{num(s['entry']):>12} {num(s['stop']):>12} {rr:>7} "
             f"{num(s['entry_limit']):>12} {num(s.get('entry_limit_stop')):>12} {lim_rr:>7} "
             f"{num(s['target']):>12} {score:>6} {size:>10}"
@@ -87,7 +93,8 @@ def print_signals_table(snapshot: dict[str, Any]) -> None:
         suffix = f" · divergences: {', '.join(divs)}" if divs else ""
         vz = s.get("value_zone_status", "—")
         order = f" · order: {s['entry_order_plan']}" if s.get("entry_order_plan") else ""
-        print(f"  {s['asset']}: {s['reason']} · value zone: {vz}{order}{suffix}")
+        alert = f" · ⚠ {s['price_alert']}" if s.get("price_alert") else ""
+        print(f"  {s['asset']}: {s['reason']} · value zone: {vz}{order}{alert}{suffix}")
     if snapshot.get("skipped"):
         print(f"\nskipped (not enough history yet): {', '.join(snapshot['skipped'])}")
     print("\nInformational only — not financial advice; no orders are placed.\n")
