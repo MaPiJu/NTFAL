@@ -7,6 +7,15 @@
 #   - "*"      = EVERY tradable native (crypto) Hyperliquid perp
 #   - "xyz:*"  = every tradable perp of the HIP-3 "xyz" dex — the tradfi
 #                universe (stocks, indices, gold, oil, forex…)
+#   - "omni:ETH" / "omni:*" = Variational Omni perp(s). Omni has no public
+#                OHLCV API: candles come from Hyperliquid when the ticker is
+#                also listed there (Omni is oracle-priced, same index series),
+#                else from Omni's Cloudflare-protected chart endpoint
+#                (usually reachable from home connections only — check with
+#                `python -m data.variational ETH`). Assets with no usable
+#                candle source are skipped with the reason shown. Avoid
+#                scanning both "*" and "omni:*": the ~190 overlapping tickers
+#                would be analyzed twice under two names.
 # Scanning full universes means two requests per asset, so the refresh takes
 # a few minutes and the dashboard gets one card per perp.
 watchlist = ["*", "xyz:*"]
@@ -85,6 +94,15 @@ open_trade_risk = 0.0
 # signed and no order is ever placed. Leave empty to disable trade management.
 # May also be set via the HL_ADDRESS environment variable (see .env.example).
 address = ""
+
+# Open positions on venues with no public position lookup (Variational Omni
+# has none until its trading API ships) are declared by hand instead; they get
+# the same Elder exit analysis. One block per position:
+# [[positions.manual]]
+# asset = "omni:ETH"   # watchlist naming
+# side = "long"        # or "short"
+# size = 1.5           # asset units, always positive
+# entry = 2500.0       # average entry price
 
 [journal]
 # Append one compact JSONL entry per `run.py` refresh: top pick, actionable

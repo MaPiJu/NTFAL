@@ -20,6 +20,8 @@ from typing import Any
 from app.pipeline import SNAPSHOT_FILENAME, build_snapshot
 from config import Config, load_config
 from data.hyperliquid import HyperliquidClient
+from data.provider import OmniProvider, PlatformRouter
+from data.variational import VariationalClient
 from journal import append_journal_entry
 
 
@@ -96,7 +98,7 @@ def print_signals_table(snapshot: dict[str, Any]) -> None:
         alert = f" · ⚠ {s['price_alert']}" if s.get("price_alert") else ""
         print(f"  {s['asset']}: {s['reason']} · value zone: {vz}{order}{alert}{suffix}")
     if snapshot.get("skipped"):
-        print(f"\nskipped (not enough history yet): {', '.join(snapshot['skipped'])}")
+        print(f"\nskipped (too new, or no usable candle source): {', '.join(snapshot['skipped'])}")
     print("\nInformational only — not financial advice; no orders are placed.\n")
 
 
@@ -109,9 +111,9 @@ def print_positions_table(snapshot: dict[str, Any]) -> None:
     if not snapshot.get("position_address") and not positions:
         return  # trade management disabled (no public address configured)
 
-    print(
-        f"\nOpen positions — Elder trade management  (address {snapshot.get('position_address')})"
-    )
+    addr = snapshot.get("position_address")
+    suffix = f"  (address {addr})" if addr else "  (manual positions)"
+    print(f"\nOpen positions — Elder trade management{suffix}")
     if not positions:
         print("  (none open, or held coins are too new to evaluate)\n")
         return
@@ -145,7 +147,11 @@ def print_positions_table(snapshot: dict[str, Any]) -> None:
 
 
 def do_refresh(cfg: Config) -> dict[str, Any]:
-    with HyperliquidClient(cache_dir=cfg.cache_dir) as client:
+    # One router over both venues: plain coins / "xyz:…" -> Hyperliquid,
+    # "omni:…" -> Variational Omni (hybrid candles, see data/provider.py).
+    hyperliquid = HyperliquidClient(cache_dir=cfg.cache_dir)
+    omni = OmniProvider(VariationalClient(cache_dir=cfg.cache_dir), hyperliquid)
+    with PlatformRouter(hyperliquid, omni) as client:
         snapshot = build_snapshot(
             cfg, client, on_progress=lambda coin: print(f"refreshing {coin}…", flush=True)
         )

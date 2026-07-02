@@ -13,7 +13,7 @@ from journal import append_journal_entry
 from tests.conftest import make_clearinghouse_state, make_client
 
 
-def make_config(cache_dir, watchlist=("BTC",), address="", **risk_overrides) -> Config:
+def make_config(cache_dir, watchlist=("BTC",), address="", manual=(), **risk_overrides) -> Config:
     risk = {
         "equity": 10_000.0,
         "risk_pct": 0.01,
@@ -47,7 +47,7 @@ def make_config(cache_dir, watchlist=("BTC",), address="", **risk_overrides) -> 
             score_pullback_weight=0.15,
         ),
         risk=RiskConfig(**risk),
-        positions=PositionsConfig(address=address),
+        positions=PositionsConfig(address=address, manual=tuple(manual)),
         journal=JournalConfig(enabled=False, path=cache_dir / "journal.jsonl"),
         cache_dir=cache_dir,
     )

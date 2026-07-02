@@ -1,20 +1,21 @@
-# CLAUDE.md — Elder Triple Screen Scanner (Hyperliquid)
+# CLAUDE.md — Elder Triple Screen Scanner (Hyperliquid & Variational Omni)
 
 ## What this project is
-A **read-only daily analysis tool** that watches a *small* set of Hyperliquid-tradable
-perps and evaluates them with Alexander Elder's **Triple Screen** + **Impulse** method
-(*The New Trading for a Living*). It produces, once per day, a signals table and
-interactive charts so the operator can make a discretionary entry decision and place
-orders **manually**.
+A **read-only daily analysis tool** that watches a *small* set of perps tradable on
+Hyperliquid and/or Variational Omni and evaluates them with Alexander Elder's
+**Triple Screen** + **Impulse** method (*The New Trading for a Living*). It produces,
+once per day, a signals table and interactive charts so the operator can make a
+discretionary entry decision and place orders **manually**.
 
 > This is an analysis/education tool, **not** an auto-trader and **not** financial advice.
 
 ## Hard constraints (never violate)
-- **No order execution, no signing, no private keys.** Use only Hyperliquid's *public*
-  `info` endpoint (`candleSnapshot`, `meta`, and `clearinghouseState` — the last is a
-  read-only account lookup of *open positions* for a **public** address, like a block
-  explorer; it takes no key and signs nothing). The codebase must contain no private key,
-  no exchange API key, no `exchange`/`order`/`signing` code path.
+- **No order execution, no signing, no private keys.** Use only *public, keyless,
+  read-only* endpoints: Hyperliquid's `info` endpoint (`candleSnapshot`, `meta`, and
+  `clearinghouseState` — the last is a read-only account lookup of *open positions* for
+  a **public** address, like a block explorer; it takes no key and signs nothing) and
+  Variational Omni's public `metadata/stats` + chart `candles` GETs. The codebase must
+  contain no private key, no exchange API key, no `exchange`/`order`/`signing` code path.
 - **No auto-trading loop.** Output is informational only; a human decides and executes.
 - **Don't invent indicators.** "Less is more": implement only the indicators listed in
   the Strategy Spec. Adding more indicators is a regression, not a feature.
@@ -99,6 +100,15 @@ EMA (`today_EMA + (today_EMA − yesterday_EMA)`) and offset by that average to 
   validate watchlist against the perp `meta` universe; `clearinghouseState` open positions
   for a public address (read-only); cache OHLCV to parquet/SQLite; parse string OHLCV fields
   to float; respect the 5000-candle limit.
+- `data/variational.py` — read-only Variational Omni client: documented `metadata/stats`
+  (universe, mark price, funding) + the app's chart `candles` endpoint (reverse-engineered;
+  Cloudflare-protected, daily max period → weekly resampled here, volume may be absent).
+  Connectivity probe: `python -m data.variational ETH`.
+- `data/provider.py` — `MarketDataProvider` protocol + `PlatformRouter`: `omni:TICKER` /
+  `omni:*` watchlist entries route to the `OmniProvider`, whose candles are **hybrid**
+  (Hyperliquid first for tickers also listed there — Omni is oracle-priced, same index
+  series — native Omni candles as best-effort fallback; assets with no usable source are
+  skipped with a reason). Everything else stays on the Hyperliquid client.
 - `indicators/` — pure functions on pandas DataFrames (EMA, MACD-Hist, Force Index, Impulse color).
 - `strategy/triple_screen.py` — combines screens → per-asset `Signal` (action, reason,
   weekly/daily impulse, suggested entry/stop/target, reward:risk).
@@ -121,7 +131,9 @@ EMA (`today_EMA + (today_EMA − yesterday_EMA)`) and offset by that average to 
   `xyz:GOLD`), `"*"` to scan the **entire** tradable native (crypto) perp universe, and
   `"<dex>:*"` to scan a whole HIP-3 builder dex — `"xyz:*"` is the tradfi universe
   (stocks, indices, gold, oil, forex…). Current default: `["*", "xyz:*"]`; delisted
-  assets excluded.
+  assets excluded. `omni:TICKER` / `omni:*` select Variational Omni assets (the `omni`
+  namespace is a *platform*, not a Hyperliquid dex). Omni open positions have no public
+  lookup and are declared via `[[positions.manual]]` (asset/side/size/entry) instead.
 
 ## Definition of done (per phase)
 1. Data layer fetches+caches weekly & daily candles for the watchlist; tests on fixtures pass.
