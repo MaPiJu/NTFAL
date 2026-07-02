@@ -68,11 +68,25 @@ class RiskConfig:
 
 
 @dataclass(frozen=True)
+class ManualPosition:
+    # An open position declared by hand — used for venues with no public
+    # position lookup (Variational Omni has none until its API ships). The
+    # asset uses watchlist naming, e.g. "omni:ETH".
+    asset: str
+    side: str  # "long" | "short"
+    size: float  # absolute units of the asset (always positive)
+    entry: float
+
+
+@dataclass(frozen=True)
 class PositionsConfig:
     # Public wallet address used to read OPEN positions from Hyperliquid's public
     # clearinghouseState info endpoint. Read-only — no private key, no signing.
     # Empty string disables open-trade management.
     address: str
+    # Manually declared open positions (e.g. on Omni), merged with the ones
+    # read from Hyperliquid for the same Elder exit analysis.
+    manual: tuple[ManualPosition, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -106,6 +120,20 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> Config:
     # A public address is not a secret, but allow an env override so it need not
     # be committed (see .env.example).
     address = str(os.environ.get("HL_ADDRESS", p.get("address", ""))).strip()
+
+    manual = []
+    for m in p.get("manual", []):
+        side = str(m["side"]).lower()
+        if side not in ("long", "short"):
+            raise ValueError(f"positions.manual side must be long|short, got {m['side']!r}")
+        manual.append(
+            ManualPosition(
+                asset=str(m["asset"]),
+                side=side,
+                size=abs(float(m["size"])),
+                entry=float(m["entry"]),
+            )
+        )
 
     return Config(
         scanner=ScannerConfig(
@@ -148,7 +176,7 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> Config:
             month_realized_losses=float(r.get("month_realized_losses", 0.0)),
             open_trade_risk=float(r.get("open_trade_risk", 0.0)),
         ),
-        positions=PositionsConfig(address=address),
+        positions=PositionsConfig(address=address, manual=tuple(manual)),
         journal=JournalConfig(
             enabled=bool(j.get("enabled", True)),
             path=Path(j.get("path", "cache/trading_journal.jsonl")),

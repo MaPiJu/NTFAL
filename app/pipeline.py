@@ -15,7 +15,8 @@ from typing import Any
 import pandas as pd
 
 from config import WATCHLIST_ALL, Config
-from data.hyperliquid import HyperliquidClient, HyperliquidError, coin_dex, completed_bars
+from data.hyperliquid import HyperliquidError, coin_dex, completed_bars
+from data.provider import OMNI_PREFIX, MarketDataProvider, platform_of
 from indicators import ema, force_index, impulse_color, macd_histogram
 from risk.sizing import position_size, six_percent_guard
 from strategy.params import StrategyParams
@@ -121,7 +122,7 @@ def live_price_alert(
     return None
 
 
-def expand_watchlist(watchlist: tuple[str, ...], client: HyperliquidClient) -> dict[str, int]:
+def expand_watchlist(watchlist: tuple[str, ...], client: MarketDataProvider) -> dict[str, int]:
     """Resolve watchlist entries to {coin: szDecimals}, sorted by name.
 
     "*" expands to every tradable native (crypto) perp; "<dex>:*" to every
@@ -153,28 +154,33 @@ def watchlist_dexes(watchlist: tuple[str, ...]) -> list[str]:
     `clearinghouseState` is per-dex, so to find every open position we query the
     native clearinghouse plus each HIP-3 builder dex the operator watches
     ("xyz:*" / "xyz:GOLD" -> "xyz"). Without this, positions on a builder dex
-    (e.g. the tradfi "xyz" universe) are invisible.
+    (e.g. the tradfi "xyz" universe) are invisible. The "omni" namespace is a
+    *platform* (Variational), not a Hyperliquid dex — it has no clearinghouse.
     """
     dexes = {coin_dex(item) for item in watchlist}
+    dexes.discard(OMNI_PREFIX)
     dexes.add("")  # always include the native clearinghouse
     return sorted(dexes)
 
 
-def fetch_open_positions(cfg: Config, client: HyperliquidClient) -> list[OpenPosition]:
-    """Read open positions for the configured public address (empty if disabled).
+def fetch_open_positions(cfg: Config, client: MarketDataProvider) -> list[OpenPosition]:
+    """Open positions: read from Hyperliquid + declared manually in config.
 
-    Positions are gathered across the native clearinghouse and every HIP-3 dex
-    the watchlist references; a failure on one dex doesn't drop the others.
+    Hyperliquid positions are gathered across the native clearinghouse and
+    every HIP-3 dex the watchlist references; a failure on one dex doesn't
+    drop the others. Venues with no public position lookup (Variational Omni)
+    contribute through `[[positions.manual]]` entries instead.
     """
-    if not cfg.positions.address:
-        return []
     out: list[OpenPosition] = []
-    for dex in watchlist_dexes(cfg.scanner.watchlist):
-        try:
-            state = client.clearinghouse_state(cfg.positions.address, dex=dex)
-        except HyperliquidError:
-            continue
-        out.extend(parse_positions(state))
+    if cfg.positions.address:
+        for dex in watchlist_dexes(cfg.scanner.watchlist):
+            try:
+                state = client.clearinghouse_state(cfg.positions.address, dex=dex)
+            except HyperliquidError:
+                continue
+            out.extend(parse_positions(state))
+    for m in cfg.positions.manual:
+        out.append(OpenPosition(asset=m.asset, side=m.side, entry=m.entry, size=m.size))
     return out
 
 
@@ -190,7 +196,7 @@ def position_open_risk(position: dict[str, Any]) -> float:
 
 def _position_frames(
     cfg: Config,
-    client: HyperliquidClient,
+    client: MarketDataProvider,
     coin: str,
     now_ms: int,
 ) -> tuple[pd.DataFrame, pd.DataFrame] | None:
@@ -208,7 +214,7 @@ def _position_frames(
 
 def build_positions(
     cfg: Config,
-    client: HyperliquidClient,
+    client: MarketDataProvider,
     open_positions: list[OpenPosition],
     frames: dict[str, tuple[pd.DataFrame, pd.DataFrame]],
     now_ms: int,
@@ -231,7 +237,7 @@ def build_positions(
 
 def build_snapshot(
     cfg: Config,
-    client: HyperliquidClient,
+    client: MarketDataProvider,
     on_progress: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """Full daily refresh for the watchlist -> dashboard snapshot dict.
@@ -280,8 +286,11 @@ def build_snapshot(
 
         # Fresh listings without two completed bars per timeframe can't be
         # evaluated (no slope, no prior-day levels) — report, don't crash.
+        # Omni assets without a usable candle source land here too, with the
+        # provider's note (Cloudflare block / no volume) as the reason.
         if len(weekly) < 2 or len(daily) < 2:
-            skipped.append(coin)
+            note = getattr(client, "notes", {}).get(coin)
+            skipped.append(f"{coin} — {note}" if note else coin)
             continue
 
         if coin in held:
@@ -290,6 +299,7 @@ def build_snapshot(
         sig = evaluate_asset(coin, weekly, daily, third, params)
         evaluated.append(sig)
         row = asdict(sig)
+        row["platform"] = platform_of(coin)
         row["position_size"] = None
         row["last_close"] = float(daily["close"].iloc[-1]) if not daily.empty else None
         # Live price = the still-open daily bar's close (falls back to the last

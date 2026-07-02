@@ -1,14 +1,14 @@
-# Elder Triple Screen Scanner — Hyperliquid
+# Elder Triple Screen Scanner — Hyperliquid & Variational Omni
 
-A **read-only daily analysis tool** that watches a small set of Hyperliquid-tradable
-perps and evaluates them with Alexander Elder's **Triple Screen** + **Impulse** method
-(*The New Trading for a Living*). Once a day it produces a signals table and interactive
-charts so the operator can make a **discretionary** entry decision and place orders
-**manually**.
+A **read-only daily analysis tool** that watches a small set of perps tradable on
+Hyperliquid and/or Variational Omni and evaluates them with Alexander Elder's
+**Triple Screen** + **Impulse** method (*The New Trading for a Living*). Once a day it
+produces a signals table and interactive charts so the operator can make a
+**discretionary** entry decision and place orders **manually**.
 
 > **Disclaimer:** this is an analysis/education tool, **not financial advice** and
 > **not an auto-trader**. It places no orders, holds no keys, and only ever calls
-> Hyperliquid's *public* `info` endpoint.
+> public read-only endpoints (Hyperliquid's `info` API, Omni's public stats/chart API).
 
 ## How it works
 
@@ -143,6 +143,17 @@ Edit `config.toml`:
   assets are excluded; the refresh fires two requests per asset, so full universes
   take a few minutes and assets too new to have two completed weekly/daily bars are
   listed as skipped.
+- **Variational Omni** assets use the `omni:` namespace: `"omni:ETH"` analyzes
+  Omni's ETH perp, `"omni:*"` scans the whole Omni universe. Omni has no public
+  OHLCV API, so candles are sourced **hybrid**: tickers also listed on Hyperliquid
+  (natively or on the `xyz` tradfi dex) reuse those candles — Omni is
+  oracle-priced, so the index series is the same — while Omni-only tickers fall
+  back to Omni's own chart endpoint, which is Cloudflare-protected (usually works
+  from a residential connection, not from datacenters; test with
+  `python -m data.variational ETH`) and whose candles may carry no volume. Assets
+  with no usable candle source are skipped with the reason shown. Don't scan both
+  `"*"` and `"omni:*"` at once unless you want duplicate analyses of the ~190
+  overlapping tickers under two names.
 - `scanner.use_third_screen` / `scanner.third_screen_interval` — optional lower-timeframe
   entry timing, disabled by default and set to `4h` when enabled.
 - `risk.equity` — account equity used for sizing
@@ -161,6 +172,11 @@ Edit `config.toml`:
 - `positions.address` — **public** wallet address (0x…) used to read your open positions
   for trade management. Read-only: a public address only, never a private key; nothing is
   signed and no order is placed. Empty disables trade management.
+- `[[positions.manual]]` — manually declared open positions for venues with no public
+  position lookup (Variational Omni has none until its trading API ships). Each entry
+  takes `asset` (watchlist naming, e.g. `"omni:ETH"`), `side` (`"long"`/`"short"`),
+  `size` (asset units) and `entry` (price); they get the same Elder exit analysis as
+  positions read from Hyperliquid.
 
 `EQUITY`, `RISK_PCT`, and `HL_ADDRESS` can also be overridden via environment variables /
 `.env` (see `.env.example`). No secrets are needed anywhere.
