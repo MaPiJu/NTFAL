@@ -96,8 +96,21 @@ open_trade_risk = 0.0
 address = ""
 
 # Open positions on venues with no public position lookup (Variational Omni
-# has none until its trading API ships) are declared by hand instead; they get
-# the same Elder exit analysis. One block per position:
+# has none until its trading API ships) come from either or both of:
+#
+# 1) The official Omni portfolio "Trades" CSV export (documented feature:
+#    portfolio → trades tab → download icon). Open positions are reconstructed
+#    by replaying the trade history; caveats: the export covers 365 days /
+#    10 000 rows, so a position older than that reconstructs wrong, and the
+#    weighted-average entry may differ slightly from the venue's own display
+#    around partial closes. Point this at the downloaded file (kept out of
+#    git — put it under cache/) and re-download whenever your positions change:
+# omni_trades_csv = "cache/omni_trades.csv"
+omni_trades_csv = ""
+
+# 2) Positions declared by hand — also useful to OVERRIDE a CSV
+#    reconstruction, since a manual entry wins over the CSV for the same
+#    asset. One block per position:
 # [[positions.manual]]
 # asset = "omni:ETH"   # watchlist naming
 # side = "long"        # or "short"

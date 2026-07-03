@@ -109,6 +109,10 @@ EMA (`today_EMA + (today_EMA − yesterday_EMA)`) and offset by that average to 
   (Hyperliquid first for tickers also listed there — Omni is oracle-priced, same index
   series — native Omni candles as best-effort fallback; assets with no usable source are
   skipped with a reason). Everything else stays on the Hyperliquid client.
+- `data/omni_trades.py` — rebuild open Omni positions from the official portfolio
+  **Trades CSV export** (the only documented account-data path; the portfolio API needs
+  a wallet signature, which is off limits): replay fills chronologically, weighted-average
+  entry, flips/liquidations handled; tolerant header matching with a self-describing error.
 - `indicators/` — pure functions on pandas DataFrames (EMA, MACD-Hist, Force Index, Impulse color).
 - `strategy/triple_screen.py` — combines screens → per-asset `Signal` (action, reason,
   weekly/daily impulse, suggested entry/stop/target, reward:risk).
@@ -133,7 +137,9 @@ EMA (`today_EMA + (today_EMA − yesterday_EMA)`) and offset by that average to 
   (stocks, indices, gold, oil, forex…). Current default: `["*", "xyz:*"]`; delisted
   assets excluded. `omni:TICKER` / `omni:*` select Variational Omni assets (the `omni`
   namespace is a *platform*, not a Hyperliquid dex). Omni open positions have no public
-  lookup and are declared via `[[positions.manual]]` (asset/side/size/entry) instead.
+  lookup: they are reconstructed from the portfolio Trades CSV export
+  (`positions.omni_trades_csv`) and/or declared via `[[positions.manual]]`
+  (asset/side/size/entry); a manual entry overrides the CSV for the same asset.
 
 ## Definition of done (per phase)
 1. Data layer fetches+caches weekly & daily candles for the watchlist; tests on fixtures pass.

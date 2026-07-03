@@ -87,6 +87,10 @@ class PositionsConfig:
     # Manually declared open positions (e.g. on Omni), merged with the ones
     # read from Hyperliquid for the same Elder exit analysis.
     manual: tuple[ManualPosition, ...] = ()
+    # Path to the official Omni portfolio "Trades" CSV export; open Omni
+    # positions are reconstructed from it (see data/omni_trades.py). Empty
+    # disables the import. Manual entries win over CSV ones for the same asset.
+    omni_trades_csv: str = ""
 
 
 @dataclass(frozen=True)
@@ -176,7 +180,11 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> Config:
             month_realized_losses=float(r.get("month_realized_losses", 0.0)),
             open_trade_risk=float(r.get("open_trade_risk", 0.0)),
         ),
-        positions=PositionsConfig(address=address, manual=tuple(manual)),
+        positions=PositionsConfig(
+            address=address,
+            manual=tuple(manual),
+            omni_trades_csv=str(p.get("omni_trades_csv", "")).strip(),
+        ),
         journal=JournalConfig(
             enabled=bool(j.get("enabled", True)),
             path=Path(j.get("path", "cache/trading_journal.jsonl")),

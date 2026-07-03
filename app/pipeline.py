@@ -10,12 +10,14 @@ import time
 from collections.abc import Callable
 from dataclasses import asdict
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
 from config import WATCHLIST_ALL, Config
 from data.hyperliquid import HyperliquidError, coin_dex, completed_bars
+from data.omni_trades import positions_from_trades_csv
 from data.provider import OMNI_PREFIX, MarketDataProvider, platform_of
 from indicators import ema, force_index, impulse_color, macd_histogram
 from risk.sizing import position_size, six_percent_guard
@@ -164,12 +166,14 @@ def watchlist_dexes(watchlist: tuple[str, ...]) -> list[str]:
 
 
 def fetch_open_positions(cfg: Config, client: MarketDataProvider) -> list[OpenPosition]:
-    """Open positions: read from Hyperliquid + declared manually in config.
+    """Open positions: read from Hyperliquid + declared manually + Omni CSV.
 
     Hyperliquid positions are gathered across the native clearinghouse and
     every HIP-3 dex the watchlist references; a failure on one dex doesn't
     drop the others. Venues with no public position lookup (Variational Omni)
-    contribute through `[[positions.manual]]` entries instead.
+    contribute through `[[positions.manual]]` entries and/or the official
+    portfolio Trades CSV export (positions.omni_trades_csv); a manual entry
+    overrides the CSV reconstruction for the same asset.
     """
     out: list[OpenPosition] = []
     if cfg.positions.address:
@@ -181,6 +185,11 @@ def fetch_open_positions(cfg: Config, client: MarketDataProvider) -> list[OpenPo
             out.extend(parse_positions(state))
     for m in cfg.positions.manual:
         out.append(OpenPosition(asset=m.asset, side=m.side, entry=m.entry, size=m.size))
+    if cfg.positions.omni_trades_csv:
+        declared = {p.asset for p in out}
+        for pos in positions_from_trades_csv(Path(cfg.positions.omni_trades_csv)):
+            if pos.asset not in declared:
+                out.append(pos)
     return out
 
 

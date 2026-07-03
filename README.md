@@ -172,11 +172,23 @@ Edit `config.toml`:
 - `positions.address` — **public** wallet address (0x…) used to read your open positions
   for trade management. Read-only: a public address only, never a private key; nothing is
   signed and no order is placed. Empty disables trade management.
+- `positions.omni_trades_csv` — path to the official Omni portfolio **Trades CSV
+  export** (portfolio → trades tab → download icon, a
+  [documented feature](https://docs.variational.io/technical-documentation/trade-and-transfer-history)).
+  Open Omni positions are **reconstructed** from it by replaying the trade history
+  (weighted-average entry, flips and liquidations handled) and get the same Elder
+  exit analysis as positions read from Hyperliquid. Re-download the CSV whenever
+  your positions change; keep it under `cache/` (not committed). Caveats: exports
+  cover 365 days / 10 000 rows — a position opened earlier than that reconstructs
+  incorrectly — and the recomputed average entry can differ slightly from the
+  venue's own display around partial closes (declare the position manually to
+  override it).
 - `[[positions.manual]]` — manually declared open positions for venues with no public
   position lookup (Variational Omni has none until its trading API ships). Each entry
   takes `asset` (watchlist naming, e.g. `"omni:ETH"`), `side` (`"long"`/`"short"`),
   `size` (asset units) and `entry` (price); they get the same Elder exit analysis as
-  positions read from Hyperliquid.
+  positions read from Hyperliquid. A manual entry **overrides** the CSV
+  reconstruction for the same asset.
 
 `EQUITY`, `RISK_PCT`, and `HL_ADDRESS` can also be overridden via environment variables /
 `.env` (see `.env.example`). No secrets are needed anywhere.
