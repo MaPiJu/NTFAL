@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import httpx
@@ -126,9 +127,70 @@ def make_ohlcv(
     return df
 
 
+INTERVAL_MS = {
+    "5m": 300_000,
+    "15m": 900_000,
+    "1h": 3_600_000,
+    "4h": 14_400_000,
+    "1d": 86_400_000,
+    "1w": 604_800_000,
+}
+
+
+def synthetic_candles(
+    interval: str,
+    count: int,
+    start: float = 100.0,
+    step: float = 1.0,
+    end_ms: int | None = None,
+    volume: float = 1000.0,
+) -> list[dict]:
+    """candleSnapshot-shaped bars for an arbitrary interval, oldest first.
+
+    Lets a test build a whole timeframe chain (e.g. 4h/1h/15m) without another
+    recorded fixture file — the strategy only cares about the shape of the series.
+
+    The series ends just before "now" by default: an intraday refresh asks for
+    `now - lookback * bar`, so bars anchored to a fixed past date would fall
+    outside the window and the asset would look unlisted.
+    """
+    bar = INTERVAL_MS[interval]
+    if end_ms is None:
+        # Last bar fully in the past, so completed_bars() keeps it.
+        end_ms = (int(time.time() * 1000) // bar) * bar - 2 * bar
+    out = []
+    for i in range(count):
+        t = end_ms - (count - 1 - i) * bar
+        close = start + step * i
+        prev = close - step
+        out.append(
+            {
+                "t": t,
+                "T": t + bar - 1,
+                "o": str(prev),
+                "h": str(max(prev, close) + 0.5),
+                "l": str(min(prev, close) - 0.5),
+                "c": str(close),
+                "v": str(volume),
+                "n": 1,
+            }
+        )
+    return out
+
+
 @pytest.fixture
 def btc_fixtures() -> dict[tuple[str, str], list[dict]]:
     return {
         ("BTC", "1w"): load_fixture("btc_1w.json"),
         ("BTC", "1d"): load_fixture("btc_1d.json"),
+    }
+
+
+@pytest.fixture
+def chain_fixtures(btc_fixtures) -> dict[tuple[str, str], list[dict]]:
+    """BTC bars on every interval the two-horizon test config uses."""
+    return btc_fixtures | {
+        ("BTC", "4h"): synthetic_candles("4h", 60, start=90_000.0, step=50.0),
+        ("BTC", "1h"): synthetic_candles("1h", 80, start=94_000.0, step=10.0),
+        ("BTC", "15m"): synthetic_candles("15m", 80, start=95_000.0, step=2.0),
     }

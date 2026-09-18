@@ -15,7 +15,9 @@ from strategy.triple_screen import (
     _long_levels,
     average_adverse_noise,
     average_penetration,
+    channel,
     compute_quality_score,
+    data_warnings,
     detect_divergences,
     evaluate_asset,
     impulse_confirmation,
@@ -24,11 +26,9 @@ from strategy.triple_screen import (
     safezone_stop_for_limit,
     select_best,
     tick_size,
+    tide_trend,
     value_zone_extension,
     value_zone_status,
-    weekly_channel,
-    weekly_channel_with_params,
-    weekly_trend,
 )
 from tests.conftest import make_ohlcv
 
@@ -71,10 +71,10 @@ def test_tick_size():
         tick_size(0)
 
 
-def test_weekly_trend():
-    assert weekly_trend(WEEKLY_UP["close"]) == "up"
-    assert weekly_trend(WEEKLY_DOWN["close"]) == "down"
-    assert weekly_trend(WEEKLY_FLAT["close"]) == "neutral"
+def test_tide_trend():
+    assert tide_trend(WEEKLY_UP["close"]) == "up"
+    assert tide_trend(WEEKLY_DOWN["close"]) == "down"
+    assert tide_trend(WEEKLY_FLAT["close"]) == "neutral"
 
 
 def test_uptrend_pullback_goes_long():
@@ -85,9 +85,9 @@ def test_uptrend_pullback_goes_long():
     sig = evaluate_asset("BTC", WEEKLY_UP, daily)
 
     assert sig.action == "long"
-    assert sig.weekly_trend == "up"
+    assert sig.tide_trend == "up"
     assert sig.force_index_2 < 0
-    assert sig.daily_impulse != "red"  # otherwise the veto would apply
+    assert sig.wave_impulse != "red"  # otherwise the veto would apply
     # buy-stop one tick above the prior day's high
     prior_high = float(daily["high"].iloc[-1])
     assert sig.entry == pytest.approx(prior_high + tick_size(prior_high))
@@ -150,12 +150,12 @@ def test_force_index_new_multiweek_low_blocks_long():
 
     blocked = evaluate_asset("BTC", WEEKLY_UP, daily)
     assert blocked.action == "stand_aside"
-    assert "multi-week low" in blocked.reason
+    assert "multi-period low" in blocked.reason
     assert blocked.entry is None
 
     # Disable the caveat (lookback 0) and the very same bar is a tradable long,
     # proving the new-extreme filter — not Impulse or the value zone — blocked it.
-    off = StrategyParams(force_index_extreme_lookback_days=0)
+    off = StrategyParams(force_index_extreme_lookback_bars=0)
     allowed = evaluate_asset("BTC", WEEKLY_UP, daily, params=off)
     assert allowed.action == "long"
 
@@ -221,10 +221,12 @@ def test_divergence_requires_minimum_separation():
 
 
 def test_entry_order_plan_rolls_and_expires():
-    sig = evaluate_asset("BTC", WEEKLY_UP, DAILY_LONG)
+    sig = evaluate_asset(
+        "BTC", WEEKLY_UP, DAILY_LONG, intervals={"tide": "1w", "wave": "1d", "entry": "4h"}
+    )
 
     assert sig.entry_order_plan is not None
-    assert "roll it daily" in sig.entry_order_plan
+    assert "roll it each 1d bar" in sig.entry_order_plan
     assert "expire after" in sig.entry_order_plan
 
 
@@ -244,9 +246,9 @@ def test_downtrend_rally_goes_short():
     sig = evaluate_asset("ETH", WEEKLY_DOWN, daily)
 
     assert sig.action == "short"
-    assert sig.weekly_trend == "down"
+    assert sig.tide_trend == "down"
     assert sig.force_index_2 > 0
-    assert sig.daily_impulse != "green"
+    assert sig.wave_impulse != "green"
     prior_low = float(daily["low"].iloc[-1])
     assert sig.entry == pytest.approx(prior_low - tick_size(prior_low))
     assert sig.stop == pytest.approx(safezone_initial_stop(daily, "short"))
@@ -266,7 +268,7 @@ def test_range_stands_aside():
     daily = make_ohlcv([100.0] * 60)
     sig = evaluate_asset("SOL", WEEKLY_FLAT, daily)
     assert sig.action == "stand_aside"
-    assert sig.weekly_trend == "neutral"
+    assert sig.tide_trend == "neutral"
     assert "neutral" in sig.reason
 
 
@@ -279,14 +281,14 @@ def test_impulse_red_vetoes_long():
 
     sig = evaluate_asset("BTC", WEEKLY_UP, daily)
 
-    assert sig.daily_impulse == "red"
+    assert sig.wave_impulse == "red"
     assert sig.force_index_2 < 0
     assert sig.action == "stand_aside"
     assert "vetoed by Impulse" in sig.reason
     assert sig.entry is None
 
 
-def test_weekly_channel_lower_band_stays_positive_after_a_crash():
+def test_channel_lower_band_stays_positive_after_a_crash():
     # Asset fell from ~120 to ~6 with deep weekly wicks. When price was high those
     # wicks pierced the EMA by large *absolute* amounts; an absolute channel offset
     # subtracts that stale distance from today's tiny EMA and goes negative — the
@@ -300,19 +302,19 @@ def test_weekly_channel_lower_band_stays_positive_after_a_crash():
     highs = [c * 1.05 for c in closes]
     weekly = make_ohlcv(closes, lows=lows, highs=highs, freq="W")
 
-    upper, lower = weekly_channel(weekly)
+    upper, lower = channel(weekly)
     e26 = float(ema(weekly["close"], EMA_SLOW).iloc[-1])  # Elder's channel backbone
 
     assert lower > 0  # the bug was a negative lower band (negative short target)
     assert lower < e26 <= upper
 
 
-def test_weekly_channel_backbone_is_slow_ema26():
+def test_channel_backbone_is_slow_ema26():
     # Elder draws the channel parallel to the SLOW EMA26, not the fast EMA13. In a
     # clean uptrend the lows stay above the slow EMA, so the lower band collapses
     # onto the backbone — pinning it to EMA26.
     weekly = make_ohlcv([100.0 + 2.0 * i for i in range(40)], freq="W")
-    _upper, lower = weekly_channel(weekly)
+    _upper, lower = channel(weekly)
     e13 = float(ema(weekly["close"], EMA_FAST).iloc[-1])
     e26 = float(ema(weekly["close"], EMA_SLOW).iloc[-1])
 
@@ -320,14 +322,14 @@ def test_weekly_channel_backbone_is_slow_ema26():
     assert lower != pytest.approx(e13)
 
 
-def test_weekly_channel_widens_with_containment():
+def test_channel_widens_with_containment():
     # Higher containment -> wider channel (Elder fits ~95%, p.183). Up-excursions
     # spike every 5th bar, so the 95th percentile sits well above the median.
     highs = [100.0 + (10.0 if i % 5 == 0 else 1.0) for i in range(40)]
     weekly = make_ohlcv([100.0] * 40, lows=[100.0] * 40, highs=highs, freq="W")
 
-    narrow_upper, _ = weekly_channel_with_params(weekly, StrategyParams(channel_containment=0.50))
-    wide_upper, _ = weekly_channel_with_params(weekly, StrategyParams(channel_containment=0.95))
+    narrow_upper, _ = channel(weekly, StrategyParams(channel_containment=0.50))
+    wide_upper, _ = channel(weekly, StrategyParams(channel_containment=0.95))
     assert wide_upper > narrow_upper
 
 
@@ -351,9 +353,9 @@ def _mk_signal(asset: str, action: str, rr: float | None, score: float | None, r
         asset=asset,
         action=action,
         reason="",
-        weekly_trend="up",
-        weekly_impulse="green",
-        daily_impulse="green",
+        tide_trend="up",
+        tide_impulse="green",
+        wave_impulse="green",
         force_index_2=-1.0,
         entry=10.0,
         entry_limit=None,
@@ -361,11 +363,11 @@ def _mk_signal(asset: str, action: str, rr: float | None, score: float | None, r
         target=13.0,
         reward_risk=rr,
         rr_ok=rr_ok,
-        weekly_trend_strength=0.02,
+        tide_strength=0.02,
         pullback_quality=0.5,
         quality_score=score,
         market_regime="trending",
-        third_screen_impulse=None,
+        entry_impulse=None,
         divergences=[],
         value_zone_status="in_value",
         entry_order_plan=None,
@@ -404,25 +406,98 @@ def test_tiny_weekly_slope_is_treated_as_flat_market():
     sig = evaluate_asset("BTC", weekly, daily)
 
     assert sig.action == "stand_aside"
-    assert sig.weekly_trend == "neutral"
+    assert sig.tide_trend == "neutral"
     assert sig.market_regime == "flat"
     assert "neutral" in sig.reason
 
 
-def test_optional_4h_third_screen_sets_entry_and_can_veto():
+def test_third_screen_times_the_entry():
+    # The third screen's job is to tighten the stop-entry trigger: it is read off
+    # the latest completed lower-timeframe bar instead of the wave bar.
     daily = DAILY_LONG
     four_h = make_ohlcv([150.0 + i * 0.1 for i in range(30)], freq="4h")
 
     sig = evaluate_asset("BTC", WEEKLY_UP, daily, four_h)
 
     last_4h_high = float(four_h["high"].iloc[-1])
-    assert sig.third_screen_impulse in {"green", "red", "blue"}
+    assert sig.entry_impulse in {"green", "red", "blue"}
     assert sig.entry == pytest.approx(last_4h_high + tick_size(last_4h_high))
 
+
+def test_third_screen_impulse_never_vetoes_the_trade():
+    # Regression guard. The Triple Screen buys INTO a pullback, so the entry
+    # timeframe is red exactly when the setup is valid — censoring on it would
+    # cancel the very setups the second screen just found. CLAUDE.md scopes
+    # Impulse censorship to screens 1 and 2; the third screen only times entries.
+    daily = DAILY_LONG
     falling_4h = make_ohlcv([180.0 - 0.1 * i * i for i in range(30)], freq="4h")
-    vetoed = evaluate_asset("BTC", WEEKLY_UP, daily, falling_4h)
-    assert vetoed.action == "stand_aside"
-    assert "4h third-screen" in vetoed.reason
+
+    without = evaluate_asset("BTC", WEEKLY_UP, daily)
+    with_red_entry = evaluate_asset("BTC", WEEKLY_UP, daily, falling_4h)
+
+    assert without.action == "long"
+    assert with_red_entry.entry_impulse == "red"
+    assert with_red_entry.action == "long"  # NOT vetoed
+    assert with_red_entry.entry is not None and with_red_entry.stop is not None
+    # The color is still surfaced to the operator, just never acted on.
+    assert "third-screen" not in with_red_entry.reason
+
+
+def test_third_screen_impulse_never_vetoes_a_short():
+    # Mirror image: a short is sold into a bounce, so the entry timeframe is green.
+    daily = DAILY_SHORT
+    rising_4h = make_ohlcv([200.0 + 0.1 * i * i for i in range(30)], freq="4h")
+
+    with_green_entry = evaluate_asset("ETH", WEEKLY_DOWN, daily, rising_4h)
+
+    assert with_green_entry.entry_impulse == "green"
+    assert with_green_entry.action == "short"  # NOT vetoed
+
+
+def test_signal_carries_its_horizon_and_interval_labels():
+    intervals = {"tide": "4h", "wave": "1h", "entry": "15m"}
+    sig = evaluate_asset("BTC", WEEKLY_UP, DAILY_LONG, horizon="scalp", intervals=intervals)
+
+    assert sig.horizon == "scalp"
+    assert sig.intervals == intervals
+    assert sig.tide_bars == len(WEEKLY_UP)
+    assert sig.wave_bars == len(DAILY_LONG)
+    # Reasons and the order plan speak the horizon's own timeframes.
+    assert "1h bar" in (sig.entry_order_plan or "")
+
+
+def test_data_warning_on_short_tide_history():
+    # The EMA26 is seeded at the first bar, so a short tide series is mostly seed:
+    # the tide direction and its Impulse are not yet meaningful. Flag, don't block.
+    short_tide = make_ohlcv([100.0 + 2 * i for i in range(28)], freq="W")
+
+    warns = data_warnings(short_tide, DAILY_LONG, min_tide_bars=60)
+    assert any("not converged" in w for w in warns)
+    assert any("28" in w for w in warns)
+
+    # Enough history -> no history warning.
+    assert not any("not converged" in w for w in data_warnings(WEEKLY_UP, DAILY_LONG))
+
+
+def test_data_warning_on_a_near_frozen_market():
+    # A tradfi perp over the weekend still prints bars, on a fraction of normal
+    # volume. Force Index is volume-scaled, so those bars flatten everything.
+    closes = [100.0 + 0.5 * i for i in range(60)]
+    volumes = [1000.0] * 54 + [30.0] * 6  # last 6 bars at 3% of normal
+    quiet = make_ohlcv(closes, volumes=volumes)
+
+    warns = data_warnings(WEEKLY_UP, quiet)
+    assert any("near-closed" in w for w in warns)
+
+    assert not any("near-closed" in w for w in data_warnings(WEEKLY_UP, DAILY_LONG))
+
+
+def test_data_warnings_do_not_change_the_action():
+    # Flags describe the inputs; they never censor. Same bars, same verdict.
+    loud = evaluate_asset("BTC", WEEKLY_UP, DAILY_LONG, min_tide_bars=9999)
+
+    assert loud.data_warnings  # the flag fired
+    assert loud.action == evaluate_asset("BTC", WEEKLY_UP, DAILY_LONG).action
 
 
 def test_safezone_initial_stop_uses_average_adverse_noise():

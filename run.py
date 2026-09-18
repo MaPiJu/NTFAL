@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""Daily refresh: fetch candles, compute signals, write the dashboard snapshot.
+"""Refresh candles, compute signals, write the dashboard snapshot.
 
 Usage:
-    python run.py                     # one manual refresh (the default workflow)
+    python run.py                     # one full refresh of every horizon
     python run.py --serve             # refresh, then serve the dashboard
-    python run.py --serve --schedule 06:00   # also re-refresh daily at 06:00 UTC
+    python run.py --serve --watch     # keep each horizon refreshed on its own
+                                      # cadence (swing daily, scalp hourly,
+                                      # minutes every 5 min) while serving
+    python run.py --horizon micro     # refresh a single horizon and exit
 
 Read-only: this script only calls Hyperliquid's public info endpoint and
 never places, signs, or cancels orders.
@@ -15,55 +18,54 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from pathlib import Path
 from typing import Any
 
-from app.pipeline import SNAPSHOT_FILENAME, build_snapshot
+from app.pipeline import (
+    SNAPSHOT_FILENAME,
+    build_snapshot,
+    load_snapshot,
+    refresh_horizon,
+)
 from config import Config, load_config
 from data.hyperliquid import HyperliquidClient
-from data.provider import OmniProvider, PlatformRouter
-from data.variational import VariationalClient
 from journal import append_journal_entry
 
 
-def print_signals_table(snapshot: dict[str, Any]) -> None:
-    guard = snapshot["guard"]
-    print(f"\nElder Triple Screen — generated {snapshot['generated_at']}")
-    print(
-        f"equity ${snapshot['equity']:,.2f} · risk/trade {snapshot['risk_pct']:.1%} "
-        f"· {len(snapshot['signals'])} assets analyzed"
-    )
-    if guard["blocked"]:
-        print(
-            f"⚠ 6% RULE ACTIVE: monthly losses + open risk ${guard['total_at_risk']:,.2f} "
-            f">= limit ${guard['limit']:,.2f} — NO NEW ENTRIES this month."
-        )
+def num(x: float | None) -> str:
+    return f"{x:,.6g}" if x is not None else "—"
 
-    best = next((s for s in snapshot["signals"] if s.get("is_top_pick")), None)
+
+def print_horizon_table(name: str, block: dict[str, Any]) -> None:
+    """The signals table for one timeframe chain."""
+    iv = block["intervals"]
+    chain = f"{iv['tide']}/{iv['wave']}/{iv['entry']}"
+    print(f"\n=== {block['label'].upper()} [{name}] — tide/wave/entry = {chain} ===")
+    print(f"generated {block['generated_at']} · {len(block['signals'])} assets")
+
+    best = next((s for s in block["signals"] if s.get("is_top_pick")), None)
     if best is not None:
         print(
-            f"★ BEST TRADE: {best['asset']} {best['action']} "
+            f"★ BEST {name.upper()} TRADE: {best['asset']} {best['action']} "
             f"(score {best['quality_score'] * 100:.0f}/100, R:R {best['reward_risk']:.2f}, "
             f"entry {best['entry']:,.6g}, stop {best['stop']:,.6g}, target {best['target']:,.6g})"
         )
-
-    def num(x: float | None) -> str:
-        return f"{x:,.6g}" if x is not None else "—"
 
     # Best trade first: tradable setups by Elder score (desc), then the rest by name.
     def sort_key(s: dict[str, Any]) -> tuple[int, float, str]:
         aside = s["action"] == "stand_aside"
         return (1 if aside else 0, -(s["quality_score"] or 0.0), s["asset"])
 
-    # 14-wide asset column: tradfi names like "xyz:ALUMINIUM" are longer than tickers.
+    # 14-wide asset column: tradfi names like "xyz:BRENTOIL" are longer than tickers.
     header = (
-        f"{'ASSET':<14} {'REGIME':<8} {'TIDE':<7} {'IMP W/D/4H':<14} {'FI(2)':>14} {'ACTION':<13} "
+        f"{'ASSET':<14} {'REGIME':<8} {'TIDE':<7} {'IMP T/W/E':<14} {'FI(2)':>14} {'ACTION':<13} "
         f"{'CLOSE':>12} {'MARK':>12} {'DRIFT':>7} {'ENTRY':>12} {'STOP':>12} {'R:R':>7} "
         f"{'LIMIT':>12} {'LIM STOP':>12} {'LIM R:R':>7} {'TARGET':>12} "
         f"{'SCORE':>6} {'SIZE':>10}"
     )
     print("\n" + header)
     print("-" * len(header))
-    for s in sorted(snapshot["signals"], key=sort_key):
+    for s in sorted(block["signals"], key=sort_key):
         rr = f"{s['reward_risk']:.2f}" if s["reward_risk"] is not None else "—"
         if s["reward_risk"] is not None and not s["rr_ok"]:
             rr += "⚠"
@@ -73,15 +75,14 @@ def print_signals_table(snapshot: dict[str, Any]) -> None:
         action = (
             s["action"]
             + (" ⚠" if s.get("price_alert") else "")
+            + (" !" if s.get("data_warnings") else "")
             + (" ★" if s.get("is_top_pick") else "")
         )
-        impulses = "/".join(
-            [s["weekly_impulse"], s["daily_impulse"], s.get("third_screen_impulse") or "—"]
-        )
+        impulses = "/".join([s["tide_impulse"], s["wave_impulse"], s.get("entry_impulse") or "—"])
         close, mark = s.get("last_close"), s.get("live_price")
         drift = f"{(mark / close - 1) * 100:+.1f}%" if close and mark else "—"
         print(
-            f"{s['asset']:<14} {s.get('market_regime', '—'):<8} {s['weekly_trend']:<7} "
+            f"{s['asset']:<14} {s.get('market_regime', '—'):<8} {s['tide_trend']:<7} "
             f"{impulses:<14} "
             f"{s['force_index_2']:>14,.4g} {action:<13} "
             f"{num(close):>12} {num(mark):>12} {drift:>7} "
@@ -90,15 +91,40 @@ def print_signals_table(snapshot: dict[str, Any]) -> None:
             f"{num(s['target']):>12} {score:>6} {size:>10}"
         )
     print()
-    for s in snapshot["signals"]:
+    for s in block["signals"]:
         divs = s.get("divergences") or []
         suffix = f" · divergences: {', '.join(divs)}" if divs else ""
         vz = s.get("value_zone_status", "—")
         order = f" · order: {s['entry_order_plan']}" if s.get("entry_order_plan") else ""
         alert = f" · ⚠ {s['price_alert']}" if s.get("price_alert") else ""
         print(f"  {s['asset']}: {s['reason']} · value zone: {vz}{order}{alert}{suffix}")
-    if snapshot.get("skipped"):
-        print(f"\nskipped (too new, or no usable candle source): {', '.join(snapshot['skipped'])}")
+        for w in s.get("data_warnings") or []:
+            print(f"    ! data quality: {w}")
+    if block.get("skipped"):
+        print(f"\nskipped: {', '.join(block['skipped'])}")
+
+
+def print_signals_tables(snapshot: dict[str, Any]) -> None:
+    guard = snapshot["guard"]
+    print(f"\nElder Triple Screen — generated {snapshot['generated_at']}")
+    print(
+        f"equity ${snapshot['equity']:,.2f} · risk/trade {snapshot['risk_pct']:.1%} "
+        f"· open risk ${snapshot.get('total_open_trade_risk', 0.0):,.2f}"
+    )
+    if guard["blocked"]:
+        print(
+            f"⚠ 6% RULE ACTIVE: monthly losses + open risk ${guard['total_at_risk']:,.2f} "
+            f">= limit ${guard['limit']:,.2f} — NO NEW ENTRIES this month."
+        )
+    print(
+        "⚠ Each horizon sizes its suggestion as a STANDALONE trade risking "
+        f"{snapshot['risk_pct']:.1%}. Taking several at once multiplies your risk."
+    )
+
+    horizons = snapshot.get("horizons", {})
+    for name in snapshot.get("horizon_order", list(horizons)):
+        if name in horizons:
+            print_horizon_table(name, horizons[name])
     print("\nInformational only — not financial advice; no orders are placed.\n")
 
 
@@ -113,17 +139,15 @@ def print_positions_table(snapshot: dict[str, Any]) -> None:
 
     addr = snapshot.get("position_address")
     suffix = f"  (address {addr})" if addr else "  (manual positions)"
-    print(f"\nOpen positions — Elder trade management{suffix}")
+    horizon = snapshot.get("positions_horizon", "?")
+    print(f"\nOpen positions — Elder trade management on the '{horizon}' horizon{suffix}")
     if not positions:
         print("  (none open, or held coins are too new to evaluate)\n")
         return
 
-    def num(x: float | None) -> str:
-        return f"{x:,.6g}" if x is not None else "—"
-
     header = (
         f"{'ASSET':<14} {'SIDE':<6} {'ENTRY':>12} {'CLOSE':>12} {'MARK':>12} "
-        f"{'PnL ELDER':>12} {'PnL LIVE':>12} {'IMP W/D':<11} {'TARGET':>12} "
+        f"{'PnL ELDER':>12} {'PnL LIVE':>12} {'IMP T/W':<11} {'TARGET':>12} "
         f"{'TRAIL STOP':>12} {'OPEN RISK':>12} {'VERDICT':<13}"
     )
     print("\n" + header)
@@ -135,7 +159,7 @@ def print_positions_table(snapshot: dict[str, Any]) -> None:
             f"{p['asset']:<14} {p['side']:<6} {num(p['entry']):>12} "
             f"{num(p['close_price']):>12} {num(p['live_price']):>12} "
             f"{p['pnl_elder']:>12,.2f} {p['pnl_live']:>12,.2f} "
-            f"{p['weekly_impulse'] + '/' + p['daily_impulse']:<11} "
+            f"{p['tide_impulse'] + '/' + p['wave_impulse']:<11} "
             f"{target:>12} {num(p['suggested_stop']):>12} {num(p.get('open_risk')):>12} "
             f"{verdict:<13}"
         )
@@ -146,25 +170,79 @@ def print_positions_table(snapshot: dict[str, Any]) -> None:
     print()
 
 
-def do_refresh(cfg: Config) -> dict[str, Any]:
-    # One router over both venues: plain coins / "xyz:…" -> Hyperliquid,
-    # "omni:…" -> Variational Omni (hybrid candles, see data/provider.py).
-    hyperliquid = HyperliquidClient(cache_dir=cfg.cache_dir)
-    omni = OmniProvider(VariationalClient(cache_dir=cfg.cache_dir), hyperliquid)
-    with PlatformRouter(hyperliquid, omni) as client:
-        snapshot = build_snapshot(
-            cfg, client, on_progress=lambda coin: print(f"refreshing {coin}…", flush=True)
-        )
+def snapshot_path(cfg: Config) -> Path:
+    return cfg.cache_dir / SNAPSHOT_FILENAME
+
+
+def write_snapshot(cfg: Config, snapshot: dict[str, Any]) -> Path:
     cfg.cache_dir.mkdir(parents=True, exist_ok=True)
-    out = cfg.cache_dir / SNAPSHOT_FILENAME
+    out = snapshot_path(cfg)
     out.write_text(json.dumps(snapshot))
-    print(f"snapshot written to {out}")
     if cfg.journal.enabled:
         append_journal_entry(snapshot, cfg.journal.path)
-        print(f"journal appended to {cfg.journal.path}")
-    print_signals_table(snapshot)
-    print_positions_table(snapshot)
+    return out
+
+
+def _progress(horizon: str, coin: str) -> None:
+    print(f"  [{horizon}] refreshing {coin}…", flush=True)
+
+
+def do_refresh(cfg: Config, horizon: str | None = None) -> dict[str, Any]:
+    """Refresh every horizon, or just one and merge it into the stored snapshot."""
+    with HyperliquidClient(cache_dir=cfg.cache_dir) as client:
+        if horizon is None:
+            snapshot = build_snapshot(cfg, client, on_progress=_progress)
+        else:
+            previous = load_snapshot(snapshot_path(cfg))
+            if not previous.get("horizons"):
+                # Nothing to merge into yet — a partial refresh would leave the
+                # other horizons missing from the dashboard, so do a full one.
+                snapshot = build_snapshot(cfg, client, on_progress=_progress)
+            else:
+                snapshot = refresh_horizon(cfg, client, horizon, previous, on_progress=_progress)
+    out = write_snapshot(cfg, snapshot)
+    picks = {n: b.get("top_pick") for n, b in snapshot.get("horizons", {}).items()}
+    picked = ", ".join(f"{n}={p}" for n, p in picks.items() if p) or "no qualifying setup"
+    print(f"snapshot written to {out} · best: {picked}")
     return snapshot
+
+
+def add_watch_jobs(scheduler: Any, cfg: Config) -> None:
+    """One recurring refresh job per horizon, each on its own cadence."""
+    for h in cfg.scanner.horizons:
+        scheduler.add_job(
+            do_refresh,
+            "interval",
+            seconds=h.refresh_seconds,
+            args=[cfg, h.name],
+            id=f"refresh-{h.name}",
+            max_instances=1,  # a slow refresh must not stack on itself
+            coalesce=True,  # missed runs collapse into one
+        )
+        print(f"watching '{h.name}' every {h.refresh_seconds}s")
+
+
+def run_watch(cfg: Config, serve: bool, host: str, port: int) -> int:
+    """Keep every horizon fresh, optionally while serving the dashboard."""
+    if serve:
+        from apscheduler.schedulers.background import BackgroundScheduler
+
+        scheduler = BackgroundScheduler(timezone="UTC")
+        add_watch_jobs(scheduler, cfg)
+        scheduler.start()
+
+        import uvicorn
+
+        uvicorn.run("app.main:app", host=host, port=port)
+        return 0
+
+    from apscheduler.schedulers.blocking import BlockingScheduler
+
+    scheduler = BlockingScheduler(timezone="UTC")
+    add_watch_jobs(scheduler, cfg)
+    print("watch mode running (Ctrl-C to stop)")
+    scheduler.start()  # blocks until interrupted
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -173,31 +251,30 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument(
-        "--schedule",
-        metavar="HH:MM",
-        help="optional: re-run the refresh daily at this UTC time (apscheduler)",
+        "--horizon",
+        metavar="NAME",
+        help="refresh only this horizon (e.g. micro) and merge it into the snapshot",
+    )
+    parser.add_argument(
+        "--watch",
+        action="store_true",
+        help="keep refreshing: one job per horizon, each on its own refresh_seconds",
     )
     args = parser.parse_args(argv)
 
     cfg = load_config()
-    do_refresh(cfg)
+    if args.horizon is not None and args.horizon not in {h.name for h in cfg.scanner.horizons}:
+        parser.error(
+            f"unknown horizon {args.horizon!r} — "
+            f"choose from {', '.join(h.name for h in cfg.scanner.horizons)}"
+        )
 
-    if args.schedule:
-        hour, minute = (int(x) for x in args.schedule.split(":"))
-        if args.serve:
-            from apscheduler.schedulers.background import BackgroundScheduler
+    snapshot = do_refresh(cfg, args.horizon)
+    print_signals_tables(snapshot)
+    print_positions_table(snapshot)
 
-            scheduler = BackgroundScheduler(timezone="UTC")
-            scheduler.add_job(do_refresh, "cron", args=[cfg], hour=hour, minute=minute)
-            scheduler.start()
-        else:
-            from apscheduler.schedulers.blocking import BlockingScheduler
-
-            scheduler = BlockingScheduler(timezone="UTC")
-            scheduler.add_job(do_refresh, "cron", args=[cfg], hour=hour, minute=minute)
-            print(f"scheduler running — daily refresh at {args.schedule} UTC (Ctrl-C to stop)")
-            scheduler.start()
-            return 0
+    if args.watch:
+        return run_watch(cfg, args.serve, args.host, args.port)
 
     if args.serve:
         import uvicorn

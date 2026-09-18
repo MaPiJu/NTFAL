@@ -87,9 +87,9 @@ def test_long_in_uptrend_with_green_impulse_holds():
 
     tm = assess_position(pos, WEEKLY_UP_GREEN, daily)
 
-    assert tm.weekly_trend == "up"
-    assert tm.weekly_impulse == "green"
-    assert tm.daily_impulse == "green"
+    assert tm.tide_trend == "up"
+    assert tm.tide_impulse == "green"
+    assert tm.wave_impulse == "green"
     assert not tm.target_reached  # weekly value zone still overhead
     assert tm.verdict == "hold"
     assert tm.in_profit
@@ -105,13 +105,13 @@ def test_long_takes_profit_when_impulse_loses_green_in_profit():
 
     tm = assess_position(pos, WEEKLY_UP, daily)
 
-    assert tm.daily_impulse != "green"  # momentum stalled
+    assert tm.wave_impulse != "green"  # momentum stalled
     assert tm.in_profit
     assert tm.verdict == "take_profits"
     assert any("permission to take profits" in r for r in tm.reasons)
 
 
-def test_long_exits_when_daily_impulse_turns_red():
+def test_long_exits_when_wave_impulse_turns_red():
     # hard sell-off turns the daily Impulse red -> momentum reversed -> exit.
     closes = [100.0 + i for i in range(50)]
     for j in range(1, 16):
@@ -121,7 +121,7 @@ def test_long_exits_when_daily_impulse_turns_red():
 
     tm = assess_position(pos, WEEKLY_UP, daily)
 
-    assert tm.daily_impulse == "red"
+    assert tm.wave_impulse == "red"
     assert tm.verdict == "exit"
     assert any("momentum reversed" in r for r in tm.reasons)
 
@@ -133,7 +133,7 @@ def test_long_exits_when_weekly_tide_flips_down():
 
     tm = assess_position(pos, WEEKLY_DOWN, daily)
 
-    assert tm.weekly_trend == "down"
+    assert tm.tide_trend == "down"
     assert tm.verdict == "exit"
     assert any("tide flipped" in r for r in tm.reasons)
 
@@ -146,8 +146,8 @@ def test_short_in_downtrend_with_red_impulse_holds():
 
     tm = assess_position(pos, WEEKLY_DOWN, daily)
 
-    assert tm.weekly_trend == "down"
-    assert tm.daily_impulse == "red"  # favorable for a short -> hold
+    assert tm.tide_trend == "down"
+    assert tm.wave_impulse == "red"  # favorable for a short -> hold
     assert not tm.target_reached
     assert tm.verdict == "hold"
     assert tm.in_profit  # price ~285 < entry 300
@@ -195,7 +195,7 @@ def test_long_takes_profit_when_target_reached():
 
     tm = assess_position(pos, weekly, daily)
 
-    assert tm.weekly_trend == "up"
+    assert tm.tide_trend == "up"
     assert tm.target_reached
     assert tm.verdict == "take_profits"
     assert any("target" in r for r in tm.reasons)

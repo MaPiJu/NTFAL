@@ -2,47 +2,86 @@
 # Nothing in this file is a secret; secrets (if ever needed) belong in .env.
 
 [scanner]
-# Watchlist entries:
-#   - explicit coins, e.g. "BTC", "ETH", or tradfi perps like "xyz:GOLD"
+# The watched markets. Entries may be:
+#   - explicit perps, e.g. "BTC", "ETH", or tradfi perps like "xyz:GOLD"
 #   - "*"      = EVERY tradable native (crypto) Hyperliquid perp
 #   - "xyz:*"  = every tradable perp of the HIP-3 "xyz" dex — the tradfi
 #                universe (stocks, indices, gold, oil, forex…)
-#   - "omni:ETH" / "omni:*" = Variational Omni perp(s). Omni has no public
-#                OHLCV API: candles come from Hyperliquid when the ticker is
-#                also listed there (Omni is oracle-priced, same index series),
-#                else from Omni's Cloudflare-protected chart endpoint
-#                (usually reachable from home connections only — check with
-#                `python -m data.variational ETH`). Assets with no usable
-#                candle source are skipped with the reason shown. Avoid
-#                scanning both "*" and "omni:*": the ~190 overlapping tickers
-#                would be analyzed twice under two names.
-# Scanning full universes means two requests per asset, so the refresh takes
-# a few minutes and the dashboard gets one card per perp.
-watchlist = ["*", "xyz:*"]
-weekly_interval = "1w"
-daily_interval = "1d"
-# Optional true third screen for lower-timeframe entry timing. Disabled by
-# default: when enabled, the scanner fetches 4h bars and uses their latest
-# completed high/low plus Impulse color to time the stop-entry.
-use_third_screen = false
-third_screen_interval = "4h"
-# History depth (bars) to keep cached. The API serves at most 5000 candles.
-lookback_weeks = 260
-lookback_days = 500
-lookback_third_screen = 300
+# Scanning a whole universe means one card per perp and a refresh measured in
+# minutes; a short explicit list is the intended way to use this tool.
+#
+# The default six are the tradfi markets this operator trades, mapped from
+# their common names to the Hyperliquid "xyz" dex (verified against live marks):
+#   XAU   gold   -> xyz:GOLD        US500  S&P 500     -> xyz:SP500
+#   XAG   silver -> xyz:SILVER      US100  Nasdaq-100  -> xyz:XYZ100
+#   USOIL WTI    -> xyz:CL          UKOIL  Brent       -> xyz:BRENTOIL
+watchlist = ["xyz:GOLD", "xyz:SILVER", "xyz:CL", "xyz:BRENTOIL", "xyz:SP500", "xyz:XYZ100"]
+
+# Which horizon's bars drive Elder trade management for OPEN positions. A held
+# position is strategic, so it is judged on the longest chain by default.
+positions_horizon = "swing"
+
+# --- Timeframe chains ------------------------------------------------------
+# Each horizon is one full Triple Screen, with the three screens named by role:
+#   tide  = 1st screen, strategic bias     wave = 2nd screen, counter-trend entry
+#   entry = 3rd screen, lower-timeframe entry timing
+# Elder's "factor of ~5" holds inside each chain. `refresh_seconds` sets how
+# often the horizon is recomputed (a weekly tide doesn't move every 5 minutes).
+# `min_tide_bars`: below this much tide history the EMA26 is not converged, so
+# the tide and its Impulse are flagged unreliable rather than silently trusted.
+
+[[scanner.horizons]]
+name = "swing"
+label = "Swing (days → weeks)"
+tide = "1w"
+wave = "1d"
+entry = "4h"
+lookback_tide = 260
+lookback_wave = 500
+lookback_entry = 1000
+refresh_seconds = 86400   # once a day
+min_tide_bars = 60
+
+[[scanner.horizons]]
+name = "scalp"
+label = "Scalp (hours)"
+tide = "4h"
+wave = "1h"
+entry = "15m"
+lookback_tide = 1000
+lookback_wave = 2000
+lookback_entry = 2000
+refresh_seconds = 3600    # hourly
+min_tide_bars = 60
+
+[[scanner.horizons]]
+name = "micro"
+label = "Minutes"
+tide = "1h"
+wave = "15m"
+entry = "5m"
+lookback_tide = 2000
+lookback_wave = 2000
+lookback_entry = 2000
+refresh_seconds = 300     # every 5 minutes
+min_tide_bars = 60
 
 [strategy]
 # Strategy thresholds/weights. Defaults mirror the Elder scanner's built-in
-# behavior; tune here instead of editing code.
+# behavior; tune here instead of editing code. Every lookback is a count of
+# BARS on the relevant screen's timeframe, so the same numbers carry across
+# horizons. Any key here may be overridden per horizon with a
+# [scanner.horizons.strategy] sub-block.
 flat_trend_slope_pct = 0.001
-penetration_lookback_days = 35
-# Elder's 2nd-screen caveat (p.158): skip the daily Force Index buy/short signal
-# when FI(2) prints a NEW multi-week low (longs) / high (shorts) — the move is
-# accelerating, not a pullback. Lookback in daily bars (~3-4 weeks).
-force_index_extreme_lookback_days = 25
-channel_lookback_weeks = 26
+# "last ~4-6 weeks" of wave bars, used for the average EMA penetration.
+penetration_lookback_bars = 35
+# Elder's 2nd-screen caveat (p.158): skip the wave Force Index buy/short signal
+# when FI(2) prints a NEW multi-period low (longs) / high (shorts) — the move is
+# accelerating, not a pullback. ~3-4 weeks of wave bars.
+force_index_extreme_lookback_bars = 25
+channel_lookback_bars = 26
 # Elder fits the channel (around the slow EMA26) so it contains ~95% of the last
-# `channel_lookback_weeks` bars (p.183); used as the fallback profit target.
+# `channel_lookback_bars` tide bars (p.183); used as the fallback profit target.
 channel_containment = 0.95
 min_reward_risk = 2.0
 divergence_lookback = 60
@@ -51,30 +90,40 @@ divergence_lookback = 60
 divergence_min_separation = 20
 divergence_max_separation = 40
 rr_excellent = 3.0
-strong_weekly_slope = 0.03
+strong_tide_slope = 0.03
 fi_scale_lookback = 20
-# Require the latest completed daily close to be in/near the daily EMA13-EMA26
+# Require the latest completed wave close to be in/near the wave EMA13-EMA26
 # value zone before a new entry is actionable. 0.03 = max 3% beyond the zone.
 value_zone_max_distance_pct = 0.03
-# Elder SafeZone-style stops: average adverse daily noise over the lookback,
-# multiplied by the factor, behind the recent daily extreme. Shorts use a wider
-# factor than longs (Elder p.220: >=3 vs >=2 — shorting near highs is noisier).
-safezone_lookback_days = 20
+# Elder SafeZone-style stops: average adverse noise over the lookback of wave
+# bars, multiplied by the factor, behind the recent wave extreme. Shorts use a
+# wider factor than longs (Elder p.220: >=3 vs >=2 — shorting near highs is noisier).
+safezone_lookback_bars = 20
 safezone_factor_long = 2.0
 safezone_factor_short = 3.0
-# The theoretical stop-entry is valid only for this many completed daily bars;
+# The theoretical stop-entry is valid only for this many completed wave bars;
 # if still unfilled it should be rolled to the latest high/low while conditions hold.
-entry_order_expire_days = 2
+entry_order_expire_bars = 2
 score_reward_risk_weight = 0.40
 score_impulse_weight = 0.25
 score_tide_weight = 0.20
 score_pullback_weight = 0.15
+# Flag a horizon's signal when the recent wave bars carry far less volume than
+# usual — a tradfi perp over the weekend is a near-frozen oracle, not a market.
+# 0.25 = warn when the last few bars average under 25% of the recent median.
+low_volume_ratio = 0.25
+low_volume_bars = 6
 
 [risk]
 # Account equity in USD (used by the 2% Iron Triangle sizing).
 equity = 10000.0
 # Risk per trade as a fraction of equity. Default 1%, HARD CAP 2% — values
 # above 0.02 are clamped, never silently exceeded.
+#
+# NOTE: each horizon sizes its suggestion as a standalone trade risking
+# `risk_pct`. The same asset may show a swing long AND a micro short; taking
+# several at once multiplies your risk. The 6% rule below caps total OPEN risk,
+# not the number of simultaneous suggestions.
 risk_pct = 0.01
 # 6% Rule bookkeeping:
 #   equity_at_month_start: equity on the 1st of the current month
@@ -95,30 +144,16 @@ open_trade_risk = 0.0
 # May also be set via the HL_ADDRESS environment variable (see .env.example).
 address = ""
 
-# Open positions on venues with no public position lookup (Variational Omni
-# has none until its trading API ships) come from either or both of:
-#
-# 1) The official Omni portfolio "Trades" CSV export (documented feature:
-#    portfolio → trades tab → download icon). Open positions are reconstructed
-#    by replaying the trade history; caveats: the export covers 365 days /
-#    10 000 rows, so a position older than that reconstructs wrong, and the
-#    weighted-average entry may differ slightly from the venue's own display
-#    around partial closes. Point this at the downloaded file (kept out of
-#    git — put it under cache/) and re-download whenever your positions change:
-# omni_trades_csv = "cache/omni_trades.csv"
-omni_trades_csv = ""
-
-# 2) Positions declared by hand — also useful to OVERRIDE a CSV
-#    reconstruction, since a manual entry wins over the CSV for the same
-#    asset. One block per position:
+# Positions declared by hand — for a trade the address above cannot see.
+# One block per position:
 # [[positions.manual]]
-# asset = "omni:ETH"   # watchlist naming
+# asset = "xyz:GOLD"   # watchlist naming
 # side = "long"        # or "short"
 # size = 1.5           # asset units, always positive
-# entry = 2500.0       # average entry price
+# entry = 4300.0       # average entry price
 
 [journal]
-# Append one compact JSONL entry per `run.py` refresh: top pick, actionable
+# Append one compact JSONL entry per refresh: top pick per horizon, actionable
 # signals, open-position verdicts, stops, risks and reasons.
 enabled = true
 path = "cache/trading_journal.jsonl"
