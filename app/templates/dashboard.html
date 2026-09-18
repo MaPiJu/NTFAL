@@ -9,12 +9,12 @@
 </head>
 <body>
   <header>
-    <h1>Elder Triple Screen Scanner <span class="sub">Hyperliquid perps · weekly tide / daily wave</span></h1>
+    <h1>Elder Triple Screen Scanner <span class="sub">Hyperliquid perps · tide / wave / entry</span></h1>
     <div id="meta" class="meta"></div>
   </header>
 
   <div id="guard-banner" class="guard-banner hidden"></div>
-  <div id="best-pick-banner" class="best-pick-banner hidden"></div>
+  <div id="stacking-note" class="stacking-note hidden"></div>
 
   <main>
     <section id="positions" class="hidden">
@@ -22,21 +22,26 @@
       <p class="section-note">
         Elder trade management for trades you already hold — read-only, fetched from
         your public address. Two PnL views: <strong>Elder</strong> (from the last
-        completed daily close — the basis for the verdict) and <strong>live</strong>
-        (exchange mark price, matches Hyperliquid now). <strong>Verdict is
-        informational only</strong>; you decide and place any order manually.
+        completed bar of the managing horizon — the basis for the verdict) and
+        <strong>live</strong> (exchange mark price, matches Hyperliquid now).
+        <strong>Verdict is informational only</strong>; you decide and place any
+        order manually.
       </p>
       <table id="positions-table">
         <thead>
           <tr>
-            <th>Asset</th><th>Side</th><th>Entry</th><th>Daily close</th><th>Mark (live)</th>
-            <th>PnL (Elder)</th><th>PnL (live)</th><th>Impulse W/D</th>
+            <th>Asset</th><th>Side</th><th>Entry</th><th>Close</th><th>Mark (live)</th>
+            <th>PnL (Elder)</th><th>PnL (live)</th><th>Impulse tide/wave</th>
             <th>Target</th><th>Trail stop</th><th>Verdict</th><th>Why</th>
           </tr>
         </thead>
         <tbody></tbody>
       </table>
     </section>
+
+    <nav id="horizon-tabs" class="tabs"></nav>
+
+    <div id="best-pick-banner" class="best-pick-banner hidden"></div>
 
     <section id="signals">
       <div class="toolbar">
@@ -45,12 +50,15 @@
           Hide “stand aside” (not tradable) — table &amp; charts
         </label>
         <span id="filter-count" class="filter-count"></span>
+        <span id="horizon-meta" class="filter-count"></span>
       </div>
       <table id="signals-table">
         <thead>
           <tr>
-            <th>Asset</th><th>Regime</th><th>Weekly tide</th><th>Impulse W/D/4h</th><th>FI(2) daily</th>
-            <th>Action</th><th>Daily close</th><th>Mark (live)</th>
+            <th>Asset</th><th>Regime</th><th title="1st screen">Tide</th>
+            <th title="Impulse on the tide / wave / entry screens">Impulse T/W/E</th>
+            <th title="2-bar Force Index on the wave screen">FI(2) wave</th>
+            <th>Action</th><th>Close</th><th>Mark (live)</th>
             <th>Entry (stop-order)</th><th>Stop</th><th>R:R</th>
             <th>Entry (limit)</th><th>Limit stop</th><th>Limit R:R</th>
             <th>Target</th><th>Score</th><th>Size</th><th>Reason</th>

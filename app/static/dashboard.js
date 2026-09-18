@@ -1,7 +1,20 @@
 /* Elder Triple Screen dashboard — renders the snapshot with
- * TradingView Lightweight Charts v5 (attribution logo enabled per license). */
+ * TradingView Lightweight Charts v5 (attribution logo enabled per license).
+ *
+ * The snapshot carries one block per horizon (timeframe chain); the page shows
+ * one horizon at a time, chosen with the tabs and remembered across reloads.
+ * Horizons refresh on their own cadence server-side, so the page re-polls and
+ * re-renders whenever a block's `generated_at` changes. */
 
-const { createChart, CandlestickSeries, LineSeries, HistogramSeries } = LightweightCharts;
+// The charting library is loaded from a CDN. If that fetch fails (offline, a
+// proxy, a blocked CDN) the tables must still render — they carry the actual
+// decision data, the charts only illustrate it. So this is read defensively
+// instead of destructured at the top level, which would abort the whole script.
+const LWC = window.LightweightCharts;
+
+const POLL_MS = 60_000;
+const STORAGE_KEY = "elder.horizon";
+const SCREEN_LABEL = { tide: "Tide (1st screen)", wave: "Wave (2nd screen)", entry: "Entry (3rd screen)" };
 
 const CHART_OPTS = {
   height: 480,
@@ -15,9 +28,12 @@ const CHART_OPTS = {
     vertLines: { color: "#21262d" },
     horzLines: { color: "#21262d" },
   },
-  timeScale: { borderColor: "#2d333b" },
+  timeScale: { borderColor: "#2d333b", timeVisible: true },
   rightPriceScale: { borderColor: "#2d333b" },
 };
+
+// Page state: the whole snapshot plus which horizon is on screen.
+const state = { snapshot: null, horizon: null, stamps: "" };
 
 function fmt(x, digits = 5) {
   if (x === null || x === undefined) return "—";
@@ -25,13 +41,46 @@ function fmt(x, digits = 5) {
 }
 
 function impulseDot(color) {
+  if (!color) return "—";
   return `<span class="dot ${color}" title="${color}">●</span>`;
+}
+
+function ago(iso) {
+  if (!iso) return "—";
+  const secs = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
+  if (secs < 90) return `${Math.round(secs)}s ago`;
+  if (secs < 5400) return `${Math.round(secs / 60)}min ago`;
+  if (secs < 172800) return `${Math.round(secs / 3600)}h ago`;
+  return `${Math.round(secs / 86400)}d ago`;
+}
+
+function horizonNames(snapshot) {
+  const blocks = snapshot.horizons || {};
+  const order = snapshot.horizon_order || Object.keys(blocks);
+  return order.filter((n) => blocks[n]);
+}
+
+function currentBlock() {
+  return (state.snapshot.horizons || {})[state.horizon] || null;
+}
+
+function chainOf(block) {
+  const iv = block.intervals || {};
+  return [iv.tide, iv.wave, iv.entry].filter(Boolean).join(" / ");
+}
+
+// A fingerprint of every block's timestamp: when it changes, something was
+// refreshed and the page needs re-rendering.
+function stampsOf(snapshot) {
+  return horizonNames(snapshot)
+    .map((n) => `${n}:${snapshot.horizons[n].generated_at}`)
+    .join("|");
 }
 
 // Best trade first: tradable setups ranked by Elder quality score (desc),
 // then the stand-aside rest by name. Returns a sorted copy.
-function rankedSignals(snapshot) {
-  return [...snapshot.signals].sort((a, b) => {
+function rankedSignals(block) {
+  return [...block.signals].sort((a, b) => {
     const aside = (s) => (s.action === "stand_aside" ? 1 : 0);
     if (aside(a) !== aside(b)) return aside(a) - aside(b);
     if (aside(a) === 1) return a.asset.localeCompare(b.asset);
@@ -39,9 +88,9 @@ function rankedSignals(snapshot) {
   });
 }
 
-// Live mark (still-open daily bar) + how far it has drifted from the closed-bar
-// basis the signal was computed on. A drifted/alerting row is flagged so the
-// operator does not act on a stale signal.
+// Live mark (still-open bar) + how far it has drifted from the closed-bar basis
+// the signal was computed on. A drifted/alerting row is flagged so the operator
+// does not act on a stale signal.
 function markCell(s) {
   if (s.live_price === null || s.live_price === undefined) return "—";
   let drift = "";
@@ -60,10 +109,50 @@ function scoreCell(s) {
   return `<span class="score">${pct}</span>${star}`;
 }
 
-function renderTable(snapshot) {
+function warningsHTML(s) {
+  const warns = s.data_warnings || [];
+  if (!warns.length) return "";
+  return `<br><strong class="warn">! Data quality:</strong> <span class="warn">${warns.join(" · ")}</span>`;
+}
+
+function warnBadge(s) {
+  const warns = s.data_warnings || [];
+  if (!warns.length) return "";
+  return ` <span class="warn" title="${warns.join(" · ").replace(/"/g, "&quot;")}">!</span>`;
+}
+
+// --- Horizon tabs ---------------------------------------------------------
+
+function renderTabs() {
+  const nav = document.getElementById("horizon-tabs");
+  nav.innerHTML = "";
+  for (const name of horizonNames(state.snapshot)) {
+    const block = state.snapshot.horizons[name];
+    const tab = document.createElement("button");
+    tab.className = "tab" + (name === state.horizon ? " active" : "");
+    tab.innerHTML =
+      `<span class="tab-label">${block.label || name}</span>` +
+      `<span class="tab-chain">${chainOf(block)}</span>` +
+      `<span class="tab-stamp">${ago(block.generated_at)}</span>`;
+    tab.addEventListener("click", () => {
+      state.horizon = name;
+      try {
+        localStorage.setItem(STORAGE_KEY, name);
+      } catch {
+        /* private mode: the tab choice just won't be remembered */
+      }
+      renderAll();
+    });
+    nav.appendChild(tab);
+  }
+}
+
+// --- Signals table --------------------------------------------------------
+
+function renderTable(block) {
   const tbody = document.querySelector("#signals-table tbody");
   tbody.innerHTML = "";
-  for (const s of rankedSignals(snapshot)) {
+  for (const s of rankedSignals(block)) {
     const rr = s.reward_risk;
     const rrCell =
       rr === null
@@ -76,10 +165,10 @@ function renderTable(snapshot) {
     row.dataset.action = s.action;
     if (s.is_top_pick) row.classList.add("top-pick");
     row.innerHTML = `
-      <td><strong>${s.asset}</strong></td>
+      <td><strong>${s.asset}</strong>${warnBadge(s)}</td>
       <td>${s.market_regime ?? "—"}</td>
-      <td>${s.weekly_trend}</td>
-      <td>${impulseDot(s.weekly_impulse)} / ${impulseDot(s.daily_impulse)}${s.third_screen_impulse ? ` / ${impulseDot(s.third_screen_impulse)}` : ""}</td>
+      <td>${s.tide_trend}</td>
+      <td>${impulseDot(s.tide_impulse)} / ${impulseDot(s.wave_impulse)} / ${impulseDot(s.entry_impulse)}</td>
       <td>${fmt(s.force_index_2, 4)}</td>
       <td><span class="badge ${s.action}">${s.action.replace("_", " ")}${s.price_alert ? " ⚠" : ""}</span></td>
       <td>${fmt(s.last_close)}</td>
@@ -93,7 +182,7 @@ function renderTable(snapshot) {
       <td>${fmt(s.target)}</td>
       <td>${scoreCell(s)}</td>
       <td>${size}</td>
-      <td class="reason">${s.reason}<br><strong>Value zone:</strong> ${(s.value_zone_status || "—").replace("_", " ")}${s.price_alert ? `<br><strong>⚠ Live price:</strong> ${s.price_alert}` : ""}${s.entry_order_plan ? `<br><strong>Order plan:</strong> ${s.entry_order_plan}` : ""}${(s.divergences || []).length ? `<br><strong>Divergences:</strong> ${s.divergences.join(", ")}` : ""}</td>`;
+      <td class="reason">${s.reason}<br><strong>Value zone:</strong> ${(s.value_zone_status || "—").replace("_", " ")}${s.price_alert ? `<br><strong>⚠ Live price:</strong> ${s.price_alert}` : ""}${s.entry_order_plan ? `<br><strong>Order plan:</strong> ${s.entry_order_plan}` : ""}${(s.divergences || []).length ? `<br><strong>Divergences:</strong> ${s.divergences.join(", ")}` : ""}${warningsHTML(s)}</td>`;
     tbody.appendChild(row);
   }
 }
@@ -119,9 +208,10 @@ function renderPositions(snapshot) {
   section.classList.remove("hidden");
 
   const sub = document.getElementById("positions-sub");
+  const managed = snapshot.positions_horizon ? ` · managed on '${snapshot.positions_horizon}'` : "";
   sub.textContent = snapshot.position_address
-    ? `${positions.length} open · ${snapshot.position_address}`
-    : "";
+    ? `${positions.length} open · ${snapshot.position_address}${managed}`
+    : managed.replace(" · ", "");
 
   const tbody = document.querySelector("#positions-table tbody");
   tbody.innerHTML = "";
@@ -145,7 +235,7 @@ function renderPositions(snapshot) {
       <td>${fmt(p.live_price)}</td>
       <td class="${elderCls}">${fmt(p.pnl_elder, 6)}</td>
       <td class="${liveCls}">${fmt(p.pnl_live, 6)}</td>
-      <td>${impulseDot(p.weekly_impulse)} / ${impulseDot(p.daily_impulse)}</td>
+      <td>${impulseDot(p.tide_impulse)} / ${impulseDot(p.wave_impulse)}</td>
       <td>${target}</td>
       <td>${fmt(p.suggested_stop)}</td>
       <td>${verdictBadge(p.verdict)}</td>
@@ -168,7 +258,7 @@ function positionPanelHTML(p) {
       </div>
       <div class="position-grid">
         <span>Entry <b>${fmt(p.entry)}</b></span>
-        <span>Daily close <b>${fmt(p.close_price)}</b></span>
+        <span>Close <b>${fmt(p.close_price)}</b></span>
         <span>Mark (live) <b>${fmt(p.live_price)}</b></span>
         <span>PnL Elder <b>${pnlText(p.pnl_elder, p.return_pct_elder)}</b></span>
         <span>PnL live <b>${pnlText(p.pnl_live, p.return_pct_live)}</b></span>
@@ -179,10 +269,21 @@ function positionPanelHTML(p) {
     </div>`;
 }
 
+// --- Charts ---------------------------------------------------------------
+
 function renderChart(container, data) {
+  if (!LWC) {
+    container.innerHTML =
+      '<div class="chart-missing">Charts unavailable — the TradingView Lightweight ' +
+      "Charts library could not be loaded. The tables above are unaffected.</div>";
+    return;
+  }
+  const { createChart, CandlestickSeries, LineSeries, HistogramSeries } = LWC;
   const chart = createChart(container, CHART_OPTS);
 
-  const candles = chart.addSeries(CandlestickSeries, {}, 0);
+  // Each bar carries its own Impulse body/wick color; borders are off because an
+  // Impulse-colored border on an Impulse-colored body draws nothing visible.
+  const candles = chart.addSeries(CandlestickSeries, { borderVisible: false }, 0);
   candles.setData(data.candles);
 
   const ema13 = chart.addSeries(
@@ -241,11 +342,14 @@ const LEGEND_HTML = `
       <i class="swatch" style="background:#8b949e"></i>EMA-13 · dashed line = 0</span>
   </div>`;
 
-function renderCards(snapshot) {
+function renderCards(block, snapshot) {
   const cards = document.getElementById("cards");
   cards.innerHTML = "";
   const positions = positionsByAsset(snapshot);
-  for (const s of rankedSignals(snapshot)) {
+  const iv = block.intervals || {};
+  for (const s of rankedSignals(block)) {
+    const assetCharts = block.charts[s.asset];
+    if (!assetCharts) continue;
     const card = document.createElement("section");
     card.className = "card";
     if (s.is_top_pick) card.classList.add("top-pick");
@@ -256,31 +360,42 @@ function renderCards(snapshot) {
     card.dataset.haspos = pos ? "1" : "";
     const pickTag = s.is_top_pick ? ' <span class="badge top-pick-badge">★ best trade</span>' : "";
     const posTag = pos ? ' <span class="badge held">● held</span>' : "";
+    const panes = ["tide", "wave", "entry"]
+      .filter((role) => assetCharts[role])
+      .map(
+        (role) =>
+          `<div><div class="chart-title">${SCREEN_LABEL[role]} — ${iv[role] || ""}</div>` +
+          `<div class="chart chart-${role}"></div></div>`
+      )
+      .join("");
+    const warns = (s.data_warnings || []).length
+      ? `<div class="card-warn">! ${s.data_warnings.join("<br>! ")}</div>`
+      : "";
     card.innerHTML = `
       <h2>${s.asset} <span class="badge ${s.action}">${s.action.replace("_", " ")}</span>${pickTag}${posTag}</h2>
+      ${warns}
       ${pos ? positionPanelHTML(pos) : ""}
       ${LEGEND_HTML}
-      <div class="charts">
-        <div><div class="chart-title">Weekly (tide)</div><div class="chart chart-w"></div></div>
-        <div><div class="chart-title">Daily (wave)</div><div class="chart chart-d"></div></div>
-        ${snapshot.charts[s.asset].third_screen ? '<div><div class="chart-title">4h (optional third screen)</div><div class="chart chart-4h"></div></div>' : ''}
-      </div>`;
+      <div class="charts">${panes}</div>`;
     cards.appendChild(card);
   }
 }
 
-// Charts are built lazily, the first time a card is actually shown — with the
-// stand-aside filter on by default this skips most of the universe.
-function ensureChartsRendered(card, snapshot) {
+// Charts are built lazily, the first time a card is actually shown.
+function ensureChartsRendered(card, block) {
   if (card.dataset.rendered) return;
-  const assetCharts = snapshot.charts[card.dataset.asset];
-  renderChart(card.querySelector(".chart-w"), assetCharts.weekly);
-  renderChart(card.querySelector(".chart-d"), assetCharts.daily);
-  if (assetCharts.third_screen) renderChart(card.querySelector(".chart-4h"), assetCharts.third_screen);
+  const assetCharts = block.charts[card.dataset.asset];
+  if (!assetCharts) return;
+  for (const role of ["tide", "wave", "entry"]) {
+    const el = card.querySelector(`.chart-${role}`);
+    if (el && assetCharts[role]) renderChart(el, assetCharts[role]);
+  }
   card.dataset.rendered = "1";
 }
 
-function applyStandAsideFilter(snapshot) {
+function applyStandAsideFilter() {
+  const block = currentBlock();
+  if (!block) return;
   const hide = document.getElementById("hide-stand-aside").checked;
   let hidden = 0;
   for (const row of document.querySelectorAll("#signals-table tbody tr")) {
@@ -292,56 +407,110 @@ function applyStandAsideFilter(snapshot) {
     // Always keep cards for held positions visible, even when standing aside.
     const out = hide && card.dataset.action === "stand_aside" && !card.dataset.haspos;
     card.classList.toggle("hidden", out);
-    if (!out) ensureChartsRendered(card, snapshot);
+    if (!out) ensureChartsRendered(card, block);
   }
   document.getElementById("filter-count").textContent = hide
     ? `${hidden} stand-aside asset${hidden === 1 ? "" : "s"} hidden`
     : "";
 }
 
+// --- Top-level render -----------------------------------------------------
+
+function renderAll() {
+  const snapshot = state.snapshot;
+  const block = currentBlock();
+
+  document.getElementById("meta").textContent =
+    `equity $${fmt(snapshot.equity, 8)} · risk/trade ${(snapshot.risk_pct * 100).toFixed(1)}% · ` +
+    `open risk $${fmt(snapshot.total_open_trade_risk ?? snapshot.guard.total_at_risk, 8)} · ` +
+    `updated ${ago(snapshot.generated_at)}`;
+
+  const banner = document.getElementById("guard-banner");
+  banner.classList.toggle("hidden", !snapshot.guard.blocked);
+  if (snapshot.guard.blocked) {
+    banner.textContent =
+      `⚠ 6% RULE ACTIVE — monthly losses + open risk $${fmt(snapshot.guard.total_at_risk, 8)} ` +
+      `≥ limit $${fmt(snapshot.guard.limit, 8)}. No new entries for the rest of the month.`;
+  }
+
+  // Each horizon sizes independently, so the same asset can show a long here and
+  // a short one tab over. Say so once, loudly.
+  const stacking = document.getElementById("stacking-note");
+  stacking.textContent =
+    `Every horizon sizes its suggestion as a standalone trade risking ` +
+    `${(snapshot.risk_pct * 100).toFixed(1)}% of equity. Taking setups from several ` +
+    `horizons at once multiplies your risk — the 6% rule caps total open risk, not ` +
+    `the number of simultaneous suggestions.`;
+  stacking.classList.remove("hidden");
+
+  renderPositions(snapshot);
+  renderTabs();
+
+  const pickBanner = document.getElementById("best-pick-banner");
+  const best = block && block.top_pick
+    ? block.signals.find((s) => s.asset === block.top_pick)
+    : null;
+  pickBanner.classList.toggle("hidden", !best);
+  if (best) {
+    pickBanner.innerHTML =
+      `★ Best ${block.label || state.horizon} trade — <strong>${best.asset}</strong> ` +
+      `<span class="badge ${best.action}">${best.action.replace("_", " ")}</span> · ` +
+      `score ${Math.round(best.quality_score * 100)}/100 · ` +
+      `R:R ${best.reward_risk.toFixed(2)} · entry ${fmt(best.entry)} · stop ${fmt(best.stop)} · ` +
+      `target ${fmt(best.target)}`;
+  }
+
+  if (!block) return;
+  document.getElementById("horizon-meta").textContent =
+    `${chainOf(block)} · refreshed ${ago(block.generated_at)}` +
+    (block.skipped && block.skipped.length ? ` · skipped: ${block.skipped.join(", ")}` : "");
+
+  renderTable(block);
+  renderCards(block, snapshot);
+  applyStandAsideFilter();
+}
+
+async function poll() {
+  let snapshot;
+  try {
+    const resp = await fetch("/api/snapshot");
+    if (!resp.ok) return;
+    snapshot = await resp.json();
+  } catch {
+    return; // server restarting mid-refresh: try again next tick
+  }
+  const stamps = stampsOf(snapshot);
+  if (stamps === state.stamps) return; // nothing changed
+  state.snapshot = snapshot;
+  state.stamps = stamps;
+  const names = horizonNames(snapshot);
+  if (!names.includes(state.horizon)) state.horizon = names[0] ?? null;
+  renderAll();
+}
+
 async function main() {
-  const resp = await fetch("/api/snapshot");
   const meta = document.getElementById("meta");
+  const resp = await fetch("/api/snapshot");
   if (!resp.ok) {
     const err = await resp.json().catch(() => ({}));
     meta.textContent = err.error || "No snapshot available — run `python run.py` first.";
     return;
   }
-  const snapshot = await resp.json();
-  meta.textContent =
-    `Generated ${snapshot.generated_at} · equity $${fmt(snapshot.equity, 8)} · ` +
-    `risk/trade ${(snapshot.risk_pct * 100).toFixed(1)}% · ` +
-    `open risk $${fmt(snapshot.total_open_trade_risk ?? snapshot.guard.total_at_risk, 8)}`;
+  state.snapshot = await resp.json();
+  state.stamps = stampsOf(state.snapshot);
 
-  const banner = document.getElementById("guard-banner");
-  if (snapshot.guard.blocked) {
-    banner.textContent =
-      `⚠ 6% RULE ACTIVE — monthly losses + open risk $${fmt(snapshot.guard.total_at_risk, 8)} ` +
-      `≥ limit $${fmt(snapshot.guard.limit, 8)}. No new entries for the rest of the month.`;
-    banner.classList.remove("hidden");
+  const names = horizonNames(state.snapshot);
+  let remembered = null;
+  try {
+    remembered = localStorage.getItem(STORAGE_KEY);
+  } catch {
+    /* private mode */
   }
+  state.horizon = names.includes(remembered) ? remembered : names[0] ?? null;
 
-  const pickBanner = document.getElementById("best-pick-banner");
-  const best = snapshot.top_pick
-    ? snapshot.signals.find((s) => s.asset === snapshot.top_pick)
-    : null;
-  if (best) {
-    pickBanner.innerHTML =
-      `★ Best trade — <strong>${best.asset}</strong> ` +
-      `<span class="badge ${best.action}">${best.action.replace("_", " ")}</span> · ` +
-      `score ${Math.round(best.quality_score * 100)}/100 · ` +
-      `R:R ${best.reward_risk.toFixed(2)} · entry ${fmt(best.entry)} · stop ${fmt(best.stop)} · ` +
-      `target ${fmt(best.target)}`;
-    pickBanner.classList.remove("hidden");
-  }
-
-  renderPositions(snapshot);
-  renderTable(snapshot);
-  renderCards(snapshot);
-  applyStandAsideFilter(snapshot);
-  document
-    .getElementById("hide-stand-aside")
-    .addEventListener("change", () => applyStandAsideFilter(snapshot));
+  renderAll();
+  document.getElementById("hide-stand-aside").addEventListener("change", applyStandAsideFilter);
+  setInterval(poll, POLL_MS);
 }
 
 main();

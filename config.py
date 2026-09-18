@@ -8,10 +8,14 @@ from __future__ import annotations
 
 import os
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Any
 
 from dotenv import load_dotenv
+
+from data.hyperliquid import INTERVAL_MS
+from strategy.params import StrategyParams
 
 DEFAULT_CONFIG_PATH = Path("config.toml")
 
@@ -21,41 +25,52 @@ WATCHLIST_ALL = "*"
 
 
 @dataclass(frozen=True)
-class ScannerConfig:
-    # Explicit coin names and/or wildcards ("*", "xyz:*") — see WATCHLIST_ALL.
-    watchlist: tuple[str, ...]
-    weekly_interval: str
-    daily_interval: str
-    third_screen_interval: str
-    use_third_screen: bool
-    lookback_weeks: int
-    lookback_days: int
-    lookback_third_screen: int
+class HorizonConfig:
+    """One Triple Screen timeframe chain (Elder's "factor of ~5" applied to a role).
+
+    The three screens are named by *role*, not by a fixed interval, so the same
+    Elder logic runs on a weekly tide or a 4h tide:
+      - `tide`  = first screen, the strategic bias
+      - `wave`  = second screen, the counter-trend oscillator that finds entries
+      - `entry` = third screen, lower-timeframe entry timing
+
+    `refresh_seconds` is how often this horizon is worth recomputing (a weekly
+    tide does not change every five minutes); `min_tide_bars` is the history
+    depth below which the slow EMA26 is not converged and the tide/Impulse are
+    flagged as unreliable — surfaced, never silently trusted.
+    """
+
+    name: str
+    label: str
+    tide: str
+    wave: str
+    entry: str
+    lookback_tide: int
+    lookback_wave: int
+    lookback_entry: int
+    refresh_seconds: int
+    min_tide_bars: int
+    # Per-horizon strategy overrides merged over the global [strategy] block.
+    params: StrategyParams = StrategyParams()
+
+    @property
+    def intervals(self) -> dict[str, str]:
+        return {"tide": self.tide, "wave": self.wave, "entry": self.entry}
 
 
 @dataclass(frozen=True)
-class StrategyConfig:
-    flat_trend_slope_pct: float = 0.001
-    penetration_lookback_days: int = 35
-    force_index_extreme_lookback_days: int = 25
-    channel_lookback_weeks: int = 26
-    channel_containment: float = 0.95
-    min_reward_risk: float = 2.0
-    divergence_lookback: int = 60
-    divergence_min_separation: int = 20
-    divergence_max_separation: int = 40
-    rr_excellent: float = 3.0
-    strong_weekly_slope: float = 0.03
-    fi_scale_lookback: int = 20
-    value_zone_max_distance_pct: float = 0.03
-    safezone_lookback_days: int = 20
-    safezone_factor_long: float = 2.0
-    safezone_factor_short: float = 3.0
-    entry_order_expire_days: int = 2
-    score_reward_risk_weight: float = 0.40
-    score_impulse_weight: float = 0.25
-    score_tide_weight: float = 0.20
-    score_pullback_weight: float = 0.15
+class ScannerConfig:
+    # Explicit coin names and/or wildcards ("*", "xyz:*") — see WATCHLIST_ALL.
+    watchlist: tuple[str, ...]
+    horizons: tuple[HorizonConfig, ...]
+    # Horizon whose bars drive Elder trade management for OPEN positions.
+    positions_horizon: str
+
+    def horizon(self, name: str) -> HorizonConfig:
+        for h in self.horizons:
+            if h.name == name:
+                return h
+        raise KeyError(f"unknown horizon: {name}")
 
 
 @dataclass(frozen=True)
@@ -69,9 +84,8 @@ class RiskConfig:
 
 @dataclass(frozen=True)
 class ManualPosition:
-    # An open position declared by hand — used for venues with no public
-    # position lookup (Variational Omni has none until its API ships). The
-    # asset uses watchlist naming, e.g. "omni:ETH".
+    # An open position declared by hand — for a trade the configured public
+    # address cannot see. The asset uses watchlist naming, e.g. "xyz:GOLD".
     asset: str
     side: str  # "long" | "short"
     size: float  # absolute units of the asset (always positive)
@@ -84,13 +98,9 @@ class PositionsConfig:
     # clearinghouseState info endpoint. Read-only — no private key, no signing.
     # Empty string disables open-trade management.
     address: str
-    # Manually declared open positions (e.g. on Omni), merged with the ones
-    # read from Hyperliquid for the same Elder exit analysis.
+    # Manually declared open positions, merged with the ones read from
+    # Hyperliquid for the same Elder exit analysis.
     manual: tuple[ManualPosition, ...] = ()
-    # Path to the official Omni portfolio "Trades" CSV export; open Omni
-    # positions are reconstructed from it (see data/omni_trades.py). Empty
-    # disables the import. Manual entries win over CSV ones for the same asset.
-    omni_trades_csv: str = ""
 
 
 @dataclass(frozen=True)
@@ -102,11 +112,65 @@ class JournalConfig:
 @dataclass(frozen=True)
 class Config:
     scanner: ScannerConfig
-    strategy: StrategyConfig
+    strategy: StrategyParams
     risk: RiskConfig
     positions: PositionsConfig
     journal: JournalConfig
     cache_dir: Path
+
+
+class ConfigError(ValueError):
+    """Raised when config.toml is structurally invalid."""
+
+
+def _strategy_params(raw: dict[str, Any], base: StrategyParams) -> StrategyParams:
+    """`base` with any keys present in `raw` overridden (unknown keys rejected)."""
+    known = {f: getattr(base, f) for f in base.__dataclass_fields__}
+    unknown = set(raw) - set(known)
+    if unknown:
+        raise ConfigError(f"unknown strategy setting(s): {', '.join(sorted(unknown))}")
+    overrides = {k: type(known[k])(v) for k, v in raw.items()}
+    return replace(base, **overrides)
+
+
+def _horizon(raw: dict[str, Any], base: StrategyParams) -> HorizonConfig:
+    try:
+        name = str(raw["name"])
+        tide, wave, entry = str(raw["tide"]), str(raw["wave"]), str(raw["entry"])
+    except KeyError as exc:  # pragma: no cover - defensive
+        raise ConfigError(f"horizon is missing required key {exc}") from exc
+
+    for role, interval in (("tide", tide), ("wave", wave), ("entry", entry)):
+        if interval not in INTERVAL_MS:
+            raise ConfigError(
+                f"horizon {name!r}: {role} interval {interval!r} is not a Hyperliquid "
+                f"candle interval ({', '.join(INTERVAL_MS)})"
+            )
+
+    return HorizonConfig(
+        name=name,
+        label=str(raw.get("label", name)),
+        tide=tide,
+        wave=wave,
+        entry=entry,
+        lookback_tide=int(raw.get("lookback_tide", 260)),
+        lookback_wave=int(raw.get("lookback_wave", 500)),
+        lookback_entry=int(raw.get("lookback_entry", 300)),
+        refresh_seconds=int(raw.get("refresh_seconds", 86_400)),
+        min_tide_bars=int(raw.get("min_tide_bars", 60)),
+        params=_strategy_params(raw.get("strategy", {}), base),
+    )
+
+
+def _horizons(raw_list: list[dict[str, Any]], base: StrategyParams) -> tuple[HorizonConfig, ...]:
+    if not raw_list:
+        raise ConfigError("at least one [[scanner.horizons]] block is required")
+    horizons = tuple(_horizon(h, base) for h in raw_list)
+    names = [h.name for h in horizons]
+    duplicates = {n for n in names if names.count(n) > 1}
+    if duplicates:
+        raise ConfigError(f"duplicate horizon name(s): {', '.join(sorted(duplicates))}")
+    return horizons
 
 
 def load_config(path: Path = DEFAULT_CONFIG_PATH) -> Config:
@@ -114,10 +178,19 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> Config:
     raw = tomllib.loads(path.read_text())
 
     s = raw["scanner"]
-    st = raw.get("strategy", {})
     r = raw["risk"]
     p = raw.get("positions", {})
     j = raw.get("journal", {})
+
+    strategy = _strategy_params(raw.get("strategy", {}), StrategyParams())
+    horizons = _horizons(s.get("horizons", []), strategy)
+
+    positions_horizon = str(s.get("positions_horizon", horizons[0].name))
+    if positions_horizon not in {h.name for h in horizons}:
+        raise ConfigError(
+            f"positions_horizon {positions_horizon!r} is not a defined horizon "
+            f"({', '.join(h.name for h in horizons)})"
+        )
 
     equity = float(os.environ.get("EQUITY", r["equity"]))
     risk_pct = float(os.environ.get("RISK_PCT", r["risk_pct"]))
@@ -129,7 +202,7 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> Config:
     for m in p.get("manual", []):
         side = str(m["side"]).lower()
         if side not in ("long", "short"):
-            raise ValueError(f"positions.manual side must be long|short, got {m['side']!r}")
+            raise ConfigError(f"positions.manual side must be long|short, got {m['side']!r}")
         manual.append(
             ManualPosition(
                 asset=str(m["asset"]),
@@ -142,37 +215,10 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> Config:
     return Config(
         scanner=ScannerConfig(
             watchlist=tuple(s["watchlist"]),
-            weekly_interval=s.get("weekly_interval", "1w"),
-            daily_interval=s.get("daily_interval", "1d"),
-            third_screen_interval=s.get("third_screen_interval", "4h"),
-            use_third_screen=bool(s.get("use_third_screen", False)),
-            lookback_weeks=int(s.get("lookback_weeks", 260)),
-            lookback_days=int(s.get("lookback_days", 500)),
-            lookback_third_screen=int(s.get("lookback_third_screen", 300)),
+            horizons=horizons,
+            positions_horizon=positions_horizon,
         ),
-        strategy=StrategyConfig(
-            flat_trend_slope_pct=float(st.get("flat_trend_slope_pct", 0.001)),
-            penetration_lookback_days=int(st.get("penetration_lookback_days", 35)),
-            force_index_extreme_lookback_days=int(st.get("force_index_extreme_lookback_days", 25)),
-            channel_lookback_weeks=int(st.get("channel_lookback_weeks", 26)),
-            channel_containment=float(st.get("channel_containment", 0.95)),
-            min_reward_risk=float(st.get("min_reward_risk", 2.0)),
-            divergence_lookback=int(st.get("divergence_lookback", 60)),
-            divergence_min_separation=int(st.get("divergence_min_separation", 20)),
-            divergence_max_separation=int(st.get("divergence_max_separation", 40)),
-            rr_excellent=float(st.get("rr_excellent", 3.0)),
-            strong_weekly_slope=float(st.get("strong_weekly_slope", 0.03)),
-            fi_scale_lookback=int(st.get("fi_scale_lookback", 20)),
-            value_zone_max_distance_pct=float(st.get("value_zone_max_distance_pct", 0.03)),
-            safezone_lookback_days=int(st.get("safezone_lookback_days", 20)),
-            safezone_factor_long=float(st.get("safezone_factor_long", 2.0)),
-            safezone_factor_short=float(st.get("safezone_factor_short", 3.0)),
-            entry_order_expire_days=int(st.get("entry_order_expire_days", 2)),
-            score_reward_risk_weight=float(st.get("score_reward_risk_weight", 0.40)),
-            score_impulse_weight=float(st.get("score_impulse_weight", 0.25)),
-            score_tide_weight=float(st.get("score_tide_weight", 0.20)),
-            score_pullback_weight=float(st.get("score_pullback_weight", 0.15)),
-        ),
+        strategy=strategy,
         risk=RiskConfig(
             equity=equity,
             risk_pct=risk_pct,
@@ -180,11 +226,7 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> Config:
             month_realized_losses=float(r.get("month_realized_losses", 0.0)),
             open_trade_risk=float(r.get("open_trade_risk", 0.0)),
         ),
-        positions=PositionsConfig(
-            address=address,
-            manual=tuple(manual),
-            omni_trades_csv=str(p.get("omni_trades_csv", "")).strip(),
-        ),
+        positions=PositionsConfig(address=address, manual=tuple(manual)),
         journal=JournalConfig(
             enabled=bool(j.get("enabled", True)),
             path=Path(j.get("path", "cache/trading_journal.jsonl")),
