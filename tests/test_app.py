@@ -496,6 +496,39 @@ def test_a_suggested_stop_never_moves_back_across_refreshes(tmp_path, btc_fixtur
     assert build_snapshot(cfg, client, previous=looser)["positions"][0]["suggested_stop"] == fresh
 
 
+def test_a_failed_position_lookup_keeps_the_stop_memory(tmp_path, btc_fixtures, monkeypatch):
+    # A clearinghouseState timeout hides the position for one refresh; that is not
+    # a closed position, so its remembered stop must survive — otherwise the next
+    # refresh starts fresh and the stop moves back. Once the dex is read and no
+    # longer lists the position, the memory goes.
+    addr, client = _held_btc(tmp_path, btc_fixtures)
+    cfg = make_config(tmp_path, address=addr)
+    fresh = build_snapshot(cfg, client)["positions"][0]["suggested_stop"]
+    key = stop_memory_key("BTC", "long", 50000.0)
+    remembered = {"stop_memory": {key: fresh + 1_000.0}}
+
+    real = client.clearinghouse_state
+
+    def timeout(address, dex=""):
+        raise httpx.ReadTimeout("timed out")
+
+    monkeypatch.setattr(client, "clearinghouse_state", timeout)
+    hidden = build_snapshot(cfg, client, previous=remembered)
+    assert hidden["positions"] == []
+    assert hidden["stop_memory"] == {key: fresh + 1_000.0}
+    hidden_one = refresh_horizon(cfg, client, "swing", remembered)
+    assert hidden_one["stop_memory"] == {key: fresh + 1_000.0}
+
+    monkeypatch.setattr(client, "clearinghouse_state", real)
+    back = build_snapshot(cfg, client, previous=hidden)
+    assert back["positions"][0]["suggested_stop"] == fresh + 1_000.0  # never moved back
+
+    monkeypatch.setattr(
+        client, "clearinghouse_state", lambda address, dex="": {"assetPositions": []}
+    )
+    assert build_snapshot(cfg, client, previous=back)["stop_memory"] == {}  # closed: forgotten
+
+
 def test_stop_memory_resets_when_the_position_changes(tmp_path, btc_fixtures):
     # Same coin and side, another entry price: a new position, a fresh stop.
     addr, client = _held_btc(tmp_path, btc_fixtures, entry="51000.0")

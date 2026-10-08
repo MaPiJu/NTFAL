@@ -273,14 +273,17 @@ def watchlist_dexes(watchlist: tuple[str, ...]) -> list[str]:
     return sorted(dexes)
 
 
-def fetch_open_positions(cfg: Config, client: MarketDataProvider) -> list[OpenPosition]:
+def fetch_open_positions(
+    cfg: Config, client: MarketDataProvider, read_dexes: set[str] | None = None
+) -> list[OpenPosition]:
     """Open positions: read from Hyperliquid + declared manually.
 
     Hyperliquid positions are gathered across the native clearinghouse and
     every HIP-3 dex the watchlist references; a failure on one dex (a bad
-    payload, an HTTP error, a timeout) doesn't drop the others.
-    `[[positions.manual]]` entries cover a trade the configured address cannot
-    see.
+    payload, an HTTP error, a timeout) doesn't drop the others. Each dex read
+    successfully is added to `read_dexes`, if given: only there is a missing
+    position known to be closed. `[[positions.manual]]` entries cover a trade
+    the configured address cannot see.
     """
     out: list[OpenPosition] = []
     if cfg.positions.address:
@@ -290,6 +293,8 @@ def fetch_open_positions(cfg: Config, client: MarketDataProvider) -> list[OpenPo
             except (HyperliquidError, httpx.HTTPError):
                 continue
             out.extend(parse_positions(state))
+            if read_dexes is not None:
+                read_dexes.add(dex)
     for m in cfg.positions.manual:
         out.append(OpenPosition(asset=m.asset, side=m.side, entry=m.entry, size=m.size))
     return out
@@ -349,12 +354,27 @@ def stop_memory_key(asset: str, side: str, entry: float) -> str:
     return f"{asset}|{side}|{float(entry)!r}"
 
 
-def stop_memory(positions: list[dict[str, Any]]) -> dict[str, float]:
-    """The last suggested stop of every position just assessed, to store in the
-    snapshot. Positions no longer held drop out, so their memory resets."""
-    return {
+def stop_memory(
+    positions: list[dict[str, Any]],
+    previous: Mapping[str, float] | None = None,
+    held: list[OpenPosition] | None = None,
+    read_dexes: set[str] | frozenset[str] = frozenset(),
+) -> dict[str, float]:
+    """The stop memory to store in the snapshot: the last suggested stop of every
+    position just assessed, plus the `previous` entries of positions not known to
+    be closed. A position is known closed only when its dex was read and no
+    longer lists it (or it is no longer declared); one hidden by a failed lookup,
+    or held but not assessed this run, keeps its stop — else the next refresh
+    would start fresh and the stop could move back."""
+    memory = {
         stop_memory_key(p["asset"], p["side"], p["entry"]): p["suggested_stop"] for p in positions
     }
+    still_held = {stop_memory_key(p.asset, p.side, p.entry) for p in held or []}
+    for key, stop in (previous or {}).items():
+        unconfirmed = coin_dex(key.split("|", 1)[0]) not in read_dexes
+        if key not in memory and (key in still_held or unconfirmed):
+            memory[key] = stop
+    return memory
 
 
 def build_positions(
@@ -552,8 +572,9 @@ def build_snapshot(
     funding = fetch_funding_rates(coins, client)
 
     # Open positions (read-only) drive the Elder trade-management section.
+    read_dexes: set[str] = set()
     try:
-        open_positions = fetch_open_positions(cfg, client)
+        open_positions = fetch_open_positions(cfg, client, read_dexes)
     except HyperliquidError:
         open_positions = []
     held = {p.asset for p in open_positions}
@@ -588,7 +609,9 @@ def build_snapshot(
         "guard": asdict(guard),
         **risks,
         "positions": positions,
-        "stop_memory": stop_memory(positions),
+        "stop_memory": stop_memory(
+            positions, (previous or {}).get("stop_memory"), open_positions, read_dexes
+        ),
         "positions_horizon": cfg.scanner.positions_horizon,
         "position_address": mask_address(cfg.positions.address) if cfg.positions.address else None,
         "horizons": {
@@ -644,8 +667,9 @@ def refresh_horizon(
     snapshot.setdefault("horizons", {})
     snapshot["horizons"] = dict(snapshot["horizons"])
 
+    read_dexes: set[str] = set()
     try:
-        open_positions = fetch_open_positions(cfg, client)
+        open_positions = fetch_open_positions(cfg, client, read_dexes)
     except HyperliquidError:
         open_positions = []
     held = {p.asset for p in open_positions}
@@ -666,7 +690,9 @@ def refresh_horizon(
         )
         guard, risks = _risk_summary(cfg, positions)
         snapshot["positions"] = positions
-        snapshot["stop_memory"] = stop_memory(positions)
+        snapshot["stop_memory"] = stop_memory(
+            positions, previous.get("stop_memory"), open_positions, read_dexes
+        )
         snapshot["guard"] = asdict(guard)
         snapshot.update(risks)
         blocked = guard.blocked

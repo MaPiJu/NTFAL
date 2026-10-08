@@ -174,7 +174,8 @@ entered it. For each one, only Elder's own exit logic applies (no new indicators
   the average adverse noise, ratcheted to at least break-even once the trade is in profit.
   It never moves back (Elder: "move your stop only in the direction of your trade"): the
   snapshot remembers the last suggestion per position (asset, side, entry price), and the
-  next refresh can only tighten it; a new entry price starts fresh.
+  next refresh can only tighten it; a new entry price starts fresh, and a position hidden
+  for a refresh by a failed lookup keeps its remembered stop.
 
 Verdict precedence is **exit > take profits > hold**. The result appears as an "Open
 positions" table at the top of the dashboard and as a panel on the held asset's card, and
