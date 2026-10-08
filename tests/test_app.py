@@ -383,6 +383,24 @@ def test_open_risk_is_zero_once_the_stop_locks_in_profit():
     assert risk("short", 100.0, 95.0) == 0.0  # short stop below entry: profit locked
 
 
+def test_pipeline_passes_sz_decimals_to_the_strategy(tmp_path, btc_fixtures, monkeypatch):
+    # The tick of an entry order depends on the asset's szDecimals (Hyperliquid:
+    # at most 6 - szDecimals decimals), so the pipeline must hand it over.
+    import app.pipeline as pipeline
+
+    seen: dict[str, int | None] = {}
+    real = pipeline.evaluate_asset
+
+    def spy(asset, *args, **kwargs):
+        seen[asset] = kwargs.get("sz_decimals")
+        return real(asset, *args, **kwargs)
+
+    monkeypatch.setattr(pipeline, "evaluate_asset", spy)
+    build_snapshot(make_config(tmp_path), make_client(btc_fixtures, tmp_path))
+
+    assert seen == {"BTC": 5}
+
+
 def test_guard_uses_automatic_open_position_risk(tmp_path, btc_fixtures):
     addr = "0x" + "ef" * 20
     cfg = make_config(tmp_path, address=addr, month_realized_losses=0.0)

@@ -71,6 +71,27 @@ def test_tick_size():
         tick_size(0)
 
 
+def test_tick_size_follows_hyperliquid_price_rules():
+    # Hyperliquid perps: <= 5 significant figures, but integer prices are always
+    # valid (so a tick never exceeds 1), and <= 6 - szDecimals decimals.
+    assert tick_size(123_456.0) == pytest.approx(1.0)  # not 10: integers allowed
+    assert tick_size(0.5, sz_decimals=2) == pytest.approx(1e-4)  # decimals cap binds
+    assert tick_size(0.5) == pytest.approx(1e-5)  # unknown szDecimals: sig figs only
+    # The six default xyz perps: 5 significant figures is the binding rule.
+    assert tick_size(4126.0, sz_decimals=4) == pytest.approx(0.1)  # xyz:GOLD
+    assert tick_size(91.81, sz_decimals=3) == pytest.approx(0.001)  # xyz:CL
+    assert tick_size(30_967.0, sz_decimals=4) == pytest.approx(1.0)  # xyz:XYZ100
+
+
+def test_entry_tick_respects_sz_decimals_cap():
+    # With szDecimals=5 a perp may quote at most 1 decimal, so the buy-stop sits
+    # 0.1 (not 0.01) above the prior high, even at a ~140 price.
+    sig = evaluate_asset("X", WEEKLY_UP, DAILY_LONG, sz_decimals=5)
+    prior_high = float(DAILY_LONG["high"].iloc[-1])
+    assert sig.action == "long"
+    assert sig.entry == pytest.approx(prior_high + 0.1)
+
+
 def test_tide_trend():
     assert tide_trend(WEEKLY_UP["close"]) == "up"
     assert tide_trend(WEEKLY_DOWN["close"]) == "down"

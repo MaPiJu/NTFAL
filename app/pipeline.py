@@ -309,6 +309,7 @@ def build_horizon(
             horizon=horizon.name,
             intervals=horizon.intervals,
             min_tide_bars=horizon.min_tide_bars,
+            sz_decimals=coins.get(coin),
         )
         evaluated.append(sig)
         row = asdict(sig)

@@ -38,8 +38,10 @@ Trend = Literal["up", "down", "neutral"]
 
 EMA_FAST = 13
 EMA_SLOW = 26
-# Hyperliquid quotes prices to at most 5 significant figures.
+# Hyperliquid perp prices: at most 5 significant figures and at most
+# MAX_PRICE_DECIMALS - szDecimals decimals; integer prices are always valid.
 PRICE_SIG_FIGS = 5
+MAX_PRICE_DECIMALS = 6
 DEFAULT_PARAMS = StrategyParams()
 # Role -> interval labels, used only for human-readable reasons/plans.
 DEFAULT_INTERVALS = {"tide": "tide", "wave": "wave", "entry": "entry"}
@@ -82,11 +84,19 @@ class Signal:
     data_warnings: list[str] = field(default_factory=list)
 
 
-def tick_size(price: float) -> float:
-    """One price tick, assuming 5-significant-figure Hyperliquid quoting."""
+def tick_size(price: float, sz_decimals: int | None = None) -> float:
+    """One price tick under Hyperliquid's perp price rules.
+
+    At most 5 significant figures — but integer prices are always valid, so the
+    tick never exceeds 1 — and, when the asset's `szDecimals` is known, at most
+    6 - szDecimals decimals.
+    """
     if price <= 0:
         raise ValueError("price must be positive")
-    return 10.0 ** (math.floor(math.log10(price)) - (PRICE_SIG_FIGS - 1))
+    tick = min(10.0 ** (math.floor(math.log10(price)) - (PRICE_SIG_FIGS - 1)), 1.0)
+    if sz_decimals is not None:
+        tick = max(tick, 10.0 ** -(MAX_PRICE_DECIMALS - sz_decimals))
+    return tick
 
 
 def tide_trend(
@@ -333,11 +343,14 @@ def channel(
 
 
 def _long_levels(
-    tide: pd.DataFrame, wave: pd.DataFrame, params: StrategyParams = DEFAULT_PARAMS
+    tide: pd.DataFrame,
+    wave: pd.DataFrame,
+    params: StrategyParams = DEFAULT_PARAMS,
+    sz_decimals: int | None = None,
 ) -> tuple[float, float | None, float, float]:
     """(entry, entry_limit, stop, target) for a long setup."""
     prior_high = float(wave["high"].iloc[-1])
-    tick = tick_size(prior_high)
+    tick = tick_size(prior_high, sz_decimals)
     entry = prior_high + tick  # buy-stop 1 tick above the prior bar's high
 
     pen = average_penetration(wave, "down", lookback=params.penetration_lookback_bars)
@@ -355,11 +368,14 @@ def _long_levels(
 
 
 def _short_levels(
-    tide: pd.DataFrame, wave: pd.DataFrame, params: StrategyParams = DEFAULT_PARAMS
+    tide: pd.DataFrame,
+    wave: pd.DataFrame,
+    params: StrategyParams = DEFAULT_PARAMS,
+    sz_decimals: int | None = None,
 ) -> tuple[float, float | None, float, float]:
     """(entry, entry_limit, stop, target) for a short setup."""
     prior_low = float(wave["low"].iloc[-1])
-    tick = tick_size(prior_low)
+    tick = tick_size(prior_low, sz_decimals)
     entry = prior_low - tick  # sell-stop 1 tick below the prior bar's low
 
     pen = average_penetration(wave, "up", lookback=params.penetration_lookback_bars)
@@ -503,7 +519,10 @@ def data_warnings(
 
 
 def _entry_screen_levels(
-    action: Action, entry_frame: pd.DataFrame | None, fallback_entry: float
+    action: Action,
+    entry_frame: pd.DataFrame | None,
+    fallback_entry: float,
+    sz_decimals: int | None = None,
 ) -> tuple[float, str | None]:
     """Third screen: lower-timeframe trigger for the stop-entry order.
 
@@ -517,10 +536,10 @@ def _entry_screen_levels(
     imp = str(impulse_color(entry_frame["close"]).iloc[-1])
     if action == "long":
         px = float(entry_frame["high"].iloc[-1])
-        return px + tick_size(px), imp
+        return px + tick_size(px, sz_decimals), imp
     if action == "short":
         px = float(entry_frame["low"].iloc[-1])
-        return px - tick_size(px), imp
+        return px - tick_size(px, sz_decimals), imp
     return fallback_entry, imp
 
 
@@ -613,12 +632,14 @@ def evaluate_asset(
     horizon: str = "",
     intervals: dict[str, str] | None = None,
     min_tide_bars: int = 0,
+    sz_decimals: int | None = None,
 ) -> Signal:
     """Run the three screens + Impulse censorship for one asset on one horizon.
 
     `tide` and `wave` must be OHLCV frames of *completed* bars (open/high/low/
     close/volume columns, oldest first); `entry_frame` is the optional third
-    screen's lower-timeframe bars.
+    screen's lower-timeframe bars. `sz_decimals` (from `meta`) caps the decimals
+    of the stop-entry price, per Hyperliquid's tick rules.
     """
     labels = intervals or DEFAULT_INTERVALS
     t_imp = str(impulse_color(tide["close"]).iloc[-1])
@@ -690,13 +711,13 @@ def evaluate_asset(
     entry = limit = stop = target = rr = None
     entry_impulse = None
     if candidate == "long":
-        entry, limit, stop, target = _long_levels(tide, wave, params)
-        entry, entry_impulse = _entry_screen_levels(candidate, entry_frame, entry)
+        entry, limit, stop, target = _long_levels(tide, wave, params, sz_decimals)
+        entry, entry_impulse = _entry_screen_levels(candidate, entry_frame, entry, sz_decimals)
         if entry > stop:
             rr = (target - entry) / (entry - stop)
     elif candidate == "short":
-        entry, limit, stop, target = _short_levels(tide, wave, params)
-        entry, entry_impulse = _entry_screen_levels(candidate, entry_frame, entry)
+        entry, limit, stop, target = _short_levels(tide, wave, params, sz_decimals)
+        entry, entry_impulse = _entry_screen_levels(candidate, entry_frame, entry, sz_decimals)
         if stop > entry:
             rr = (entry - target) / (stop - entry)
 
