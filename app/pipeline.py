@@ -319,25 +319,43 @@ def _position_frames(
     return tide, wave
 
 
+def stop_memory_key(asset: str, side: str, entry: float) -> str:
+    """One open position, for the stop memory: a new entry price is a new position."""
+    return f"{asset}|{side}|{float(entry)!r}"
+
+
+def stop_memory(positions: list[dict[str, Any]]) -> dict[str, float]:
+    """The last suggested stop of every position just assessed, to store in the
+    snapshot. Positions no longer held drop out, so their memory resets."""
+    return {
+        stop_memory_key(p["asset"], p["side"], p["entry"]): p["suggested_stop"] for p in positions
+    }
+
+
 def build_positions(
     client: MarketDataProvider,
     horizon: HorizonConfig,
     open_positions: list[OpenPosition],
     frames: dict[str, tuple[pd.DataFrame, pd.DataFrame]],
     now_ms: int,
+    previous_stops: Mapping[str, float] | None = None,
 ) -> list[dict[str, Any]]:
     """Elder exit verdict per open position, reusing scan frames where available.
 
     A held coin outside the watchlist (so not already refreshed) gets its candles
     fetched on demand. Coins too new to evaluate are skipped silently.
+    `previous_stops` (the previous snapshot's stop memory) keeps each suggested
+    stop from moving back against its trade (Elder, p.224).
     """
+    memory = previous_stops or {}
     out: list[dict[str, Any]] = []
     for pos in open_positions:
         tw = frames.get(pos.asset) or _position_frames(client, horizon, pos.asset, now_ms)
         if tw is None:
             continue
         tide, wave = tw
-        verdict = asdict(assess_position(pos, tide, wave, horizon.params))
+        previous = memory.get(stop_memory_key(pos.asset, pos.side, pos.entry))
+        verdict = asdict(assess_position(pos, tide, wave, horizon.params, previous))
         verdict["open_risk"] = position_open_risk(verdict)
         out.append(verdict)
     return out
@@ -491,8 +509,12 @@ def build_snapshot(
     cfg: Config,
     client: MarketDataProvider,
     on_progress: Callable[[str, str], None] | None = None,
+    previous: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Full refresh of every horizon for the watchlist -> dashboard snapshot dict."""
+    """Full refresh of every horizon for the watchlist -> dashboard snapshot dict.
+
+    `previous` is the snapshot on disk, if any: its stop memory keeps the open
+    positions' suggested stops from moving back."""
     now_ms = int(time.time() * 1000)
     coins = expand_watchlist(cfg.scanner.watchlist, client)
     funding = fetch_funding_rates(coins, client)
@@ -515,7 +537,14 @@ def build_snapshot(
             position_frames = held_frames
 
     positions_horizon = cfg.scanner.horizon(cfg.scanner.positions_horizon)
-    positions = build_positions(client, positions_horizon, open_positions, position_frames, now_ms)
+    positions = build_positions(
+        client,
+        positions_horizon,
+        open_positions,
+        position_frames,
+        now_ms,
+        (previous or {}).get("stop_memory"),
+    )
     guard, risks = _risk_summary(cfg, positions)
 
     snapshot: dict[str, Any] = {
@@ -526,6 +555,7 @@ def build_snapshot(
         "guard": asdict(guard),
         **risks,
         "positions": positions,
+        "stop_memory": stop_memory(positions),
         "positions_horizon": cfg.scanner.positions_horizon,
         "position_address": mask_address(cfg.positions.address) if cfg.positions.address else None,
         "horizons": {
@@ -592,9 +622,12 @@ def refresh_horizon(
     )
 
     if name == cfg.scanner.positions_horizon:
-        positions = build_positions(client, horizon, open_positions, held_frames, now_ms)
+        positions = build_positions(
+            client, horizon, open_positions, held_frames, now_ms, previous.get("stop_memory")
+        )
         guard, risks = _risk_summary(cfg, positions)
         snapshot["positions"] = positions
+        snapshot["stop_memory"] = stop_memory(positions)
         snapshot["guard"] = asdict(guard)
         snapshot.update(risks)
         blocked = guard.blocked

@@ -197,6 +197,24 @@ def test_pnl_sign_by_side():
     assert short.return_pct_elder == pytest.approx(1.0 - 159.0 / 120.0)
 
 
+@pytest.mark.parametrize("side", ["long", "short"])
+def test_suggested_stop_never_moves_against_the_trade(side):
+    # Elder (p.224): "Move your stop only in the direction of your trade". Given
+    # the last suggestion, a new one may tighten (long: up, short: down) but never
+    # give the trade "more room".
+    daily = make_ohlcv([100.0 + i for i in range(60)])
+    weekly = WEEKLY_UP if side == "long" else WEEKLY_DOWN
+    pos = OpenPosition("BTC", side, entry=150.0, size=1.0)
+    fresh = assess_position(pos, weekly, daily).suggested_stop
+    tighter = fresh + 3.0 if side == "long" else fresh - 3.0
+    looser = fresh - 3.0 if side == "long" else fresh + 3.0
+
+    held = assess_position(pos, weekly, daily, previous_stop=tighter)
+    assert held.suggested_stop == tighter  # the new level would move it back
+    assert any(f"{tighter:.6g}" in r for r in held.reasons) or held.verdict != "hold"
+    assert assess_position(pos, weekly, daily, previous_stop=looser).suggested_stop == fresh
+
+
 def test_safezone_stop_ratchets_to_breakeven_in_profit():
     daily = make_ohlcv([100.0 + i for i in range(60)])  # recent lows ~156
     # Entry just under the current price but ABOVE the SafeZone level, so the

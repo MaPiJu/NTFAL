@@ -18,7 +18,8 @@ out?" — using only Elder's own exit tools, no new indicators:
   exactly the targets the entry logic projects.
 - **Trailing stop (SafeZone).** Suggest tightening the protective stop behind the
   recent wave extreme by the average adverse noise, ratcheted to at least
-  break-even once the trade is in profit. Never widen risk.
+  break-even once the trade is in profit. Never widen risk: given the last
+  suggestion for the same position, a new one only moves in the trade's direction.
 
 Both screens come from the horizon configured as `positions_horizon` — a held
 position is strategic, so it is judged on the same chain that would have entered it.
@@ -187,6 +188,7 @@ def assess_position(
     tide: pd.DataFrame,
     wave: pd.DataFrame,
     params: StrategyParams = DEFAULT_PARAMS,
+    previous_stop: float | None = None,
 ) -> TradeManagement:
     """Elder exit verdict for one open position from completed tide + wave bars.
 
@@ -195,6 +197,10 @@ def assess_position(
     on those *completed* bars — the "Elder" view, using the last wave close. The
     result also carries a "live" price and PnL from the exchange (mark price /
     `unrealizedPnl`) so the displayed numbers match Hyperliquid in real time.
+
+    `previous_stop` is the last stop suggested for this same position: the new
+    suggestion never moves back past it (Elder, p.224: "move your stop only in
+    the direction of your trade").
     """
     t_imp = str(impulse_color(tide["close"]).iloc[-1])
     w_imp = str(impulse_color(wave["close"]).iloc[-1])
@@ -218,6 +224,9 @@ def assess_position(
     target = _profit_target(pos, tide, params)
     target_reached = close_price >= target if pos.side == "long" else close_price <= target
     suggested_stop = safezone_stop(pos, wave, in_profit=in_profit, params=params)
+    if previous_stop is not None:
+        pick = max if pos.side == "long" else min
+        suggested_stop = pick(suggested_stop, previous_stop)
 
     favorable_trend: Trend = "up" if pos.side == "long" else "down"
     favorable_imp = "green" if pos.side == "long" else "red"

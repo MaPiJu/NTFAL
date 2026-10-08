@@ -21,6 +21,7 @@ from app.pipeline import (
     position_open_risk,
     refresh_horizon,
     size_warnings,
+    stop_memory_key,
 )
 from config import (
     Config,
@@ -457,6 +458,68 @@ def test_pipeline_passes_sz_decimals_to_the_strategy(tmp_path, btc_fixtures, mon
     build_snapshot(make_config(tmp_path), make_client(btc_fixtures, tmp_path))
 
     assert seen == {"BTC": 5}
+
+
+def _held_btc(tmp_path, btc_fixtures, entry="50000.0"):
+    addr = "0x" + "ab" * 20
+    state = make_clearinghouse_state([{"coin": "BTC", "szi": "0.5", "entryPx": entry}])
+    return addr, make_client(btc_fixtures, tmp_path, clearinghouse_states={addr: state})
+
+
+def test_a_suggested_stop_never_moves_back_across_refreshes(tmp_path, btc_fixtures):
+    # Elder (p.224): "Move your stop only in the direction of your trade". The
+    # snapshot remembers the last suggestion per position (asset, side, entry);
+    # both a full refresh and a single-horizon refresh read it back.
+    addr, client = _held_btc(tmp_path, btc_fixtures)
+    cfg = make_config(tmp_path, address=addr)
+    first = build_snapshot(cfg, client)
+    (pos,) = first["positions"]
+    fresh = pos["suggested_stop"]
+    key = stop_memory_key("BTC", "long", 50000.0)
+    assert first["stop_memory"] == {key: fresh}
+
+    # A previous, tighter suggestion holds: the new one would lower the stop.
+    previous = first | {"stop_memory": {key: fresh + 1_000.0}}
+    full = build_snapshot(cfg, client, previous=previous)
+    assert full["positions"][0]["suggested_stop"] == fresh + 1_000.0
+    assert full["positions"][0]["open_risk"] == max(0.0, 50000.0 - (fresh + 1_000.0)) * 0.5
+    partial = refresh_horizon(cfg, client, "swing", previous)
+    assert partial["positions"][0]["suggested_stop"] == fresh + 1_000.0
+    assert partial["stop_memory"] == {key: fresh + 1_000.0}
+
+    # A looser previous suggestion doesn't hold the stop back.
+    looser = first | {"stop_memory": {key: fresh - 1_000.0}}
+    assert build_snapshot(cfg, client, previous=looser)["positions"][0]["suggested_stop"] == fresh
+
+
+def test_stop_memory_resets_when_the_position_changes(tmp_path, btc_fixtures):
+    # Same coin and side, another entry price: a new position, a fresh stop.
+    addr, client = _held_btc(tmp_path, btc_fixtures, entry="51000.0")
+    cfg = make_config(tmp_path, address=addr)
+    old_key = stop_memory_key("BTC", "long", 50000.0)
+    snapshot = build_snapshot(cfg, client, previous={"stop_memory": {old_key: 1e9}})
+
+    (pos,) = snapshot["positions"]
+    assert pos["suggested_stop"] < 1e9
+    assert snapshot["stop_memory"] == {
+        stop_memory_key("BTC", "long", 51000.0): pos["suggested_stop"]
+    }
+
+
+def test_cli_refresh_reads_the_previous_snapshot_on_both_paths(tmp_path, btc_fixtures, monkeypatch):
+    import run
+
+    addr, client = _held_btc(tmp_path, btc_fixtures)
+    cfg = make_config(tmp_path, address=addr)
+    monkeypatch.setattr(run, "HyperliquidClient", lambda cache_dir: client)
+    monkeypatch.setattr(client, "close", lambda: None)  # reused across refreshes
+    first = run.do_refresh(cfg)
+    key = stop_memory_key("BTC", "long", 50000.0)
+    tighter = first["stop_memory"][key] + 1_000.0
+    run.write_snapshot(cfg, first | {"stop_memory": {key: tighter}})
+
+    assert run.do_refresh(cfg)["positions"][0]["suggested_stop"] == tighter  # full
+    assert run.do_refresh(cfg, "swing")["positions"][0]["suggested_stop"] == tighter  # one
 
 
 def test_two_percent_rule_sizes_on_equity_at_month_start(tmp_path, long_setup_fixtures):
