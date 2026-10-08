@@ -81,11 +81,11 @@ penetration_lookback_bars = 35
 force_index_extreme_lookback_bars = 25
 channel_lookback_bars = 26
 # Elder fits the channel (around the slow EMA26) so it contains ~95% of the last
-# `channel_lookback_bars` tide bars (p.183); used as the fallback profit target.
+# `channel_lookback_bars` tide bars (p.167); used as the fallback profit target.
 channel_containment = 0.95
 min_reward_risk = 2.0
 divergence_lookback = 60
-# Elder/Lovvorn (p.104): only flag a divergence when its two extremes are this
+# Elder/Lovvorn (p.88): only flag a divergence when its two extremes are this
 # many bars apart (most tradable at 20-40; the closer to 20 the better).
 divergence_min_separation = 20
 divergence_max_separation = 40

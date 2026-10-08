@@ -22,11 +22,11 @@ class StrategyParams:
     # of wave bars on the canonical daily wave.
     force_index_extreme_lookback_bars: int = 25
     channel_lookback_bars: int = 26
-    # Elder fits the channel so it contains ~95% of recent bars (p.183).
+    # Elder fits the channel so it contains ~95% of recent bars (p.167).
     channel_containment: float = 0.95
     min_reward_risk: float = 2.0
     divergence_lookback: int = 60
-    # Elder/Lovvorn (p.104): the most tradable divergences span 20-40 bars.
+    # Elder/Lovvorn (p.88): the most tradable divergences span 20-40 bars.
     divergence_min_separation: int = 20
     divergence_max_separation: int = 40
     rr_excellent: float = 3.0

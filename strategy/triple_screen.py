@@ -154,7 +154,7 @@ def force_index_new_extreme(
 
     A buy signal is valid only while the 2-bar Force Index dips below zero "as
     long as it doesn't fall to a new multi-week low" — a fresh low means the
-    decline is accelerating, not a pullback to buy (p.131). Mirror image for
+    decline is accelerating, not a pullback to buy (p.115). Mirror image for
     shorts and new highs. Returns True when the latest FI(2) breaks the prior
     `lookback` bars' extreme, i.e. the signal should be skipped.
     """
@@ -312,7 +312,7 @@ def channel(
     span: int = EMA_SLOW,
 ) -> tuple[float, float]:
     """(upper, lower) tide channel around the slow EMA26 — Elder's percentage
-    envelope (p.183), used as a fallback target when price already trades beyond
+    envelope (p.167), used as a fallback target when price already trades beyond
     the tide value zone.
 
     Elder draws the channel parallel to the *slower* EMA and widens it until it
@@ -332,7 +332,7 @@ def channel(
     # Relative excursion of each bar's high above / low below the EMA (0 when the
     # bar doesn't poke out). Each edge leaves half of the (1 - containment) budget
     # outside, so the channel as a whole contains ~containment of the bars —
-    # Elder's "contains ~95% of bars" fit (p.183).
+    # Elder's "contains ~95% of bars" fit (p.167).
     up = ((tide["high"] - e) / e).clip(lower=0).iloc[window]
     down = ((e - tide["low"]) / e).clip(lower=0).iloc[window]
     last = float(e.iloc[-1])
@@ -410,8 +410,8 @@ def _divergence_for_indicator(
     Bullish: latest price low undercuts a prior low while the indicator makes a
     higher low. Bearish: latest price high exceeds a prior high while the
     indicator makes a lower high. Two Elder validity gates apply: the indicator
-    must cross its zero line between the two extremes (p.103), and the extremes
-    must sit `min_separation`-`max_separation` bars apart (p.104). Intentionally
+    must cross its zero line between the two extremes (p.87), and the extremes
+    must sit `min_separation`-`max_separation` bars apart (p.88). Intentionally
     conservative and warning-only; it never creates trades by itself.
     """
     df = pd.DataFrame({"close": close, "indicator": indicator}).dropna().tail(lookback)
@@ -429,8 +429,8 @@ def _divergence_for_indicator(
     if prev_low and recent_low:
         pi, pc = prev_low
         ri, rc = recent_low
-        # Elder (p.103): the indicator MUST cross back above its zero line between
-        # the two bottoms ("an absolute must"); and (p.104) the bottoms must be
+        # Elder (p.87): the indicator MUST cross back above its zero line between
+        # the two bottoms ("an absolute must"); and (p.88) the bottoms must be
         # 20-40 bars apart to be tradable. Either gate failing => no divergence.
         # A cross needs the first bottom below zero; otherwise any positive value
         # in the window (even the first bottom itself) would pass vacuously.

@@ -202,7 +202,7 @@ def test_value_zone_veto_is_directional_long_below_value():
 
 def test_divergence_requires_zero_line_crossover():
     # Two successively lower price lows with a shallower second indicator low is
-    # the divergence *shape* — but Elder (p.103) requires the indicator to cross
+    # the divergence *shape* — but Elder (p.87) requires the indicator to cross
     # back above its zero line between the two bottoms ("an absolute must").
     close = pd.Series(
         [110, 108, 106, 104, 102, 100, 102, 104, 106, 108,
@@ -252,7 +252,7 @@ def test_divergence_needs_a_real_zero_line_cross_not_an_endpoint():
 
 def test_divergence_requires_minimum_separation():
     # Same valid bullish shape (crosses zero between the two lows), but the lows are
-    # only 10 bars apart — below Elder/Lovvorn's 20-bar floor (p.104), so it is not
+    # only 10 bars apart — below Elder/Lovvorn's 20-bar floor (p.88), so it is not
     # flagged. Lower the floor and the very same shape is flagged.
     close = pd.Series(
         [110, 108, 106, 104, 102, 100, 102, 104, 106, 108,
@@ -372,7 +372,7 @@ def test_channel_backbone_is_slow_ema26():
 
 
 def test_channel_widens_with_containment():
-    # Higher containment -> wider channel (Elder fits ~95%, p.183). Up-excursions
+    # Higher containment -> wider channel (Elder fits ~95%, p.167). Up-excursions
     # spike every 5th bar, so the 95th percentile sits well above the median.
     highs = [100.0 + (10.0 if i % 5 == 0 else 1.0) for i in range(40)]
     weekly = make_ohlcv([100.0] * 40, lows=[100.0] * 40, highs=highs, freq="W")
