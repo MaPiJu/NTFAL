@@ -421,7 +421,8 @@ function renderAll() {
   const block = currentBlock();
 
   document.getElementById("meta").textContent =
-    `equity $${fmt(snapshot.equity, 8)} · risk/trade ${(snapshot.risk_pct * 100).toFixed(1)}% · ` +
+    `equity $${fmt(snapshot.equity, 8)} · risk/trade ${(snapshot.risk_pct * 100).toFixed(1)}% ` +
+    `of month-start equity $${fmt(snapshot.equity_at_month_start ?? snapshot.equity, 8)} · ` +
     `open risk $${fmt(snapshot.total_open_trade_risk ?? snapshot.guard.total_at_risk, 8)} · ` +
     `updated ${ago(snapshot.generated_at)}`;
 
@@ -438,7 +439,7 @@ function renderAll() {
   const stacking = document.getElementById("stacking-note");
   stacking.textContent =
     `Every horizon sizes its suggestion as a standalone trade risking ` +
-    `${(snapshot.risk_pct * 100).toFixed(1)}% of equity. Taking setups from several ` +
+    `${(snapshot.risk_pct * 100).toFixed(1)}% of month-start equity. Taking setups from several ` +
     `horizons at once multiplies your risk — the 6% rule caps total open risk, not ` +
     `the number of simultaneous suggestions.`;
   stacking.classList.remove("hidden");

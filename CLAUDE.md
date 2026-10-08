@@ -141,8 +141,9 @@ They never change an action — they tell the operator how much to trust it:
   indicator and an intraday signal read off them is noise.
 
 ## Risk module (the two pillars)
-- **2% Rule:** `max_risk_per_trade = equity * risk_pct` with `risk_pct` default **1%**,
-  hard cap **2%**. Position size = `floor(max_risk_per_trade / abs(entry - stop))`
+- **2% Rule:** `max_risk_per_trade = equity_at_month_start * risk_pct` with `risk_pct`
+  default **1%**, hard cap **2%** — Elder sets the limit once a month, from the equity on
+  the first day of the month (p.204). Position size = `floor(max_risk_per_trade / abs(entry - stop))`
   ("Iron Triangle"). Never silently exceed the cap.
 - **6% Rule:** if `month_realized_losses + sum(open_trade_risk) >= 0.06 * equity_at_month_start`,
   block all new-entry suggestions for the rest of the month (flag clearly in the UI). The

@@ -73,7 +73,8 @@ Their common names differ from the Hyperliquid tickers:
 - **Data-quality flags:** a signal says when its own *inputs* are weak — a tide series too
   short for a converged EMA26, or a near-frozen market (a tradfi perp over the weekend
   still prints bars on ~5–10% of normal volume). Flags never change an action.
-- **Risk:** 2% Rule (Iron Triangle sizing, default 1% risk per trade, hard cap 2%) and
+- **Risk:** 2% Rule (Iron Triangle sizing, default 1% risk per trade, hard cap 2%, on the
+  equity of the first day of the month) and
   the 6% monthly guard that blocks all new entries once monthly losses + open risk reach
   6% of the month-start equity. When a public address is configured, open risk is
   calculated automatically from each held position's current Elder stop; the manual
@@ -219,10 +220,12 @@ Edit `config.toml`:
   the low-volume data-quality thresholds. **Every lookback is a count of bars** on the
   relevant screen, so the same numbers carry across horizons. Any key can be overridden
   for one horizon with a `[scanner.horizons.strategy]` sub-block.
-- `risk.equity` — account equity used for sizing
-- `risk.risk_pct` — risk per trade (default `0.01` = 1%; hard-capped at 2%)
+- `risk.equity` — current account equity (shown in the header)
+- `risk.risk_pct` — risk per trade (default `0.01` = 1%; hard-capped at 2%), as a fraction
+  of `risk.equity_at_month_start`: Elder sets the 2% limit once a month, from the equity on
+  the first day of the month
 - `risk.equity_at_month_start`, `risk.month_realized_losses`, `risk.open_trade_risk` —
-  bookkeeping inputs for the 6% Rule. `open_trade_risk` is an optional manual add-on for
+  bookkeeping inputs for the 2% and 6% Rules. `open_trade_risk` is an optional manual add-on for
   trades not visible from the configured public address; visible positions are risked
   automatically from their Elder trailing stop.
 - `positions.address` — **public** wallet address (0x…) used to read your open positions

@@ -107,8 +107,10 @@ def print_horizon_table(name: str, block: dict[str, Any]) -> None:
 def print_signals_tables(snapshot: dict[str, Any]) -> None:
     guard = snapshot["guard"]
     print(f"\nElder Triple Screen — generated {snapshot['generated_at']}")
+    month_start = snapshot.get("equity_at_month_start", snapshot["equity"])
     print(
-        f"equity ${snapshot['equity']:,.2f} · risk/trade {snapshot['risk_pct']:.1%} "
+        f"equity ${snapshot['equity']:,.2f} · risk/trade {snapshot['risk_pct']:.1%} of "
+        f"month-start equity ${month_start:,.2f} "
         f"· open risk ${snapshot.get('total_open_trade_risk', 0.0):,.2f}"
     )
     if guard["blocked"]:

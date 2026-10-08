@@ -6,6 +6,7 @@ import json
 from dataclasses import replace
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
@@ -26,6 +27,7 @@ from config import (
     ScannerConfig,
 )
 from journal import append_journal_entry
+from risk.sizing import position_size
 from strategy.params import StrategyParams
 from tests.conftest import make_clearinghouse_state, make_client
 
@@ -421,6 +423,21 @@ def test_pipeline_passes_sz_decimals_to_the_strategy(tmp_path, btc_fixtures, mon
     build_snapshot(make_config(tmp_path), make_client(btc_fixtures, tmp_path))
 
     assert seen == {"BTC": 5}
+
+
+def test_two_percent_rule_sizes_on_equity_at_month_start(tmp_path, long_setup_fixtures):
+    # Elder (p.204): "Measure your account equity on the first day of each month" —
+    # the 2% limit is set from that figure for the whole month, not from today's
+    # equity, so a winning (or losing) streak doesn't resize trades mid-month.
+    cfg = make_config(tmp_path, equity=12_000.0, equity_at_month_start=8_000.0)
+    snapshot = build_snapshot(cfg, make_client(long_setup_fixtures, tmp_path))
+
+    (sig,) = swing(snapshot)["signals"]
+    assert sig["action"] == "long"
+    ps = sig["position_size"]
+    assert ps["risk_budget"] == pytest.approx(80.0)  # 1% of 8,000, not of 12,000
+    expected = position_size(8_000.0, sig["entry"], sig["stop"], 0.01, sz_decimals=5)
+    assert ps["size"] == expected.size
 
 
 def test_guard_uses_automatic_open_position_risk(tmp_path, btc_fixtures):

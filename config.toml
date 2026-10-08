@@ -129,18 +129,21 @@ low_volume_bars = 6
 low_volume_baseline_bars = 1000
 
 [risk]
-# Account equity in USD (used by the 2% Iron Triangle sizing).
+# Current account equity in USD (shown in the dashboard header).
 equity = 10000.0
-# Risk per trade as a fraction of equity. Default 1%, HARD CAP 2% — values
-# above 0.02 are clamped, never silently exceeded.
+# Risk per trade as a fraction of the MONTH-START equity (equity_at_month_start
+# below — Elder p.204: "Measure your account equity on the first day of each
+# month"). Default 1%, HARD CAP 2% — values above 0.02 are clamped, never
+# silently exceeded.
 #
 # NOTE: each horizon sizes its suggestion as a standalone trade risking
 # `risk_pct`. The same asset may show a swing long AND a micro short; taking
 # several at once multiplies your risk. The 6% rule below caps total OPEN risk,
 # not the number of simultaneous suggestions.
 risk_pct = 0.01
-# 6% Rule bookkeeping:
-#   equity_at_month_start: equity on the 1st of the current month
+# 2% and 6% Rule bookkeeping:
+#   equity_at_month_start: equity on the 1st of the current month — the base of
+#                          both the 2% sizing and the 6% monthly limit
 #   month_realized_losses: realized losses so far this month (positive number)
 #   open_trade_risk:       optional manual extra risk for trades not visible from
 #                          the configured Hyperliquid address. Visible positions

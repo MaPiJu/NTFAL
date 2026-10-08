@@ -139,30 +139,36 @@ INTERVAL_MS = {
 
 def synthetic_candles(
     interval: str,
-    count: int,
+    count: int = 0,
     start: float = 100.0,
     step: float = 1.0,
     end_ms: int | None = None,
     volume: float = 1000.0,
+    closes: list[float] | None = None,
 ) -> list[dict]:
     """candleSnapshot-shaped bars for an arbitrary interval, oldest first.
 
     Lets a test build a whole timeframe chain (e.g. 4h/1h/15m) without another
     recorded fixture file — the strategy only cares about the shape of the series.
+    A straight line of `count` bars by default; pass `closes` to replay a crafted
+    series (bars then match `make_ohlcv`: open = previous close, ±0.5 wicks).
 
     The series ends just before "now" by default: an intraday refresh asks for
     `now - lookback * bar`, so bars anchored to a fixed past date would fall
     outside the window and the asset would look unlisted.
     """
     bar = INTERVAL_MS[interval]
+    if closes is None:
+        closes = [start + step * i for i in range(count)]
+    count = len(closes)
     if end_ms is None:
         # Last bar fully in the past, so completed_bars() keeps it.
         end_ms = (int(time.time() * 1000) // bar) * bar - 2 * bar
     out = []
     for i in range(count):
         t = end_ms - (count - 1 - i) * bar
-        close = start + step * i
-        prev = close - step
+        close = closes[i]
+        prev = closes[i - 1] if i else close - step
         out.append(
             {
                 "t": t,
@@ -193,4 +199,20 @@ def chain_fixtures(btc_fixtures) -> dict[tuple[str, str], list[dict]]:
         ("BTC", "4h"): synthetic_candles("4h", 60, start=90_000.0, step=50.0),
         ("BTC", "1h"): synthetic_candles("1h", 80, start=94_000.0, step=10.0),
         ("BTC", "15m"): synthetic_candles("15m", 80, start=95_000.0, step=2.0),
+    }
+
+
+@pytest.fixture
+def long_setup_fixtures() -> dict[tuple[str, str], list[dict]]:
+    """A clean swing long for BTC — a weekly uptrend and a healthy daily pullback
+    (the `DAILY_LONG` shape of test_triple_screen.py) — replayed through the pipeline."""
+    daily = (
+        [100.0 + i for i in range(34)]
+        + [130.0, 128.0]
+        + [128.0 + i for i in range(1, 13)]
+        + [139.0]
+    )
+    return {
+        ("BTC", "1w"): synthetic_candles("1w", closes=[100.0 + 2 * i for i in range(40)]),
+        ("BTC", "1d"): synthetic_candles("1d", closes=daily),
     }

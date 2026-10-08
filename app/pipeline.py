@@ -368,9 +368,11 @@ def _finalize_block(
         # still sized and merely flagged, per the spec: flag, don't hide.)
         tradable = (row["reward_risk"] or 0.0) > 0
         if row["action"] != "stand_aside" and tradable and not guard_blocked:
+            # Elder's 2% Rule (p.204) is set once a month, from the equity on the
+            # first day of the month — not from today's equity.
             row["position_size"] = asdict(
                 position_size(
-                    cfg.risk.equity,
+                    cfg.risk.equity_at_month_start,
                     row["entry"],
                     row["stop"],
                     cfg.risk.risk_pct,
@@ -419,6 +421,7 @@ def build_snapshot(
     snapshot: dict[str, Any] = {
         "generated_at": datetime.now(tz=UTC).isoformat(timespec="seconds"),
         "equity": cfg.risk.equity,
+        "equity_at_month_start": cfg.risk.equity_at_month_start,
         "risk_pct": cfg.risk.risk_pct,
         "guard": asdict(guard),
         **risks,
@@ -498,6 +501,7 @@ def refresh_horizon(
     snapshot["horizons"][name] = _finalize_block(block, cfg, coins, blocked)
     snapshot["generated_at"] = datetime.now(tz=UTC).isoformat(timespec="seconds")
     snapshot["equity"] = cfg.risk.equity
+    snapshot["equity_at_month_start"] = cfg.risk.equity_at_month_start
     snapshot["risk_pct"] = cfg.risk.risk_pct
     snapshot["positions_horizon"] = cfg.scanner.positions_horizon
     snapshot["horizon_order"] = [h.name for h in cfg.scanner.horizons]
