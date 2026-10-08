@@ -48,8 +48,11 @@ Their common names differ from the Hyperliquid tickers:
 - **First screen (tide):** strategic bias from the slope of the tide EMA13, with tiny
   slopes treated as **flat/no-trend** so ranges do not become false signals.
 - **Second screen (wave):** the 2-EMA Force Index looks for pullbacks *against* the wave
-  but *with* the tide, and the latest completed wave close must be in or near the wave
-  EMA13-EMA26 **value zone** so the scanner does not chase extended prices.
+  but *with* the tide. Elder never buys above the upper channel line nor sells short
+  below the lower one, so a long is refused when the latest completed wave close is above
+  the upper line of the **wave channel**, a short when it is below the lower line — the
+  scanner does not chase. Where the close sits versus the EMA13-EMA26 **value zone** is
+  shown as context.
 - **Third screen (entry):** buy-stop 1 tick above the prior bar's high (longs) /
   sell-stop 1 tick below the prior bar's low (shorts), timed off the latest completed
   bar of the entry timeframe, plus an alternative limit at the projected EMA13 offset by
@@ -209,8 +212,8 @@ Edit `config.toml`:
   `refresh_seconds`, and `min_tide_bars` (below which the tide is flagged as
   not-yet-converged). Any Hyperliquid candle interval works: `1m`…`1w`.
 - `[strategy]` — tune the Elder thresholds and ranking weights without editing code:
-  flat tide-slope cutoff, EMA-penetration/channel/divergence lookbacks, value-zone
-  proximity, SafeZone lookback/factors, theoretical stop-order expiry, minimum R:R,
+  flat tide-slope cutoff, EMA-penetration/channel/divergence lookbacks, SafeZone
+  lookback/factors, theoretical stop-order expiry, minimum R:R,
   "excellent" R:R, tide-strength scale, Force Index pullback scale, score weights, and
   the low-volume data-quality thresholds. **Every lookback is a count of bars** on the
   relevant screen, so the same numbers carry across horizons. Any key can be overridden

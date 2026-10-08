@@ -68,7 +68,7 @@ class Signal:
     market_regime: str  # trending / flat, derived from the tide EMA13 slope filter
     entry_impulse: str | None  # 3rd-screen Impulse — context for the operator, never a veto
     divergences: list[str]  # Elder MACD-Histogram / Force Index divergence warnings
-    value_zone_status: str  # in_value / near_value / extended
+    value_zone_status: str  # in_value / near_value / extended (beyond the wave channel)
     entry_order_plan: str | None  # how to roll/expire the theoretical stop-entry
     # Second entry technique: stop & reward:risk for the limit (pullback) fill,
     # which differ from the breakout entry's. None when there is no limit entry.
@@ -167,31 +167,29 @@ def force_index_new_extreme(
     return now < float(prior.min()) if side == "long" else now > float(prior.max())
 
 
-def value_zone_status(wave: pd.DataFrame, max_distance_pct: float = 0.03) -> str:
+def value_zone_status(wave: pd.DataFrame, params: StrategyParams = DEFAULT_PARAMS) -> str:
     """Classify the last wave close versus Elder's wave EMA13-EMA26 value zone.
 
-    The Triple Screen should enter on pullbacks to value, not after price has
-    already run away. "Near" allows a small configurable overshoot so strong
-    trends are not rejected for being a few ticks outside the zone.
+    "in_value" inside the zone; "near_value" outside it but inside the wave
+    channel; "extended" beyond the wave channel line. Context for the operator
+    only — the chasing veto (`evaluate_asset`) reads the same channel line, but
+    only in the trade's direction.
     """
-    close = float(wave["close"].iloc[-1])
-    e13 = float(ema(wave["close"], EMA_FAST).iloc[-1])
-    e26 = float(ema(wave["close"], EMA_SLOW).iloc[-1])
-    low, high = sorted((e13, e26))
-    if low <= close <= high:
+    side = value_zone_extension(wave)
+    if side == "inside":
         return "in_value"
-    if close > high:
-        return "near_value" if (close - high) / high <= max_distance_pct else "extended"
-    return "near_value" if (low - close) / low <= max_distance_pct else "extended"
+    close = float(wave["close"].iloc[-1])
+    upper, lower = channel(wave, params)
+    beyond = close > upper if side == "above" else close < lower
+    return "extended" if beyond else "near_value"
 
 
 def value_zone_extension(wave: pd.DataFrame) -> Literal["above", "below", "inside"]:
     """Which side of the wave EMA13-EMA26 value zone the last close sits on.
 
-    Makes the "extended" veto directional. Elder only warns against *chasing* —
-    buying after price has run above value, or shorting after it has broken below
-    value. A pullback extended the *other* way (a long far below value, a short
-    far above) is a bargain, so it must not be vetoed by the value-zone filter.
+    Elder only warns against *chasing* — buying after price has run above value,
+    or shorting after it has broken below value. A pullback extended the *other*
+    way (a long far below value, a short far above) is a bargain.
     """
     close = float(wave["close"].iloc[-1])
     e13 = float(ema(wave["close"], EMA_FAST).iloc[-1])
@@ -307,18 +305,19 @@ def projected_ema(wave_close: pd.Series, span: int = EMA_FAST) -> float:
 
 
 def channel(
-    tide: pd.DataFrame,
+    bars: pd.DataFrame,
     params: StrategyParams = DEFAULT_PARAMS,
     span: int = EMA_SLOW,
 ) -> tuple[float, float]:
-    """(upper, lower) tide channel around the slow EMA26 — Elder's percentage
-    envelope (p.167), used as a fallback target when price already trades beyond
-    the tide value zone.
+    """(upper, lower) channel around the slow EMA26 — Elder's percentage envelope
+    (p.167). On the tide it is the fallback target when price already trades
+    beyond the tide value zone; on the wave it is the chasing veto (p.168: never
+    buy above the upper line, never sell short below the lower one).
 
     Elder draws the channel parallel to the *slower* EMA and widens it until it
     contains ~95% of recent bars. The bars left outside (1 - `containment`) are
     split between the two edges, so each half-width is the
-    `1 - (1 - containment) / 2` quantile of the **relative** excursion of tide
+    `1 - (1 - containment) / 2` quantile of the **relative** excursion of the
     highs above / lows below the EMA (penetration / EMA at that bar) over the
     lookback, projected onto the latest EMA.
 
@@ -327,14 +326,14 @@ def channel(
     even for a market that has since crashed — a deliberate 24/7 adaptation that
     fits the two sides independently rather than as one symmetric coefficient.
     """
-    e = ema(tide["close"], span)
+    e = ema(bars["close"], span)
     window = slice(-params.channel_lookback_bars, None)
     # Relative excursion of each bar's high above / low below the EMA (0 when the
     # bar doesn't poke out). Each edge leaves half of the (1 - containment) budget
     # outside, so the channel as a whole contains ~containment of the bars —
     # Elder's "contains ~95% of bars" fit (p.167).
-    up = ((tide["high"] - e) / e).clip(lower=0).iloc[window]
-    down = ((e - tide["low"]) / e).clip(lower=0).iloc[window]
+    up = ((bars["high"] - e) / e).clip(lower=0).iloc[window]
+    down = ((e - bars["low"]) / e).clip(lower=0).iloc[window]
     last = float(e.iloc[-1])
     q = 1.0 - (1.0 - params.channel_containment) / 2.0
     upper = last * (1.0 + (float(up.quantile(q)) if not up.empty else 0.0))
@@ -655,7 +654,7 @@ def evaluate_asset(
         min_separation=params.divergence_min_separation,
         max_separation=params.divergence_max_separation,
     )
-    vz_status = value_zone_status(wave, params.value_zone_max_distance_pct)
+    vz_status = value_zone_status(wave, params)
 
     candidate: Action = "stand_aside"
     if trend == "up":
@@ -691,21 +690,24 @@ def evaluate_asset(
     elif candidate == "short" and "green" in (t_imp, w_imp):
         candidate = "stand_aside"
         reason = f"short vetoed by Impulse (tide={t_imp}, wave={w_imp}: green forbids shorts)"
-    elif candidate in ("long", "short") and vz_status == "extended":
-        # The "extended" veto is directional (Elder only warns against *chasing*):
-        # veto a long only when price is extended ABOVE value, a short only when
-        # extended BELOW. A pullback the other way is a bargain — its falling-knife
+    elif candidate in ("long", "short"):
+        # Elder (p.168): "never buy above the upper channel line or sell short below
+        # the lower channel line" — on the wave, where the entry is decided. The veto
+        # is directional: a pullback the other way is a bargain, and its falling-knife
         # guard is the Force-Index new-extreme filter above, not this veto.
-        zone_side = value_zone_extension(wave)
-        chasing = (candidate == "long" and zone_side == "above") or (
-            candidate == "short" and zone_side == "below"
-        )
-        if chasing:
-            vetoed = candidate
+        upper, lower = channel(wave, params)
+        close = float(wave["close"].iloc[-1])
+        if candidate == "long" and close > upper:
             candidate = "stand_aside"
             reason = (
-                f"{vetoed} vetoed: the {labels['wave']} close is extended {zone_side} the "
-                f"EMA13-EMA26 value zone (chasing)"
+                f"long vetoed: the {labels['wave']} close {close:.6g} is above the upper "
+                f"{labels['wave']} channel line {upper:.6g} (chasing)"
+            )
+        elif candidate == "short" and close < lower:
+            candidate = "stand_aside"
+            reason = (
+                f"short vetoed: the {labels['wave']} close {close:.6g} is below the lower "
+                f"{labels['wave']} channel line {lower:.6g} (chasing)"
             )
 
     entry = limit = stop = target = rr = None

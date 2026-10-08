@@ -142,23 +142,88 @@ def test_limit_stop_anchors_below_a_deep_pullback_fill():
     assert safezone_stop_for_limit(daily, "long", shallow_limit) == pytest.approx(breakout_stop)
 
 
-def test_value_zone_filter_rejects_extended_long_above_value():
-    # Strong uptrend; the last bar dips (Force Index < 0) but price is still far
-    # ABOVE the EMA13-EMA26 value zone — Elder calls that chasing. An earlier,
-    # deeper dip keeps today's Force Index off a new multi-week low, so it is the
-    # *value-zone* veto (not the new-extreme filter) that stands us aside.
-    daily = make_ohlcv(
-        [100.0 + 2 * i for i in range(40)] + [166.0] + [168.0 + 2 * i for i in range(12)] + [186.0]
-    )
-    params = StrategyParams(value_zone_max_distance_pct=0.0)
+def _value_zone(wave: pd.DataFrame) -> tuple[float, float]:
+    e13 = float(ema(wave["close"], EMA_FAST).iloc[-1])
+    e26 = float(ema(wave["close"], EMA_SLOW).iloc[-1])
+    return min(e13, e26), max(e13, e26)
 
-    assert value_zone_status(daily, max_distance_pct=0.0) == "extended"
-    assert value_zone_extension(daily) == "above"
-    sig = evaluate_asset("BTC", WEEKLY_UP, daily, params=params)
 
+def _close_through_the_channel(side: str) -> pd.DataFrame:
+    """A gentle wave trend (0.05% a bar), a heavy-volume counter-move, then a
+    light-volume bar that closes beyond the wave channel. FI(2) still reads as a
+    pullback (long) / rally (short), but price has already run past the channel
+    line — while staying within 3% of value, where 1h/15m bars almost always sit."""
+    sign = 1.0 if side == "long" else -1.0
+    closes = [1000.0 + sign * 0.5 * i for i in range(60)]
+    last = closes[-1]
+    closes += [last - sign * 3.0, last + sign * 8.0]
+    return make_ohlcv(closes, volumes=[1000.0] * 60 + [20_000.0, 1000.0])
+
+
+def _stretched_inside_the_channel(side: str) -> pd.DataFrame:
+    """A steep wave trend whose last bar pulls back: the close is more than 3% from
+    the value zone, yet still inside the wave channel."""
+    sign = 1.0 if side == "long" else -1.0
+    base = [(100.0 if side == "long" else 400.0) + sign * 3.0 * i for i in range(40)]
+    swing = base[-1] - sign * 6.0  # an earlier, deeper counter-move
+    closes = base + [swing] + [swing + sign * 3.0 * (i + 1) for i in range(12)]
+    closes.append(closes[-1] - sign * 3.0)
+    return make_ohlcv(closes)
+
+
+def test_channel_veto_rejects_a_long_above_the_upper_wave_channel():
+    # Elder (p.168): "never buy above the upper channel line or sell short below the
+    # lower channel line". The second screen says buy (FI(2) < 0, not a new low,
+    # Impulse not red), but the wave close sits above the upper wave channel line.
+    daily = _close_through_the_channel("long")
+    upper, _lower = channel(daily)
+    close = float(daily["close"].iloc[-1])
+    _value_low, value_high = _value_zone(daily)
+    assert close > upper
+    assert (close - value_high) / value_high < 0.03  # a fixed 3% tolerance never saw it
+
+    sig = evaluate_asset("BTC", WEEKLY_UP, daily)
+
+    assert sig.force_index_2 < 0 and sig.wave_impulse != "red"
     assert sig.action == "stand_aside"
+    assert "upper" in sig.reason and "channel" in sig.reason and "chasing" in sig.reason
     assert sig.value_zone_status == "extended"
-    assert "value zone" in sig.reason and "chasing" in sig.reason
+    assert sig.entry is None
+
+
+def test_channel_veto_rejects_a_short_below_the_lower_wave_channel():
+    daily = _close_through_the_channel("short")
+    _upper, lower = channel(daily)
+    close = float(daily["close"].iloc[-1])
+    value_low, _value_high = _value_zone(daily)
+    assert close < lower
+    assert (value_low - close) / value_low < 0.03
+
+    sig = evaluate_asset("ETH", WEEKLY_DOWN, daily)
+
+    assert sig.force_index_2 > 0 and sig.wave_impulse != "green"
+    assert sig.action == "stand_aside"
+    assert "lower" in sig.reason and "channel" in sig.reason and "chasing" in sig.reason
+    assert sig.value_zone_status == "extended"
+
+
+@pytest.mark.parametrize(("side", "weekly"), [("long", WEEKLY_UP), ("short", WEEKLY_DOWN)])
+def test_a_stretch_beyond_value_inside_the_wave_channel_is_not_vetoed(side, weekly):
+    # The veto is the channel line, not a fixed distance from value: a close more
+    # than 3% beyond the value zone, but still inside the wave channel, is tradable.
+    daily = _stretched_inside_the_channel(side)
+    upper, lower = channel(daily)
+    close = float(daily["close"].iloc[-1])
+    value_low, value_high = _value_zone(daily)
+    if side == "long":
+        assert (close - value_high) / value_high > 0.03 and close <= upper
+    else:
+        assert (value_low - close) / value_low > 0.03 and close >= lower
+
+    sig = evaluate_asset("X", weekly, daily)
+
+    assert sig.action == side
+    assert sig.value_zone_status == "near_value"  # displayed, never a veto
 
 
 def test_force_index_new_multiweek_low_blocks_long():
@@ -189,15 +254,23 @@ def test_value_zone_veto_is_directional_long_below_value():
     closes = [100.0 + 1.0 * i for i in range(40)] + [119.0]
     closes += [119.0 + i for i in range(1, 9)] + [124.0]
     daily = make_ohlcv(closes)
-    params = StrategyParams(value_zone_max_distance_pct=0.0)
 
     assert value_zone_extension(daily) == "below"
-    assert value_zone_status(daily, max_distance_pct=0.0) == "extended"
-    sig = evaluate_asset("BTC", WEEKLY_UP, daily, params=params)
+    sig = evaluate_asset("BTC", WEEKLY_UP, daily)
 
     assert sig.action == "long"
     assert "pullback to buy" in sig.reason
     assert sig.entry is not None and sig.stop is not None
+
+
+def test_value_zone_status_reads_the_wave_channel():
+    # Display only: in the EMA13-EMA26 zone, near it (outside the zone but inside
+    # the wave channel), or extended beyond the channel line.
+    flat = make_ohlcv([100.0] * 60)
+    assert value_zone_status(flat) == "in_value"
+    assert value_zone_status(_stretched_inside_the_channel("long")) == "near_value"
+    assert value_zone_status(_close_through_the_channel("long")) == "extended"
+    assert value_zone_status(_close_through_the_channel("short")) == "extended"
 
 
 def test_divergence_requires_zero_line_crossover():

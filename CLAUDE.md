@@ -76,11 +76,14 @@ data, not code — adding or retuning one is a config edit.
 FI(2) is **not** also printing a *new multi-period low* (longs) / *high* (shorts) — a
 fresh extreme means the move is accelerating, not a pullback, so stand aside.
 
-**Value-zone filter is directional (no chasing):** enter on a pullback *to* value, never
-chasing. A long is vetoed only when the wave close is extended **above** the EMA13–EMA26
-value zone; a short only when extended **below** it. A pullback extended the *other* way is
-an Elder bargain (its falling-knife guard is the new-extreme caveat above), so it is **not**
-vetoed by the value zone.
+**Chasing veto is the wave channel, and directional (Elder, p.168):** "never buy above the
+upper channel line or sell short below the lower channel line". A long is vetoed only when
+the wave close is **above** the upper line of the **wave** channel (the same EMA26 envelope
+as the tide target, fit on wave bars); a short only when it is **below** the lower line. A
+pullback extended the *other* way is an Elder bargain (its falling-knife guard is the
+new-extreme caveat above), so it is **not** vetoed. The wave close's position versus the
+EMA13–EMA26 value zone (`in_value` / `near_value` / `extended` beyond the channel) is shown
+as context only.
 
 **Impulse censorship overlay (applied last):** if the **tide** or the **wave** Impulse is
 **red**, longs are forbidden; if either is **green**, shorts are forbidden. The Impulse

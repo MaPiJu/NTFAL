@@ -32,7 +32,6 @@ class StrategyParams:
     rr_excellent: float = 3.0
     strong_tide_slope: float = 0.03
     fi_scale_lookback: int = 20
-    value_zone_max_distance_pct: float = 0.03
     safezone_lookback_bars: int = 20
     # Elder (p.220): shorts need wider stops (>=3) than longs (>=2), since
     # shorting near the highs is noisier and downtrends move faster.
