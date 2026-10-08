@@ -8,7 +8,13 @@ from dataclasses import replace
 from fastapi.testclient import TestClient
 
 from app.main import app
-from app.pipeline import build_snapshot, live_price_alert, load_snapshot, refresh_horizon
+from app.pipeline import (
+    build_snapshot,
+    live_price_alert,
+    load_snapshot,
+    position_open_risk,
+    refresh_horizon,
+)
 from config import (
     Config,
     HorizonConfig,
@@ -282,7 +288,7 @@ def test_open_position_gets_management_verdict(tmp_path, btc_fixtures):
     assert pos["entry"] == 50000.0
     assert pos["verdict"] in {"hold", "take_profits", "exit"}
     assert pos["reasons"]
-    assert pos["open_risk"] == abs(pos["entry"] - pos["suggested_stop"]) * pos["size"]
+    assert pos["open_risk"] == max(0.0, pos["entry"] - pos["suggested_stop"]) * pos["size"]
 
 
 def test_manual_position_merges_without_an_address(tmp_path, btc_fixtures):
@@ -358,6 +364,23 @@ def test_no_size_is_suggested_when_the_target_is_already_passed(tmp_path, chain_
         for s in block["signals"]:
             if s["position_size"] is not None:
                 assert s["reward_risk"] > 0, s["asset"]
+
+
+def test_open_risk_is_zero_once_the_stop_locks_in_profit():
+    # Elder's 6% Rule (p.208-209): open risk is the distance from entry to the
+    # current stop, and it is ZERO once the stop sits at or beyond break-even —
+    # "nothing in stock A, because its stop is above breakeven". A stop that locks
+    # in profit must not be counted as risk, or the guard trips on winning trades.
+    def risk(side, entry, stop, size=10.0):
+        return position_open_risk(
+            {"side": side, "entry": entry, "suggested_stop": stop, "size": size}
+        )
+
+    assert risk("long", 100.0, 95.0) == 50.0  # stop below entry: real risk
+    assert risk("long", 100.0, 105.0) == 0.0  # trailing stop above entry: profit locked
+    assert risk("long", 100.0, 100.0) == 0.0  # at break-even
+    assert risk("short", 100.0, 104.0) == 40.0
+    assert risk("short", 100.0, 95.0) == 0.0  # short stop below entry: profit locked
 
 
 def test_guard_uses_automatic_open_position_risk(tmp_path, btc_fixtures):
