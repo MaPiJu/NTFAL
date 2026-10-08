@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from pathlib import Path
 from typing import Any
@@ -38,6 +39,18 @@ def num(x: float | None) -> str:
 
 def pct(x: float | None, digits: int = 2) -> str:
     return f"{x:+.{digits}%}" if x is not None else "—"
+
+
+def rate_pct(x: float | None) -> str:
+    """An hourly funding rate in %, to two significant digits: rates of a few
+    millionths an hour must not print as +0.0000%."""
+    if x is None:
+        return "—"
+    pct_value = x * 100
+    if pct_value == 0:
+        return "+0.00%"
+    decimals = max(2, 1 - math.floor(math.log10(abs(pct_value))))
+    return f"{pct_value:+.{decimals}f}%"
 
 
 def apgar_detail(apgar: dict[str, Any]) -> str:
@@ -74,7 +87,7 @@ def print_horizon_table(name: str, block: dict[str, Any]) -> None:
         f"{'ASSET':<14} {'REGIME':<8} {'TIDE':<7} {'IMP T/W/E':<14} {'FI(2)':>14} {'ACTION':<13} "
         f"{'CLOSE':>12} {'MARK':>12} {'DRIFT':>7} {'ENTRY':>12} {'STOP':>12} {'R:R':>7} "
         f"{'LIMIT':>12} {'LIM STOP':>12} {'LIM R:R':>7} {'TARGET':>12} "
-        f"{'APGAR':>6} {'SIZE':>10} {'FUND/H':>9} {'FUND EST':>9}"
+        f"{'APGAR':>6} {'SIZE':>10} {'FUND/H':>11} {'FUND EST':>9}"
     )
     print("\n" + header)
     print("-" * len(header))
@@ -105,7 +118,7 @@ def print_horizon_table(name: str, block: dict[str, Any]) -> None:
             f"{num(s['entry']):>12} {num(s['stop']):>12} {rr:>7} "
             f"{num(s['entry_limit']):>12} {num(s.get('entry_limit_stop')):>12} {lim_rr:>7} "
             f"{num(s['target']):>12} {score:>6} {size:>10} "
-            f"{pct(s.get('funding_rate'), 4):>9} {pct(s.get('funding_cost')):>9}"
+            f"{rate_pct(s.get('funding_rate')):>11} {pct(s.get('funding_cost')):>9}"
         )
     print()
     for s in block["signals"]:

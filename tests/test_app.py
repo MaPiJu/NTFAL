@@ -699,6 +699,16 @@ def test_trade_apgar_reaches_the_snapshot_and_the_cli(tmp_path, long_setup_fixtu
     assert f"apgar {apgar['total']}/10: {detail}" in out
 
 
+def test_cli_shows_tiny_funding_rates_with_two_significant_digits():
+    from run import rate_pct
+
+    assert rate_pct(-4.872e-07) == "-0.000049%"  # xyz:SP500, 2026-10-08
+    assert rate_pct(-0.0003221) == "-0.032%"  # xyz:BRENTOIL
+    assert rate_pct(0.00000625) == "+0.00063%"
+    assert rate_pct(0.0) == "+0.00%"
+    assert rate_pct(None) == "—"
+
+
 def test_a_failing_funding_lookup_drops_only_that_dex():
     class FlakyFunding:
         def funding_rates(self, dex: str = "") -> dict[str, float]:

@@ -152,13 +152,15 @@ function holdingLabel(hours) {
 // it would pay over the horizon's holding time, as % of notional (+: paid).
 function fundingCell(s) {
   if (s.funding_rate === null || s.funding_rate === undefined) return "—";
-  let html = `${pctText(s.funding_rate, 4)}/h`;
+  // Two significant digits: a rate of a few millionths an hour is not "0.0000%".
+  const rate = s.funding_rate * 100;
+  let html = `${rate >= 0 ? "+" : ""}${rate === 0 ? "0.00" : rate.toPrecision(2)}%/h`;
   if (s.funding_cost !== null && s.funding_cost !== undefined) {
     const cls = s.funding_cost > 0 ? "rr-bad" : "rr-good";
     const flag = s.funding_warning ? " ⚠" : "";
     html +=
       `<br><span class="${cls}" title="${(s.funding_warning || "").replace(/"/g, "&quot;")}">` +
-      `${pctText(s.funding_cost)} / ${holdingLabel(s.funding_hours)}${flag}</span>`;
+      `${pctText(s.funding_cost)}&nbsp;/&nbsp;${holdingLabel(s.funding_hours).replace(" ", "&nbsp;")}${flag}</span>`;
   }
   return html;
 }
