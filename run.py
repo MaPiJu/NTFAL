@@ -69,10 +69,18 @@ def print_horizon_table(name: str, block: dict[str, Any]) -> None:
 
     best = next((s for s in block["signals"] if s.get("is_top_pick")), None)
     if best is not None:
+        # A block a partial refresh carried over from an older snapshot may have
+        # no Apgar yet: print what is there.
+        apgar = best.get("apgar")
+        rr = best.get("reward_risk")
+        details = [
+            f"Apgar {apgar['total']}/10" if apgar else None,
+            f"R:R {rr:.2f}" if rr is not None else None,
+            f"entry {num(best['entry'])}, stop {num(best['stop'])}, target {num(best['target'])}",
+        ]
         print(
             f"★ BEST {name.upper()} TRADE: {best['asset']} {best['action']} "
-            f"(Apgar {best['apgar']['total']}/10, R:R {best['reward_risk']:.2f}, "
-            f"entry {best['entry']:,.6g}, stop {best['stop']:,.6g}, target {best['target']:,.6g})"
+            f"({', '.join(d for d in details if d)})"
         )
 
     # Best trade first: the pick, then the other A-trades, then the remaining

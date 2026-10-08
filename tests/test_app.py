@@ -806,6 +806,21 @@ def test_cli_table_lists_the_pick_then_a_trades_first(capsys):
     assert order == ["BBB", "CCC", "AAA"]
 
 
+def test_cli_survives_a_block_from_before_the_apgar(capsys):
+    # A partial refresh copies the other horizons' blocks as they are; one written
+    # before the Trade Apgar has a pick row with a quality_score and no "apgar".
+    from run import print_horizon_table
+
+    old = _table_row("OLD", None, 2.5, top=True)
+    del old["apgar"]
+    old["quality_score"] = 0.8
+
+    print_horizon_table("swing", _swing_block([old]))
+
+    out = capsys.readouterr().out
+    assert "BEST SWING TRADE: OLD" in out
+
+
 def test_cli_shows_tiny_funding_rates_with_two_significant_digits():
     from run import rate_pct
 

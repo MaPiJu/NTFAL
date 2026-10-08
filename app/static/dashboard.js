@@ -527,8 +527,10 @@ function renderAll() {
     pickBanner.innerHTML =
       `★ Best ${block.label || state.horizon} trade — <strong>${best.asset}</strong> ` +
       `<span class="badge ${best.action}">${best.action.replace("_", " ")}</span> · ` +
-      `Trade Apgar ${best.apgar.total}/10 · ` +
-      `R:R ${best.reward_risk.toFixed(2)} · entry ${fmt(best.entry)} · stop ${fmt(best.stop)} · ` +
+      // A block carried over from an older snapshot may have no Apgar yet.
+      (best.apgar ? `Trade Apgar ${best.apgar.total}/10 · ` : "") +
+      (best.reward_risk != null ? `R:R ${best.reward_risk.toFixed(2)} · ` : "") +
+      `entry ${fmt(best.entry)} · stop ${fmt(best.stop)} · ` +
       `target ${fmt(best.target)}`;
   }
 
