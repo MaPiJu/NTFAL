@@ -115,6 +115,23 @@ function warningsHTML(s) {
   return `<br><strong class="warn">! Data quality:</strong> <span class="warn">${warns.join(" · ")}</span>`;
 }
 
+// The suggested size breaks an exchange limit (max leverage, $10 minimum order).
+// Flagged, never capped: the size shown is still the Iron Triangle's.
+function sizeCell(s) {
+  if (!s.position_size) return "—";
+  const warns = s.size_warnings || [];
+  const size = fmt(s.position_size.size, 6);
+  if (!warns.length) return size;
+  const title = warns.join(" · ").replace(/"/g, "&quot;");
+  return `<span class="rr-bad" title="${title}">${size} ⚠</span>`;
+}
+
+function sizeWarningsHTML(s) {
+  const warns = s.size_warnings || [];
+  if (!warns.length) return "";
+  return `<br><strong class="warn">! Size:</strong> <span class="warn">${warns.join(" · ")}</span>`;
+}
+
 function warnBadge(s) {
   const warns = s.data_warnings || [];
   if (!warns.length) return "";
@@ -160,7 +177,6 @@ function renderTable(block) {
         : `<span class="${s.rr_ok ? "rr-good" : "rr-bad"}">${rr.toFixed(2)}${s.rr_ok ? "" : " ⚠"}</span>`;
     const limitRr = s.reward_risk_limit;
     const limitRrCell = limitRr === null || limitRr === undefined ? "—" : limitRr.toFixed(2);
-    const size = s.position_size ? fmt(s.position_size.size, 6) : "—";
     const row = document.createElement("tr");
     row.dataset.action = s.action;
     if (s.is_top_pick) row.classList.add("top-pick");
@@ -181,8 +197,8 @@ function renderTable(block) {
       <td>${limitRrCell}</td>
       <td>${fmt(s.target)}</td>
       <td>${scoreCell(s)}</td>
-      <td>${size}</td>
-      <td class="reason">${s.reason}<br><strong>Value zone:</strong> ${(s.value_zone_status || "—").replace("_", " ")}${s.price_alert ? `<br><strong>⚠ Live price:</strong> ${s.price_alert}` : ""}${s.entry_order_plan ? `<br><strong>Order plan:</strong> ${s.entry_order_plan}` : ""}${(s.divergences || []).length ? `<br><strong>Divergences:</strong> ${s.divergences.join(", ")}` : ""}${warningsHTML(s)}</td>`;
+      <td>${sizeCell(s)}</td>
+      <td class="reason">${s.reason}<br><strong>Value zone:</strong> ${(s.value_zone_status || "—").replace("_", " ")}${s.price_alert ? `<br><strong>⚠ Live price:</strong> ${s.price_alert}` : ""}${s.entry_order_plan ? `<br><strong>Order plan:</strong> ${s.entry_order_plan}` : ""}${(s.divergences || []).length ? `<br><strong>Divergences:</strong> ${s.divergences.join(", ")}` : ""}${warningsHTML(s)}${sizeWarningsHTML(s)}</td>`;
     tbody.appendChild(row);
   }
 }

@@ -149,6 +149,10 @@ They never change an action — they tell the operator how much to trust it:
   grid, rounded on the prudent side — buy-stop up, sell-stop down; a long's stop and buy
   limit down, a short's stop and sell limit up; the target toward the entry. Reward:risk
   and the Iron-Triangle size are computed from the rounded entry and stop.
+- **Exchange limits — flag, don't cap:** a size whose notional (size × entry) exceeds the
+  perp's `maxLeverage` × equity (from `meta`, with `onlyIsolated` noted), or falls under
+  Hyperliquid's $10 minimum order value, carries a `size_warnings` entry. The size stays the
+  Iron Triangle's and the action never changes.
 - **6% Rule:** if `month_realized_losses + sum(open_trade_risk) >= 0.06 * equity_at_month_start`,
   block all new-entry suggestions for the rest of the month (flag clearly in the UI). The
   guard is **global**, computed once across every horizon.

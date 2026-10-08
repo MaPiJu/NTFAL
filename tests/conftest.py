@@ -29,7 +29,8 @@ META = {
 XYZ_META = {
     "universe": [
         {"name": "xyz:GOLD", "szDecimals": 4, "maxLeverage": 25},
-        {"name": "xyz:SP500", "szDecimals": 4, "maxLeverage": 30},
+        # Some xyz perps trade on isolated margin only.
+        {"name": "xyz:SP500", "szDecimals": 4, "maxLeverage": 30, "onlyIsolated": True},
         {"name": "xyz:RETIRED", "szDecimals": 1, "maxLeverage": 5, "isDelisted": True},
     ]
 }

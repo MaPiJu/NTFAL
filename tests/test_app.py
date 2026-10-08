@@ -17,6 +17,7 @@ from app.pipeline import (
     load_snapshot,
     position_open_risk,
     refresh_horizon,
+    size_warnings,
 )
 from config import (
     Config,
@@ -26,6 +27,7 @@ from config import (
     RiskConfig,
     ScannerConfig,
 )
+from data.hyperliquid import PerpSpec
 from journal import append_journal_entry
 from risk.sizing import position_size
 from strategy.params import StrategyParams
@@ -133,8 +135,9 @@ def test_build_snapshot_from_fixtures(tmp_path, btc_fixtures):
     assert "last_close" in sig and "quality_score" in sig and "is_top_pick" in sig
     # live price (still-open wave bar) + a stale-price/chasing alert
     assert "live_price" in sig and "price_alert" in sig
-    # data-quality flags travel with the signal
+    # data-quality flags travel with the signal, and so do size flags
     assert isinstance(sig["data_warnings"], list)
+    assert sig["size_warnings"] == []  # nothing sized, nothing to flag
     # the top pick (if any) must be a tradable, R:R-passing setup
     if block["top_pick"] is not None:
         pick = next(s for s in block["signals"] if s["asset"] == block["top_pick"])
@@ -453,6 +456,46 @@ def test_size_is_worked_out_from_the_rounded_entry_and_stop(tmp_path, long_setup
     ps = sig["position_size"]
     assert ps["risk_per_unit"] == pytest.approx(abs(sig["entry"] - sig["stop"]))
     assert ps["size"] == position_size(10_000.0, sig["entry"], sig["stop"], 0.01, 5).size
+
+
+def test_size_warnings_flag_sizes_the_exchange_would_refuse():
+    # The Iron Triangle sizes on risk alone; Hyperliquid adds two limits. Flag a
+    # notional above the perp's max leverage x equity, or under the $10 minimum.
+    gold = PerpSpec(sz_decimals=4, max_leverage=25)
+    assert size_warnings(1.0, 4_000.0, 10_000.0, gold) == []  # $4,000 = 0.4x equity
+
+    (over,) = size_warnings(100.0, 4_000.0, 10_000.0, gold)  # $400,000 = 40x equity
+    assert "40.0× equity" in over and "25× max leverage" in over
+
+    isolated = PerpSpec(sz_decimals=3, max_leverage=50, only_isolated=True)
+    (over,) = size_warnings(100.0, 6_500.0, 10_000.0, isolated)  # 65x
+    assert "50× max leverage" in over and "isolated margin only" in over
+
+    (tiny,) = size_warnings(0.002, 4_000.0, 10_000.0, gold)  # $8
+    assert "$10 minimum" in tiny
+    # Unknown leverage cap: only the minimum order value can be checked.
+    assert size_warnings(100.0, 4_000.0, 10_000.0, None) == []
+
+
+def test_unexecutable_size_is_flagged_never_capped(tmp_path, long_setup_fixtures, capsys):
+    # A $40 account: 1% risk buys a few hundredths of a unit at ~142, under
+    # Hyperliquid's $10 minimum order value. The flag is information: the action
+    # and the Iron-Triangle size stay exactly what Elder's rules give.
+    cfg = make_config(tmp_path, equity=40.0, equity_at_month_start=40.0)
+    snapshot = build_snapshot(cfg, make_client(long_setup_fixtures, tmp_path))
+
+    (sig,) = swing(snapshot)["signals"]
+    assert sig["action"] == "long"
+    ps = sig["position_size"]
+    assert ps["size"] == position_size(40.0, sig["entry"], sig["stop"], 0.01, 5).size
+    assert 0 < ps["size"] * sig["entry"] < 10.0
+    (warning,) = sig["size_warnings"]
+    assert "$10 minimum" in warning
+
+    from run import print_signals_tables
+
+    print_signals_tables(snapshot)
+    assert f"! size: {warning}" in capsys.readouterr().out
 
 
 def test_guard_uses_automatic_open_position_risk(tmp_path, btc_fixtures):

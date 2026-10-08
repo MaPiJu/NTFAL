@@ -11,7 +11,8 @@ from __future__ import annotations
 import json
 import os
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,8 @@ MAX_CANDLES_PER_REQUEST = 5000
 # Scanning the full universe fires hundreds of requests; back off on 429
 # instead of dying mid-refresh.
 RATE_LIMIT_RETRIES = 5
+# Hyperliquid refuses an order worth less than this (size x price), in USD.
+MIN_ORDER_VALUE_USD = 10.0
 
 INTERVAL_MS: dict[str, int] = {
     "1m": 60_000,
@@ -46,6 +49,24 @@ CANDLE_COLUMNS = ("t", "T", "open", "high", "low", "close", "volume", "trades")
 
 class HyperliquidError(RuntimeError):
     """Raised when the info endpoint returns unusable data or a coin is unknown."""
+
+
+@dataclass(frozen=True)
+class PerpSpec:
+    """What `meta` says about trading one perp: size precision and margin limits."""
+
+    sz_decimals: int
+    max_leverage: int | None = None  # None when `meta` doesn't say
+    only_isolated: bool = False  # cross margin unavailable for this perp
+
+    @classmethod
+    def from_meta(cls, entry: Mapping[str, Any]) -> PerpSpec:
+        leverage = entry.get("maxLeverage")
+        return cls(
+            sz_decimals=int(entry["szDecimals"]),
+            max_leverage=int(leverage) if leverage else None,
+            only_isolated=bool(entry.get("onlyIsolated", False)),
+        )
 
 
 def coin_dex(coin: str) -> str:
@@ -118,7 +139,7 @@ class HyperliquidClient:
     # -- meta ---------------------------------------------------------------
 
     def perp_universe(self, dex: str = "") -> dict[str, dict[str, Any]]:
-        """Map of perp name -> meta entry (incl. szDecimals) from the `meta` request.
+        """Map of perp name -> meta entry (szDecimals, maxLeverage…) from the `meta` request.
 
         `dex` selects a perp dex: '' is the native (crypto) universe; HIP-3
         builder dexes like 'xyz' carry tradfi perps (stocks, indices, gold…)
@@ -133,8 +154,8 @@ class HyperliquidClient:
             raise HyperliquidError(f"unexpected meta payload: {json.dumps(meta)[:200]}")
         return {entry["name"]: entry for entry in universe}
 
-    def validate_watchlist(self, coins: Sequence[str]) -> dict[str, int]:
-        """Check every coin against its perp universe; return {coin: szDecimals}.
+    def validate_watchlist(self, coins: Sequence[str]) -> dict[str, PerpSpec]:
+        """Check every coin against its perp universe; return {coin: PerpSpec}.
 
         Coins may mix dexes ('BTC' is native, 'xyz:GOLD' lives on the tradfi
         dex); one `meta` request is made per dex involved. Raises
@@ -151,16 +172,16 @@ class HyperliquidClient:
         ]
         if unknown:
             raise HyperliquidError(f"not a tradable Hyperliquid perp: {', '.join(unknown)}")
-        return {c: int(universes[coin_dex(c)][c]["szDecimals"]) for c in coins}
+        return {c: PerpSpec.from_meta(universes[coin_dex(c)][c]) for c in coins}
 
-    def tradable_perps(self, dex: str = "") -> dict[str, int]:
-        """Every currently tradable perp of a dex -> szDecimals, sorted by name.
+    def tradable_perps(self, dex: str = "") -> dict[str, PerpSpec]:
+        """Every currently tradable perp of a dex -> PerpSpec, sorted by name.
 
         Delisted assets stay in `meta` (flagged `isDelisted`) and are excluded.
         """
         universe = self.perp_universe(dex)
         return {
-            name: int(entry["szDecimals"])
+            name: PerpSpec.from_meta(entry)
             for name, entry in sorted(universe.items())
             if not entry.get("isDelisted", False)
         }

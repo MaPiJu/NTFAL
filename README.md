@@ -82,6 +82,8 @@ Their common names differ from the Hyperliquid tickers:
   6% of the month-start equity. When a public address is configured, open risk is
   calculated automatically from each held position's current Elder stop; the manual
   `open_trade_risk` field is only extra risk for positions the scanner cannot see.
+  A size the exchange would refuse — a notional above the perp's max leverage × equity,
+  or under Hyperliquid's $10 minimum order — is flagged (`⚠` on the size), never capped.
 - **Journal:** each refresh can append a compact JSONL entry with the per-horizon top
   picks, signal levels/reasons, open-position verdicts, stops and open risk.
 - **SafeZone stops:** protective and trailing stops use Elder-style adverse bar noise
@@ -223,7 +225,8 @@ Edit `config.toml`:
   the low-volume data-quality thresholds. **Every lookback is a count of bars** on the
   relevant screen, so the same numbers carry across horizons. Any key can be overridden
   for one horizon with a `[scanner.horizons.strategy]` sub-block.
-- `risk.equity` — current account equity (shown in the header)
+- `risk.equity` — current account equity (shown in the header, and the margin behind
+  the max-leverage check)
 - `risk.risk_pct` — risk per trade (default `0.01` = 1%; hard-capped at 2%), as a fraction
   of `risk.equity_at_month_start`: Elder sets the 2% limit once a month, from the equity on
   the first day of the month

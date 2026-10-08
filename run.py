@@ -71,6 +71,8 @@ def print_horizon_table(name: str, block: dict[str, Any]) -> None:
             rr += "⚠"
         lim_rr = f"{s['reward_risk_limit']:.2f}" if s.get("reward_risk_limit") is not None else "—"
         size = num(s["position_size"]["size"]) if s["position_size"] else "—"
+        if s.get("size_warnings"):
+            size += "⚠"
         score = f"{s['quality_score'] * 100:.0f}" if s.get("quality_score") is not None else "—"
         action = (
             s["action"]
@@ -100,6 +102,8 @@ def print_horizon_table(name: str, block: dict[str, Any]) -> None:
         print(f"  {s['asset']}: {s['reason']} · value zone: {vz}{order}{alert}{suffix}")
         for w in s.get("data_warnings") or []:
             print(f"    ! data quality: {w}")
+        for w in s.get("size_warnings") or []:
+            print(f"    ! size: {w}")
     if block.get("skipped"):
         print(f"\nskipped: {', '.join(block['skipped'])}")
 
