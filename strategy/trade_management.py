@@ -95,6 +95,8 @@ class TradeManagement:
     verdict: Verdict
     reasons: list[str]
     cum_funding: float | None = None  # funding paid since open (negative = received)
+    # The close went through the (remembered) stop: it was hit, so exit.
+    stop_hit: bool = False
 
 
 def _to_float(value: Any) -> float | None:
@@ -227,6 +229,11 @@ def assess_position(
     if previous_stop is not None:
         pick = max if pos.side == "long" else min
         suggested_stop = pick(suggested_stop, previous_stop)
+    # A fresh SafeZone stop always sits on the safe side of the close; a
+    # remembered one may not any more. A close through it means it was hit.
+    stop_hit = (
+        close_price <= suggested_stop if pos.side == "long" else close_price >= suggested_stop
+    )
 
     favorable_trend: Trend = "up" if pos.side == "long" else "down"
     favorable_imp = "green" if pos.side == "long" else "red"
@@ -235,7 +242,13 @@ def assess_position(
     reasons: list[str] = []
     verdict: Verdict = "hold"
 
-    # --- EXIT: the strategic premise is dead -------------------------------
+    # --- EXIT: the stop was hit, or the strategic premise is dead -----------
+    if stop_hit:
+        verdict = "exit"
+        reasons.append(
+            f"wave close {close_price:.6g} is through the stop {suggested_stop:.6g} — the stop "
+            f"was hit; exit (never lower a stop to give the trade room)"
+        )
     if trend not in (favorable_trend, "neutral"):
         verdict = "exit"
         reasons.append(f"tide flipped to {trend} — the reason for this {pos.side} is gone; exit")
@@ -293,4 +306,5 @@ def assess_position(
         verdict=verdict,
         reasons=reasons,
         cum_funding=pos.cum_funding,
+        stop_hit=stop_hit,
     )

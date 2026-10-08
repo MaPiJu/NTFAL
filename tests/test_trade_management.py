@@ -215,6 +215,25 @@ def test_suggested_stop_never_moves_against_the_trade(side):
     assert assess_position(pos, weekly, daily, previous_stop=looser).suggested_stop == fresh
 
 
+@pytest.mark.parametrize("side", ["long", "short"])
+def test_a_remembered_stop_the_close_went_through_was_hit(side):
+    # The remembered stop is kept (it never moves back), but once the close is
+    # through it the stop was hit: exit — never "hold and trail" to a level on the
+    # wrong side of the market.
+    daily = make_ohlcv([100.0 + i for i in range(60)])  # close 159
+    weekly = WEEKLY_UP if side == "long" else WEEKLY_DOWN
+    entry, crossed = (165.0, 162.0) if side == "long" else (150.0, 156.0)
+    pos = OpenPosition("BTC", side, entry=entry, size=2.0)
+
+    tm = assess_position(pos, weekly, daily, previous_stop=crossed)
+
+    assert tm.suggested_stop == crossed
+    assert tm.stop_hit
+    assert tm.verdict == "exit"
+    assert any("stop was hit" in r for r in tm.reasons)
+    assert not assess_position(pos, weekly, daily).stop_hit  # a fresh stop is never crossed
+
+
 def test_safezone_stop_ratchets_to_breakeven_in_profit():
     daily = make_ohlcv([100.0 + i for i in range(60)])  # recent lows ~156
     # Entry just under the current price but ABOVE the SafeZone level, so the

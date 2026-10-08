@@ -122,7 +122,8 @@ managed on the same chain that would have entered it. Per held position, produce
 **exit > take_profits > hold**:
 - **EXIT** if the **tide flips** against the position (the strategic premise is dead), or
   if **either** Impulse turns the *adverse* color (red for a long, green for a short —
-  momentum reversed).
+  momentum reversed), or if the wave close is **through the suggested stop** (a remembered
+  stop the price fell back through was hit; its open risk is then measured from the close).
 - **TAKE_PROFITS** if price reaches the profit target (tide value zone EMA13–EMA26, or
   the tide channel when price already trades beyond value), **or** when *neither* screen
   still shows the favorable Impulse color (both blue) **and** the trade is in profit —

@@ -304,9 +304,13 @@ def position_open_risk(position: dict[str, Any]) -> float:
     """Risk still open using the current Elder/SafeZone stop suggestion.
 
     Elder's 6% Rule (p.208-209): the distance from entry to the current stop,
-    and zero once the stop is at or beyond break-even (it locks in profit).
+    and zero once the stop is at or beyond break-even (it locks in profit). A
+    stop the close already went through bounds nothing any more: the risk is
+    what exiting at that close would lose.
     """
     entry, stop = float(position["entry"]), float(position["suggested_stop"])
+    if position.get("stop_hit"):
+        stop = float(position["close_price"])
     per_unit = entry - stop if position["side"] == "long" else stop - entry
     return max(0.0, per_unit) * float(position["size"])
 

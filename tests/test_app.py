@@ -445,6 +445,24 @@ def test_open_risk_is_zero_once_the_stop_locks_in_profit():
     assert risk("short", 100.0, 104.0) == 40.0
     assert risk("short", 100.0, 95.0) == 0.0  # short stop below entry: profit locked
 
+    # A stop the close already went through no longer bounds the loss: what is at
+    # risk is what exiting at that close would cost.
+    def hit(side, entry, stop, close, size=10.0):
+        return position_open_risk(
+            {
+                "side": side,
+                "entry": entry,
+                "suggested_stop": stop,
+                "size": size,
+                "close_price": close,
+                "stop_hit": True,
+            }
+        )
+
+    assert hit("long", 165.0, 170.0, 159.0) == 60.0  # stop above entry, close below it
+    assert hit("long", 150.0, 170.0, 159.0) == 0.0  # exiting at 159 still banks a profit
+    assert hit("short", 150.0, 140.0, 159.0) == 90.0
+
 
 def test_pipeline_passes_sz_decimals_to_the_strategy(tmp_path, btc_fixtures, monkeypatch):
     # The tick of an entry order depends on the asset's szDecimals (Hyperliquid:
