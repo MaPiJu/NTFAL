@@ -81,6 +81,10 @@ def test_a_new_york_closure_follows_daylight_saving():
     # and reopens Sun 23:00 UTC (EST) — 50 hourly bars dropped.
     switch = bars("1h", "2026-10-26T00:00", 192)
     assert len(switch) - len(drop_closed_bars(switch, NEW_YORK_WEEKEND)) == 50
+    # The week DST starts (Sunday 2026-03-08 02:00): Fri 22:00 UTC (EST) to
+    # Sun 22:00 UTC (EDT) — 48 hourly bars.
+    spring = bars("1h", "2026-03-02T00:00", 168)
+    assert len(spring) - len(drop_closed_bars(spring, NEW_YORK_WEEKEND)) == 48
 
 
 def test_closure_rejects_an_unknown_timezone():
