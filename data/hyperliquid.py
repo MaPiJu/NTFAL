@@ -234,7 +234,10 @@ class HyperliquidClient:
         payload: dict[str, Any] = {"type": "clearinghouseState", "user": address}
         if dex:
             payload["dex"] = dex
-        state = self._info(payload)
+        try:
+            state = self._info(payload)
+        except ValueError as exc:  # a non-JSON body (a maintenance page with a 200)
+            raise HyperliquidError(f"unexpected clearinghouseState payload for {address}") from exc
         if not isinstance(state, dict):
             raise HyperliquidError(f"unexpected clearinghouseState payload for {address}")
         return state

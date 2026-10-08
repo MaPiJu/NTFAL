@@ -290,11 +290,14 @@ def fetch_open_positions(
         for dex in watchlist_dexes(cfg.scanner.watchlist):
             try:
                 state = client.clearinghouse_state(cfg.positions.address, dex=dex)
-            except (HyperliquidError, httpx.HTTPError):
+                # A position the parser can't read (a null entryPx, a missing
+                # coin) makes the whole dex unreadable, not the whole refresh.
+                positions = parse_positions(state)
+            except (HyperliquidError, httpx.HTTPError, TypeError, KeyError, ValueError):
                 if failed_dexes is not None:
                     failed_dexes.add(dex)
                 continue
-            out.extend(parse_positions(state))
+            out.extend(positions)
     for m in cfg.positions.manual:
         out.append(OpenPosition(asset=m.asset, side=m.side, entry=m.entry, size=m.size))
     return out

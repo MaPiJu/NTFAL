@@ -405,6 +405,24 @@ def test_positions_survive_a_failing_dex(tmp_path):
     assert (pos.asset, pos.side, pos.entry) == ("BTC", "long", 50000.0)
 
 
+def test_a_malformed_position_payload_drops_only_its_dex(tmp_path):
+    # A maintenance page or a position the parser can't read on one dex must not
+    # abort the refresh: that dex counts as a failed lookup, the others survive.
+    addr = "0x" + "34" * 20
+    cfg = make_config(tmp_path, watchlist=("BTC", "xyz:GOLD"), address=addr)
+
+    class BrokenDex:
+        def clearinghouse_state(self, address: str, dex: str = "") -> dict:
+            if dex == "xyz":  # entryPx null: float(None) in the parser
+                return make_clearinghouse_state([{"coin": "xyz:GOLD", "szi": "1", "entryPx": None}])
+            return make_clearinghouse_state([{"coin": "BTC", "szi": "0.5", "entryPx": "50000.0"}])
+
+    failed: set[str] = set()
+    (pos,) = fetch_open_positions(cfg, BrokenDex(), failed)
+    assert pos.asset == "BTC"
+    assert failed == {"xyz"}
+
+
 def test_snapshot_reports_tripped_guard(tmp_path, chain_fixtures):
     cfg = make_config(tmp_path, horizons=(SWING, SCALP), month_realized_losses=700.0)
     client = make_client(chain_fixtures, tmp_path)
