@@ -134,9 +134,9 @@ managed on the same chain that would have entered it. Per held position, produce
   **A suggested stop never moves back** (p.224: "move your stop only in the direction of
   your trade"): the snapshot keeps the last suggestion per position, keyed by (asset, side,
   entry price), in `stop_memory`; the next one is `max(previous, new)` for a long, `min` for
-  a short, and a new key (another entry price) starts fresh. A remembered stop is dropped
-  only once its position is known closed (its dex was read and no longer lists it): a
-  position hidden by a failed lookup keeps it. Both `build_snapshot` and `refresh_horizon`
+  a short, and a new key (another entry price) starts fresh. A remembered stop is kept
+  while its position is still open — held, or hidden because its dex's lookup failed — and
+  dropped once it is closed (its dex was read without it, or it is no longer declared). Both `build_snapshot` and `refresh_horizon`
   read the previous snapshot for it.
 Each position also shows the **funding paid since it opened** (`cumFunding.sinceOpen` from
 `clearinghouseState`; negative = received) — a holding cost the price PnL leaves out. It is

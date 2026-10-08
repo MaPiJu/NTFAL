@@ -548,6 +548,23 @@ def test_a_failed_position_lookup_keeps_the_stop_memory(tmp_path, btc_fixtures, 
     assert build_snapshot(cfg, client, previous=back)["stop_memory"] == {}  # closed: forgotten
 
 
+def test_an_undeclared_manual_position_forgets_its_stop(tmp_path, btc_fixtures):
+    # No address: only manual positions, so no dex is ever looked up. Removing a
+    # declaration closes the position — its remembered stop must go, or the same
+    # trade declared again later inherits a stale stop (and an instant EXIT).
+    from config import ManualPosition
+
+    held = ManualPosition(asset="BTC", side="long", size=0.5, entry=50_000.0)
+    client = make_client(btc_fixtures, tmp_path)
+    key = stop_memory_key("BTC", "long", 50000.0)
+    with_it = build_snapshot(make_config(tmp_path, manual=(held,)), client)
+    assert key in with_it["stop_memory"]
+
+    without = make_config(tmp_path)
+    assert build_snapshot(without, client, previous=with_it)["stop_memory"] == {}
+    assert refresh_horizon(without, client, "swing", with_it)["stop_memory"] == {}
+
+
 def test_stop_memory_resets_when_the_position_changes(tmp_path, btc_fixtures):
     # Same coin and side, another entry price: a new position, a fresh stop.
     addr, client = _held_btc(tmp_path, btc_fixtures, entry="51000.0")
