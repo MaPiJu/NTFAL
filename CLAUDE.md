@@ -203,7 +203,9 @@ pipeline to every screen and to held positions).
   (|entry − stop| / entry), the signal carries a `funding_warning`; the action never changes.
 - **6% Rule:** if `month_realized_losses + sum(open_trade_risk) >= 0.06 * equity_at_month_start`,
   block all new-entry suggestions for the rest of the month (flag clearly in the UI). The
-  guard is **global**, computed once across every horizon.
+  guard is **global**, computed once across every horizon. A position hidden by a failed
+  `clearinghouseState` lookup is still open: it keeps counting with its last known open
+  risk (`hidden_positions`), and the UI says which dex could not be read.
 - **Targets:** profit target on the **tide** value zone (between EMA13 and EMA26) or a
   tide **channel** (Elder's symmetrical channel around the slow **EMA26**: one coefficient
   k, `EMA26·(1 ± k)`, the smallest that keeps ~95% of the past **100** bars inside, each bar

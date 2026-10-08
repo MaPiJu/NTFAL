@@ -548,6 +548,41 @@ def test_a_failed_position_lookup_keeps_the_stop_memory(tmp_path, btc_fixtures, 
     assert build_snapshot(cfg, client, previous=back)["stop_memory"] == {}  # closed: forgotten
 
 
+def test_a_failed_lookup_keeps_the_hidden_positions_risk_in_the_6_percent_rule(
+    tmp_path, btc_fixtures, monkeypatch, capsys
+):
+    # A position hidden by a failed clearinghouseState lookup is still open: its
+    # last known open risk keeps counting, so the 6% guard can't unblock just
+    # because a request timed out — and the operator is told positions are unread.
+    addr, client = _held_btc(tmp_path, btc_fixtures, entry="80000.0")
+    cfg = make_config(tmp_path, address=addr, month_realized_losses=500.0)
+    seen = build_snapshot(cfg, client)
+    assert seen["guard"]["blocked"] and seen["auto_open_trade_risk"] > 100.0
+
+    def timeout(address, dex=""):
+        raise httpx.ReadTimeout("timed out")
+
+    monkeypatch.setattr(client, "clearinghouse_state", timeout)
+    for hidden in (
+        build_snapshot(cfg, client, previous=seen),
+        refresh_horizon(cfg, client, "swing", seen),
+    ):
+        assert hidden["positions"] == []
+        assert hidden["unread_dexes"] == [""]
+        assert [p["asset"] for p in hidden["hidden_positions"]] == ["BTC"]
+        assert hidden["guard"] == seen["guard"]  # still blocked, same total at risk
+        assert all(s["position_size"] is None for s in swing(hidden)["signals"])
+
+    # Hidden twice in a row: still counted.
+    again = build_snapshot(cfg, client, previous=build_snapshot(cfg, client, previous=seen))
+    assert again["guard"]["blocked"]
+
+    from run import print_signals_tables
+
+    print_signals_tables(again)
+    assert "could not be read" in capsys.readouterr().out
+
+
 def test_an_undeclared_manual_position_forgets_its_stop(tmp_path, btc_fixtures):
     # No address: only manual positions, so no dex is ever looked up. Removing a
     # declaration closes the position — its remembered stop must go, or the same

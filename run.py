@@ -172,6 +172,15 @@ def print_signals_tables(snapshot: dict[str, Any]) -> None:
         f"month-start equity ${month_start:,.2f} "
         f"· open risk ${snapshot.get('total_open_trade_risk', 0.0):,.2f}"
     )
+    unread = snapshot.get("unread_dexes") or []
+    if unread:
+        where = ", ".join(f"dex '{d}'" if d else "the native clearinghouse" for d in unread)
+        hidden = snapshot.get("hidden_positions") or []
+        print(
+            f"⚠ Positions could not be read on {where} this refresh: {len(hidden)} position(s) "
+            f"from the previous refresh still count "
+            f"${snapshot.get('hidden_open_trade_risk', 0.0):,.2f} of open risk toward the 6% rule."
+        )
     if guard["blocked"]:
         print(
             f"⚠ 6% RULE ACTIVE: monthly losses + open risk ${guard['total_at_risk']:,.2f} "

@@ -282,6 +282,20 @@ function renderPositions(snapshot) {
     ? `${positions.length} open · ${snapshot.position_address}${managed}`
     : managed.replace(" · ", "");
 
+  // A failed lookup hides positions for one refresh; their last known open risk
+  // still counts toward the 6% rule. Say so rather than show them as closed.
+  const unread = snapshot.unread_dexes || [];
+  const warn = document.getElementById("positions-warn");
+  warn.classList.toggle("hidden", unread.length === 0);
+  if (unread.length) {
+    const where = unread.map((d) => (d ? `dex '${d}'` : "the native clearinghouse")).join(", ");
+    const hidden = snapshot.hidden_positions || [];
+    warn.textContent =
+      `⚠ Positions could not be read on ${where} this refresh: ${hidden.length} position(s) ` +
+      `from the previous refresh still count $${fmt(snapshot.hidden_open_trade_risk ?? 0, 8)} ` +
+      `of open risk toward the 6% rule.`;
+  }
+
   const tbody = document.querySelector("#positions-table tbody");
   tbody.innerHTML = "";
   if (positions.length === 0) {

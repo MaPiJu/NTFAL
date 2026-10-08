@@ -381,6 +381,25 @@ def stop_memory(
     return memory
 
 
+def hidden_positions(
+    previous: dict[str, Any] | None,
+    positions: list[dict[str, Any]],
+    failed_dexes: set[str] | frozenset[str],
+) -> list[dict[str, Any]]:
+    """Positions of the previous snapshot hidden now by a failed lookup on their
+    dex — still open, as last assessed. Their last open risk keeps counting
+    toward the 6% rule: a request timing out must not unblock new entries."""
+    if not failed_dexes or not previous:
+        return []
+    assessed = {stop_memory_key(p["asset"], p["side"], p["entry"]) for p in positions}
+    out: dict[str, dict[str, Any]] = {}
+    for p in previous.get("positions", []) + previous.get("hidden_positions", []):
+        key = stop_memory_key(p["asset"], p["side"], p["entry"])
+        if key not in assessed and key not in out and coin_dex(p["asset"]) in failed_dexes:
+            out[key] = p
+    return list(out.values())
+
+
 def build_positions(
     client: MarketDataProvider,
     horizon: HorizonConfig,
@@ -603,7 +622,8 @@ def build_snapshot(
         (previous or {}).get("stop_memory"),
         cfg.sessions,
     )
-    guard, risks = _risk_summary(cfg, positions)
+    hidden = hidden_positions(previous, positions, failed_dexes)
+    guard, risks = _risk_summary(cfg, positions, hidden)
 
     snapshot: dict[str, Any] = {
         "generated_at": datetime.now(tz=UTC).isoformat(timespec="seconds"),
@@ -613,6 +633,8 @@ def build_snapshot(
         "guard": asdict(guard),
         **risks,
         "positions": positions,
+        "hidden_positions": hidden,
+        "unread_dexes": sorted(failed_dexes),
         "stop_memory": stop_memory(
             positions, (previous or {}).get("stop_memory"), open_positions, failed_dexes
         ),
@@ -628,11 +650,13 @@ def build_snapshot(
 
 
 def _risk_summary(
-    cfg: Config, positions: list[dict[str, Any]]
+    cfg: Config, positions: list[dict[str, Any]], hidden: list[dict[str, Any]] | None = None
 ) -> tuple[MonthlyGuard, dict[str, float]]:
-    """The 6% guard plus the open-risk figures it was computed from."""
+    """The 6% guard plus the open-risk figures it was computed from. `hidden`
+    positions (a failed lookup) count with their last known open risk."""
     auto = sum(position_open_risk(p) for p in positions)
-    total = cfg.risk.open_trade_risk + auto
+    carried = sum(position_open_risk(p) for p in hidden or [])
+    total = cfg.risk.open_trade_risk + auto + carried
     guard = six_percent_guard(
         cfg.risk.equity_at_month_start,
         cfg.risk.month_realized_losses,
@@ -641,6 +665,7 @@ def _risk_summary(
     return guard, {
         "manual_open_trade_risk": cfg.risk.open_trade_risk,
         "auto_open_trade_risk": auto,
+        "hidden_open_trade_risk": carried,
         "total_open_trade_risk": total,
     }
 
@@ -692,8 +717,11 @@ def refresh_horizon(
             previous.get("stop_memory"),
             cfg.sessions,
         )
-        guard, risks = _risk_summary(cfg, positions)
+        hidden = hidden_positions(previous, positions, failed_dexes)
+        guard, risks = _risk_summary(cfg, positions, hidden)
         snapshot["positions"] = positions
+        snapshot["hidden_positions"] = hidden
+        snapshot["unread_dexes"] = sorted(failed_dexes)
         snapshot["stop_memory"] = stop_memory(
             positions, previous.get("stop_memory"), open_positions, failed_dexes
         )
