@@ -19,6 +19,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pandas as pd
 
 from config import WATCHLIST_ALL, Config, HorizonConfig
@@ -192,16 +193,17 @@ def fetch_open_positions(cfg: Config, client: MarketDataProvider) -> list[OpenPo
     """Open positions: read from Hyperliquid + declared manually.
 
     Hyperliquid positions are gathered across the native clearinghouse and
-    every HIP-3 dex the watchlist references; a failure on one dex doesn't
-    drop the others. `[[positions.manual]]` entries cover a trade the configured
-    address cannot see.
+    every HIP-3 dex the watchlist references; a failure on one dex (a bad
+    payload, an HTTP error, a timeout) doesn't drop the others.
+    `[[positions.manual]]` entries cover a trade the configured address cannot
+    see.
     """
     out: list[OpenPosition] = []
     if cfg.positions.address:
         for dex in watchlist_dexes(cfg.scanner.watchlist):
             try:
                 state = client.clearinghouse_state(cfg.positions.address, dex=dex)
-            except HyperliquidError:
+            except (HyperliquidError, httpx.HTTPError):
                 continue
             out.extend(parse_positions(state))
     for m in cfg.positions.manual:

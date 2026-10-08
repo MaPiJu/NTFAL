@@ -5,11 +5,13 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 
+import httpx
 from fastapi.testclient import TestClient
 
 from app.main import app
 from app.pipeline import (
     build_snapshot,
+    fetch_open_positions,
     live_price_alert,
     load_snapshot,
     position_open_risk,
@@ -339,6 +341,26 @@ def test_position_on_builder_dex_is_found(tmp_path, btc_fixtures):
     assert pos["side"] == "long"
     assert pos["entry"] == 2000.0
     assert pos["verdict"] in {"hold", "take_profits", "exit"}
+
+
+def test_positions_survive_a_failing_dex(tmp_path):
+    # clearinghouseState is queried once per dex; an HTTP error or timeout on one
+    # dex (here the tradfi "xyz" one) must not drop the positions read on the
+    # others, nor abort the whole refresh.
+    addr = "0x" + "34" * 20
+    cfg = make_config(tmp_path, watchlist=("BTC", "xyz:GOLD"), address=addr)
+
+    class FlakyDex:
+        def clearinghouse_state(self, address: str, dex: str = "") -> dict:
+            if dex == "xyz":
+                req = httpx.Request("POST", "https://api.hyperliquid.xyz/info")
+                raise httpx.HTTPStatusError(
+                    "502 Bad Gateway", request=req, response=httpx.Response(502, request=req)
+                )
+            return make_clearinghouse_state([{"coin": "BTC", "szi": "0.5", "entryPx": "50000.0"}])
+
+    (pos,) = fetch_open_positions(cfg, FlakyDex())
+    assert (pos.asset, pos.side, pos.entry) == ("BTC", "long", 50000.0)
 
 
 def test_snapshot_reports_tripped_guard(tmp_path, chain_fixtures):
