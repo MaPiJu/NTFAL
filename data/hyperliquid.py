@@ -198,8 +198,11 @@ class HyperliquidClient:
         payload: dict[str, Any] = {"type": "metaAndAssetCtxs"}
         if dex:
             payload["dex"] = dex
-        data = self._info(payload)
+        data: Any = None
         try:
+            # A non-JSON body (a maintenance page served with a 200) is a
+            # ValueError like any other malformed payload.
+            data = self._info(payload)
             meta, ctxs = data
             universe = meta["universe"]
             return {

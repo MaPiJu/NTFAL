@@ -134,6 +134,18 @@ def test_funding_rates_reject_a_misaligned_payload(tmp_path):
         client.funding_rates()
 
 
+def test_funding_rates_reject_a_non_json_body(tmp_path):
+    # A maintenance or proxy page served with a 200 is a bad payload like any
+    # other: it must surface as HyperliquidError, which the pipeline drops per dex.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="<html>upstream maintenance</html>")
+
+    http = httpx.Client(transport=httpx.MockTransport(handler))
+    client = HyperliquidClient(http=http, cache_dir=tmp_path)
+    with pytest.raises(HyperliquidError, match="metaAndAssetCtxs"):
+        client.funding_rates("xyz")
+
+
 def test_cache_path_is_filename_safe(tmp_path, btc_fixtures):
     fixtures = dict(btc_fixtures)
     fixtures[("xyz:GOLD", "1d")] = btc_fixtures[("BTC", "1d")]
