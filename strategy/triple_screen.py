@@ -815,16 +815,17 @@ def evaluate_asset(
 
     # Stop & reward:risk for the limit (pullback) entry — recalibrated to that
     # fill, since a deep pullback can clear the breakout stop.
+    # The stop doesn't depend on the target; only the R:R needs one.
     limit_stop = limit_rr = None
-    if candidate in ("long", "short") and limit is not None and target is not None:
+    if candidate in ("long", "short") and limit is not None:
         limit_stop = round_to_tick(
             safezone_stop_for_limit(wave, candidate, limit, params),
             "down" if candidate == "long" else "up",
             sz_decimals,
         )
-        if candidate == "long" and limit > limit_stop:
+        if target is not None and candidate == "long" and limit > limit_stop:
             limit_rr = (target - limit) / (limit - limit_stop)
-        elif candidate == "short" and limit_stop > limit:
+        elif target is not None and candidate == "short" and limit_stop > limit:
             limit_rr = (limit - target) / (limit_stop - limit)
 
     apgar = None

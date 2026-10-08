@@ -542,6 +542,27 @@ def test_a_channel_past_100_percent_never_gives_a_negative_target():
     assert sig.apgar is not None and sig.apgar.lines[3].score == 0
 
 
+def test_a_short_without_a_target_keeps_its_limit_stop():
+    # No channel target means no reward:risk — but the sell-limit's protective
+    # stop doesn't depend on the target, and an order shown without its stop is
+    # worse than no order at all.
+    closes = [1.3]
+    for _ in range(8):  # a sawtooth downtrend: rallies that poke above the EMA13
+        closes += [closes[-1] - 0.008 * (i + 1) for i in range(4)]
+        closes.append(closes[-1] + 0.02)
+    closes += [closes[-1] - 0.008 * (i + 1) for i in range(4)]
+    closes.append(closes[-1] + 0.02)
+    daily = make_ohlcv(closes, lows=[c - 0.004 for c in closes], highs=[c + 0.004 for c in closes])
+
+    sig = evaluate_asset("X", WEEKLY_PUMP_CRASH, daily)
+
+    assert sig.action == "short" and sig.target is None and sig.entry_limit is not None
+    assert sig.entry_limit_stop == pytest.approx(
+        round_to_tick(safezone_stop_for_limit(daily, "short", sig.entry_limit), "up")
+    )
+    assert sig.reward_risk_limit is None
+
+
 def test_channel_backbone_is_slow_ema26():
     # Elder draws the channel parallel to the SLOW EMA26, not the fast EMA13: the
     # symmetrical channel is centered on it.
