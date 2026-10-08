@@ -342,14 +342,22 @@ def test_divergence_requires_minimum_separation():
     ]
 
 
-def test_entry_order_plan_rolls_and_expires():
+@pytest.mark.parametrize(
+    ("weekly", "daily", "move"),
+    [(WEEKLY_UP, DAILY_LONG, "lower"), (WEEKLY_DOWN, DAILY_SHORT, "raise")],
+)
+def test_entry_order_plan_rolls_until_the_tide_or_impulse_cancels_it(weekly, daily, move):
+    # Elder (p.161): "Keep lowering your buy-stop each day until stopped in or until
+    # the weekly indicator reverses and cancels its buy signal" — no fixed expiry.
     sig = evaluate_asset(
-        "BTC", WEEKLY_UP, DAILY_LONG, intervals={"tide": "1w", "wave": "1d", "entry": "4h"}
+        "BTC", weekly, daily, intervals={"tide": "1w", "wave": "1d", "entry": "4h"}
     )
 
-    assert sig.entry_order_plan is not None
-    assert "roll it each 1d bar" in sig.entry_order_plan
-    assert "expire after" in sig.entry_order_plan
+    plan = sig.entry_order_plan
+    assert plan is not None
+    assert f"{move} it each 1d bar" in plan
+    assert "1w tide" in plan and "Impulse" in plan
+    assert "expire" not in plan
 
 
 def test_uptrend_without_pullback_stands_aside():

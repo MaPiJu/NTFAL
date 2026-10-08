@@ -37,7 +37,6 @@ class StrategyParams:
     # shorting near the highs is noisier and downtrends move faster.
     safezone_factor_long: float = 2.0
     safezone_factor_short: float = 3.0
-    entry_order_expire_bars: int = 2
     score_reward_risk_weight: float = 0.40
     score_impulse_weight: float = 0.25
     score_tide_weight: float = 0.20

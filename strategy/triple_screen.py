@@ -69,7 +69,7 @@ class Signal:
     entry_impulse: str | None  # 3rd-screen Impulse — context for the operator, never a veto
     divergences: list[str]  # Elder MACD-Histogram / Force Index divergence warnings
     value_zone_status: str  # in_value / near_value / extended (beyond the wave channel)
-    entry_order_plan: str | None  # how to roll/expire the theoretical stop-entry
+    entry_order_plan: str | None  # how to trail the theoretical stop-entry, and when to cancel it
     # Second entry technique: stop & reward:risk for the limit (pullback) fill,
     # which differ from the breakout entry's. None when there is no limit entry.
     entry_limit_stop: float | None = None
@@ -283,20 +283,26 @@ def safezone_stop_for_limit(
 def theoretical_entry_order_plan(
     action: Action,
     entry: float | None,
-    params: StrategyParams = DEFAULT_PARAMS,
     wave_label: str = "wave",
+    tide_label: str = "tide",
 ) -> str | None:
-    """Human-readable lifecycle for the stop-entry order Elder would trail."""
+    """Human-readable lifecycle for the stop-entry order Elder would trail.
+
+    Elder (p.161) keeps lowering the buy-stop each day "until stopped in or until
+    the weekly indicator reverses and cancels its buy signal" — no fixed expiry:
+    the order lives as long as the tide and the Impulse censorship allow the trade.
+    """
     if action not in ("long", "short") or entry is None:
         return None
-    direction = "buy-stop" if action == "long" else "sell-stop"
+    if action == "long":
+        direction, move, level, trend, color = "buy-stop", "lower", "high + 1 tick", "up", "red"
+    else:
+        direction, move, level, trend, color = "sell-stop", "raise", "low - 1 tick", "down", "green"
     return (
-        f"Place a theoretical {direction} at {entry:.6g}; if not filled, roll it each "
-        f"{wave_label} bar to the latest completed bar's "
-        f"{'high + 1 tick' if action == 'long' else 'low - 1 tick'} "
-        f"while the tide, Force Index pullback, value-zone filter and Impulse veto "
-        f"remain valid; expire after {params.entry_order_expire_bars} completed "
-        f"{wave_label} bars."
+        f"Place a theoretical {direction} at {entry:.6g}; if not filled, {move} it each "
+        f"{wave_label} bar to the latest completed bar's {level}. It stays valid until "
+        f"filled as long as the {tide_label} tide stays {trend} and no {color} Impulse "
+        f"(tide or wave) censors the {action}; cancel it when either fails."
     )
 
 
@@ -745,7 +751,7 @@ def evaluate_asset(
         score = compute_quality_score(
             rr, impulse_confirmation(candidate, t_imp, w_imp), strength, pull, params
         )
-    order_plan = theoretical_entry_order_plan(candidate, entry, params, labels["wave"])
+    order_plan = theoretical_entry_order_plan(candidate, entry, labels["wave"], labels["tide"])
 
     return Signal(
         asset=asset,

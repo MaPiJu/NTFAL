@@ -115,9 +115,6 @@ fi_scale_lookback = 20
 safezone_lookback_bars = 20
 safezone_factor_long = 2.0
 safezone_factor_short = 3.0
-# The theoretical stop-entry is valid only for this many completed wave bars;
-# if still unfilled it should be rolled to the latest high/low while conditions hold.
-entry_order_expire_bars = 2
 score_reward_risk_weight = 0.40
 score_impulse_weight = 0.25
 score_tide_weight = 0.20

@@ -57,8 +57,9 @@ Their common names differ from the Hyperliquid tickers:
   sell-stop 1 tick below the prior bar's low (shorts), timed off the latest completed
   bar of the entry timeframe, plus an alternative limit at the projected EMA13 offset by
   the average pullback penetration. The stop-entry is a theoretical Elder order: if
-  unfilled it is rolled to the latest completed bar's high/low while the setup remains
-  valid, and it expires after the configured number of completed wave bars.
+  unfilled it is lowered (raised, for a short) each wave bar to the latest completed bar's
+  high/low, until filled — it stays valid as long as the tide holds and no Impulse
+  censors the trade (Elder: "until the weekly indicator reverses"), with no fixed expiry.
   The third screen **times** the entry; it never vetoes it (see below).
 - **Impulse censorship (applied last):** any **red** Impulse on the **tide or wave**
   forbids longs; any **green** forbids shorts.
@@ -213,7 +214,7 @@ Edit `config.toml`:
   not-yet-converged). Any Hyperliquid candle interval works: `1m`…`1w`.
 - `[strategy]` — tune the Elder thresholds and ranking weights without editing code:
   flat tide-slope cutoff, EMA-penetration/channel/divergence lookbacks, SafeZone
-  lookback/factors, theoretical stop-order expiry, minimum R:R,
+  lookback/factors, minimum R:R,
   "excellent" R:R, tide-strength scale, Force Index pullback scale, score weights, and
   the low-volume data-quality thresholds. **Every lookback is a count of bars** on the
   relevant screen, so the same numbers carry across horizons. Any key can be overridden
