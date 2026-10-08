@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import sys
 import threading
 from pathlib import Path
@@ -254,7 +255,12 @@ def snapshot_path(cfg: Config) -> Path:
 def write_snapshot(cfg: Config, snapshot: dict[str, Any]) -> Path:
     cfg.cache_dir.mkdir(parents=True, exist_ok=True)
     out = snapshot_path(cfg)
-    out.write_text(json.dumps(snapshot))
+    # Write aside, then swap in: a write cut short (or read halfway by the
+    # dashboard) never leaves a truncated snapshot, which would load as empty
+    # and lose the stop memory.
+    tmp = out.with_name(out.name + ".tmp")
+    tmp.write_text(json.dumps(snapshot))
+    os.replace(tmp, out)
     if cfg.journal.enabled:
         append_journal_entry(snapshot, cfg.journal.path)
     return out

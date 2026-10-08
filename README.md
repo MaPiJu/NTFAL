@@ -235,7 +235,10 @@ uv run python run.py --serve --watch    # …and keep every horizon fresh
 `--watch` starts one `apscheduler` job per horizon at its own `refresh_seconds`
 (swing daily, scalp hourly, micro every 5 minutes). A partial refresh rewrites only that
 horizon's block of the snapshot, so the swing block keeps its own timestamp. Without
-`--serve`, `--watch` just keeps the snapshot up to date in the foreground.
+`--serve`, `--watch` just keeps the snapshot up to date in the foreground. The watch jobs
+run one at a time and the snapshot is written atomically; still, run **one refreshing
+process at a time** (not a one-off `run.py` alongside a running `--watch`): each refresh
+rewrites the whole snapshot, including the remembered stops of open positions.
 
 The dashboard shows **one tab per horizon** (remembered across reloads), each with its
 chain (`4h / 1h / 15m`) and how long ago it was refreshed. Per tab: the signals table

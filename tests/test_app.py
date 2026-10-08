@@ -724,6 +724,31 @@ def test_watch_refreshes_never_overlap(tmp_path, monkeypatch):
     assert first[1] <= second[0]
 
 
+def test_a_failed_snapshot_write_leaves_the_previous_one_intact(tmp_path, monkeypatch):
+    # The snapshot carries the stop memory. A write cut short (a crash, Ctrl-C, a
+    # full disk) must not leave a truncated file: it would load as empty and the
+    # next refresh would forget every remembered stop.
+    from pathlib import Path
+
+    import run
+
+    cfg = make_config(tmp_path)
+    run.write_snapshot(cfg, {"generated_at": "1", "stop_memory": {"k": 1.0}, "horizons": {}})
+
+    real = Path.write_text
+
+    def cut_short(self, data, *args, **kwargs):
+        real(self, data[: len(data) // 2], *args, **kwargs)
+        raise OSError("disk full")
+
+    monkeypatch.setattr(Path, "write_text", cut_short)
+    with pytest.raises(OSError):
+        run.write_snapshot(cfg, {"generated_at": "2", "stop_memory": {"k": 2.0}, "horizons": {}})
+    monkeypatch.undo()
+
+    assert load_snapshot(run.snapshot_path(cfg))["stop_memory"] == {"k": 1.0}
+
+
 def test_two_percent_rule_sizes_on_equity_at_month_start(tmp_path, long_setup_fixtures):
     # Elder (p.204): "Measure your account equity on the first day of each month" —
     # the 2% limit is set from that figure for the whole month, not from today's
