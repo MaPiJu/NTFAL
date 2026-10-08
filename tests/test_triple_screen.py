@@ -13,6 +13,7 @@ from strategy.triple_screen import (
     Signal,
     _divergence_for_indicator,
     _long_levels,
+    _short_levels,
     average_adverse_noise,
     average_penetration,
     channel,
@@ -22,6 +23,7 @@ from strategy.triple_screen import (
     evaluate_asset,
     impulse_confirmation,
     projected_ema,
+    round_to_tick,
     safezone_initial_stop,
     safezone_stop_for_limit,
     select_best,
@@ -61,6 +63,21 @@ DAILY_RED = make_ohlcv(
     + [146.0, 143.0, 140.0, 137.0, 134.0],
     volumes=[1000.0] * 45 + [10000.0] + [1000.0] * 7 + [1000.0] * 5,
 )
+# A downtrend whose earlier rally pierces the daily EMA13, so the short also gets
+# an average-penetration limit entry.
+RALLY_SHORT = make_ohlcv(
+    [300.0 - 2 * i for i in range(34)]
+    + [238.0, 246.0]
+    + [246.0 - 2 * i for i in range(1, 13)]
+    + [226.0]
+)
+
+
+def _off_grid(bars: pd.DataFrame, k: float = 1.0137) -> pd.DataFrame:
+    """The same bars scaled by an odd factor, so no level lands on the tick grid by luck."""
+    bars = bars.copy()
+    bars[["open", "high", "low", "close"]] *= k
+    return bars
 
 
 def test_tick_size():
@@ -90,6 +107,60 @@ def test_entry_tick_respects_sz_decimals_cap():
     prior_high = float(DAILY_LONG["high"].iloc[-1])
     assert sig.action == "long"
     assert sig.entry == pytest.approx(prior_high + 0.1)
+
+
+def test_round_to_tick_on_the_requested_side():
+    assert round_to_tick(4126.04, "up", sz_decimals=4) == 4126.1  # xyz:GOLD, tick 0.1
+    assert round_to_tick(4126.04, "down", sz_decimals=4) == 4126.0
+    # A price already on the grid stays put, float noise or not.
+    assert round_to_tick(4126.3 + 0.1, "up", sz_decimals=4) == 4126.4
+    assert round_to_tick(4126.3 + 0.1, "down", sz_decimals=4) == 4126.4
+    # Integer prices are always valid (tick 1), and the 6 - szDecimals cap binds.
+    assert round_to_tick(123_456.4, "up") == 123_457.0
+    assert round_to_tick(123_456.4, "down") == 123_456.0
+    assert round_to_tick(0.50004, "up", sz_decimals=2) == 0.5001
+    assert round_to_tick(0.50004, "down", sz_decimals=2) == 0.5
+
+
+@pytest.mark.parametrize("side", ["long", "short"])
+def test_levels_round_to_the_tick_on_the_prudent_side(side):
+    # Hyperliquid refuses off-grid prices. Each level is rounded the way that never
+    # flatters the trade: a stop-entry further out (buy-stop up, sell-stop down), a
+    # protective stop further away (long down, short up), a limit at a better price
+    # (buy down, sell up), and the target toward the entry (reward never overstated).
+    if side == "long":
+        weekly, daily, levels = WEEKLY_UP, _off_grid(DAILY_LONG), _long_levels
+        away, better = "up", "down"
+    else:
+        weekly, daily, levels = WEEKLY_DOWN, _off_grid(RALLY_SHORT), _short_levels
+        away, better = "down", "up"
+    tick = 0.1  # szDecimals 5 leaves one price decimal at these prices
+
+    sig = evaluate_asset("X", weekly, daily, sz_decimals=5)
+    assert sig.action == side and sig.entry_limit is not None
+
+    raw_entry, raw_limit, raw_stop, raw_target = levels(weekly, daily, sz_decimals=5)
+    expected = {
+        "entry": (raw_entry, away),
+        "entry_limit": (raw_limit, better),
+        "stop": (raw_stop, better),
+        "target": (raw_target, better),  # toward the entry: below a long's, above a short's
+        "entry_limit_stop": (safezone_stop_for_limit(daily, side, sig.entry_limit), better),
+    }
+    for name, (raw, direction) in expected.items():
+        value = getattr(sig, name)
+        assert value / tick == pytest.approx(round(value / tick), abs=1e-6), name
+        assert raw / tick != pytest.approx(round(raw / tick), abs=1e-6), name  # was off-grid
+        if direction == "up":
+            assert raw < value < raw + tick, name
+        else:
+            assert raw - tick < value < raw, name
+
+    # Reward:risk is worked out from the rounded levels.
+    assert sig.reward_risk == pytest.approx(abs(sig.target - sig.entry) / abs(sig.entry - sig.stop))
+    assert sig.reward_risk_limit == pytest.approx(
+        abs(sig.target - sig.entry_limit) / abs(sig.entry_limit - sig.entry_limit_stop)
+    )
 
 
 def test_tide_trend():
@@ -142,23 +213,88 @@ def test_limit_stop_anchors_below_a_deep_pullback_fill():
     assert safezone_stop_for_limit(daily, "long", shallow_limit) == pytest.approx(breakout_stop)
 
 
-def test_value_zone_filter_rejects_extended_long_above_value():
-    # Strong uptrend; the last bar dips (Force Index < 0) but price is still far
-    # ABOVE the EMA13-EMA26 value zone — Elder calls that chasing. An earlier,
-    # deeper dip keeps today's Force Index off a new multi-week low, so it is the
-    # *value-zone* veto (not the new-extreme filter) that stands us aside.
-    daily = make_ohlcv(
-        [100.0 + 2 * i for i in range(40)] + [166.0] + [168.0 + 2 * i for i in range(12)] + [186.0]
-    )
-    params = StrategyParams(value_zone_max_distance_pct=0.0)
+def _value_zone(wave: pd.DataFrame) -> tuple[float, float]:
+    e13 = float(ema(wave["close"], EMA_FAST).iloc[-1])
+    e26 = float(ema(wave["close"], EMA_SLOW).iloc[-1])
+    return min(e13, e26), max(e13, e26)
 
-    assert value_zone_status(daily, max_distance_pct=0.0) == "extended"
-    assert value_zone_extension(daily) == "above"
-    sig = evaluate_asset("BTC", WEEKLY_UP, daily, params=params)
 
+def _close_through_the_channel(side: str) -> pd.DataFrame:
+    """A gentle wave trend (0.05% a bar), a heavy-volume counter-move, then a
+    light-volume bar that closes beyond the wave channel. FI(2) still reads as a
+    pullback (long) / rally (short), but price has already run past the channel
+    line — while staying within 3% of value, where 1h/15m bars almost always sit."""
+    sign = 1.0 if side == "long" else -1.0
+    closes = [1000.0 + sign * 0.5 * i for i in range(60)]
+    last = closes[-1]
+    closes += [last - sign * 3.0, last + sign * 8.0]
+    return make_ohlcv(closes, volumes=[1000.0] * 60 + [20_000.0, 1000.0])
+
+
+def _stretched_inside_the_channel(side: str) -> pd.DataFrame:
+    """A steep wave trend whose last bar pulls back: the close is more than 3% from
+    the value zone, yet still inside the wave channel."""
+    sign = 1.0 if side == "long" else -1.0
+    base = [(100.0 if side == "long" else 400.0) + sign * 3.0 * i for i in range(40)]
+    swing = base[-1] - sign * 6.0  # an earlier, deeper counter-move
+    closes = base + [swing] + [swing + sign * 3.0 * (i + 1) for i in range(12)]
+    closes.append(closes[-1] - sign * 3.0)
+    return make_ohlcv(closes)
+
+
+def test_channel_veto_rejects_a_long_above_the_upper_wave_channel():
+    # Elder (p.168): "never buy above the upper channel line or sell short below the
+    # lower channel line". The second screen says buy (FI(2) < 0, not a new low,
+    # Impulse not red), but the wave close sits above the upper wave channel line.
+    daily = _close_through_the_channel("long")
+    upper, _lower = channel(daily)
+    close = float(daily["close"].iloc[-1])
+    _value_low, value_high = _value_zone(daily)
+    assert close > upper
+    assert (close - value_high) / value_high < 0.03  # a fixed 3% tolerance never saw it
+
+    sig = evaluate_asset("BTC", WEEKLY_UP, daily)
+
+    assert sig.force_index_2 < 0 and sig.wave_impulse != "red"
     assert sig.action == "stand_aside"
+    assert "upper" in sig.reason and "channel" in sig.reason and "chasing" in sig.reason
     assert sig.value_zone_status == "extended"
-    assert "value zone" in sig.reason and "chasing" in sig.reason
+    assert sig.entry is None
+
+
+def test_channel_veto_rejects_a_short_below_the_lower_wave_channel():
+    daily = _close_through_the_channel("short")
+    _upper, lower = channel(daily)
+    close = float(daily["close"].iloc[-1])
+    value_low, _value_high = _value_zone(daily)
+    assert close < lower
+    assert (value_low - close) / value_low < 0.03
+
+    sig = evaluate_asset("ETH", WEEKLY_DOWN, daily)
+
+    assert sig.force_index_2 > 0 and sig.wave_impulse != "green"
+    assert sig.action == "stand_aside"
+    assert "lower" in sig.reason and "channel" in sig.reason and "chasing" in sig.reason
+    assert sig.value_zone_status == "extended"
+
+
+@pytest.mark.parametrize(("side", "weekly"), [("long", WEEKLY_UP), ("short", WEEKLY_DOWN)])
+def test_a_stretch_beyond_value_inside_the_wave_channel_is_not_vetoed(side, weekly):
+    # The veto is the channel line, not a fixed distance from value: a close more
+    # than 3% beyond the value zone, but still inside the wave channel, is tradable.
+    daily = _stretched_inside_the_channel(side)
+    upper, lower = channel(daily)
+    close = float(daily["close"].iloc[-1])
+    value_low, value_high = _value_zone(daily)
+    if side == "long":
+        assert (close - value_high) / value_high > 0.03 and close <= upper
+    else:
+        assert (value_low - close) / value_low > 0.03 and close >= lower
+
+    sig = evaluate_asset("X", weekly, daily)
+
+    assert sig.action == side
+    assert sig.value_zone_status == "near_value"  # displayed, never a veto
 
 
 def test_force_index_new_multiweek_low_blocks_long():
@@ -189,15 +325,23 @@ def test_value_zone_veto_is_directional_long_below_value():
     closes = [100.0 + 1.0 * i for i in range(40)] + [119.0]
     closes += [119.0 + i for i in range(1, 9)] + [124.0]
     daily = make_ohlcv(closes)
-    params = StrategyParams(value_zone_max_distance_pct=0.0)
 
     assert value_zone_extension(daily) == "below"
-    assert value_zone_status(daily, max_distance_pct=0.0) == "extended"
-    sig = evaluate_asset("BTC", WEEKLY_UP, daily, params=params)
+    sig = evaluate_asset("BTC", WEEKLY_UP, daily)
 
     assert sig.action == "long"
     assert "pullback to buy" in sig.reason
     assert sig.entry is not None and sig.stop is not None
+
+
+def test_value_zone_status_reads_the_wave_channel():
+    # Display only: in the EMA13-EMA26 zone, near it (outside the zone but inside
+    # the wave channel), or extended beyond the channel line.
+    flat = make_ohlcv([100.0] * 60)
+    assert value_zone_status(flat) == "in_value"
+    assert value_zone_status(_stretched_inside_the_channel("long")) == "near_value"
+    assert value_zone_status(_close_through_the_channel("long")) == "extended"
+    assert value_zone_status(_close_through_the_channel("short")) == "extended"
 
 
 def test_divergence_requires_zero_line_crossover():
@@ -269,14 +413,22 @@ def test_divergence_requires_minimum_separation():
     ]
 
 
-def test_entry_order_plan_rolls_and_expires():
+@pytest.mark.parametrize(
+    ("weekly", "daily", "move"),
+    [(WEEKLY_UP, DAILY_LONG, "lower"), (WEEKLY_DOWN, DAILY_SHORT, "raise")],
+)
+def test_entry_order_plan_rolls_until_the_tide_or_impulse_cancels_it(weekly, daily, move):
+    # Elder (p.161): "Keep lowering your buy-stop each day until stopped in or until
+    # the weekly indicator reverses and cancels its buy signal" — no fixed expiry.
     sig = evaluate_asset(
-        "BTC", WEEKLY_UP, DAILY_LONG, intervals={"tide": "1w", "wave": "1d", "entry": "4h"}
+        "BTC", weekly, daily, intervals={"tide": "1w", "wave": "1d", "entry": "4h"}
     )
 
-    assert sig.entry_order_plan is not None
-    assert "roll it each 1d bar" in sig.entry_order_plan
-    assert "expire after" in sig.entry_order_plan
+    plan = sig.entry_order_plan
+    assert plan is not None
+    assert f"{move} it each 1d bar" in plan
+    assert "1w tide" in plan and "Impulse" in plan
+    assert "expire" not in plan
 
 
 def test_uptrend_without_pullback_stands_aside():
@@ -458,13 +610,36 @@ def test_select_best_returns_none_when_nothing_qualifies():
 
 def test_average_penetration_and_projection():
     lows = [100.0] * 47
-    lows[-5], lows[-3], lows[-2] = 98.0, 97.0, 99.0  # penetrations: 2, 3, 1
+    # Two pullbacks below the (flat, 100) EMA: bar -5 alone (2), then bars -3/-2
+    # (3, 1) — one pullback each, so the deepest bars average (2 + 3) / 2.
+    lows[-5], lows[-3], lows[-2] = 98.0, 97.0, 99.0
     highs = [100.0] * 47
     daily = make_ohlcv([100.0] * 47, lows=lows, highs=highs)
 
-    assert average_penetration(daily, "down") == pytest.approx(2.0)
+    assert average_penetration(daily, "down") == pytest.approx(2.5)
     assert average_penetration(daily, "up") is None  # highs never pierce the EMA
     assert projected_ema(daily["close"]) == pytest.approx(100.0)
+
+
+@pytest.mark.parametrize("side", ["down", "up"])
+def test_average_penetration_counts_one_value_per_pullback(side):
+    # Elder (Fig. 39.3, p.159-160) measures each pullback once — A, B, C, D, the
+    # depth of each dip below the fast EMA — then averages them. Averaging every
+    # pierced bar lets the shallow bars entering and leaving a dip dilute it.
+    n = 47
+    pen = [0.0] * n
+    pen[-12:-9] = [1.0, 4.0, 2.0]  # first pullback, deepest bar 4
+    pen[-5:-3] = [3.0, 6.0]  # second pullback, deepest bar 6
+    sign = -1.0 if side == "down" else 1.0
+    extremes = [100.0 + sign * p for p in pen]
+    daily = make_ohlcv(
+        [100.0] * n,  # flat close: the EMA13 stays exactly at 100
+        lows=extremes if side == "down" else [100.0] * n,
+        highs=extremes if side == "up" else [100.0] * n,
+    )
+
+    # Per bar: (1 + 4 + 2 + 3 + 6) / 5 = 3.2. Per pullback: (4 + 6) / 2 = 5.
+    assert average_penetration(daily, side) == pytest.approx(5.0)
 
 
 def test_tiny_weekly_slope_is_treated_as_flat_market():
@@ -591,7 +766,8 @@ def test_safezone_initial_stop_uses_average_adverse_noise():
 
     entry, _limit, stop, _target = _long_levels(WEEKLY_UP, daily)
 
-    assert average_penetration(daily, "down") == pytest.approx(2.0)
+    # Two pullbacks below the EMA: 2, then max(3, 1).
+    assert average_penetration(daily, "down") == pytest.approx(2.5)
     assert average_adverse_noise(daily, "long", 20) == pytest.approx(2.5)
     assert stop == pytest.approx(min(lows[-2:]) - 2.5 * 2.0)
     assert entry > stop

@@ -16,13 +16,15 @@ from typing import Any, Protocol
 
 import pandas as pd
 
+from data.hyperliquid import PerpSpec
+
 
 class MarketDataProvider(Protocol):
     """Satisfied by HyperliquidClient."""
 
-    def tradable_perps(self, dex: str = "") -> dict[str, int]: ...
+    def tradable_perps(self, dex: str = "") -> dict[str, PerpSpec]: ...
 
-    def validate_watchlist(self, coins: Sequence[str]) -> dict[str, int]: ...
+    def validate_watchlist(self, coins: Sequence[str]) -> dict[str, PerpSpec]: ...
 
     def refresh(
         self, coin: str, interval: str, lookback_bars: int, now_ms: int | None = None

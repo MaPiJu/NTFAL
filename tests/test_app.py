@@ -6,6 +6,7 @@ import json
 from dataclasses import replace
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
@@ -16,6 +17,7 @@ from app.pipeline import (
     load_snapshot,
     position_open_risk,
     refresh_horizon,
+    size_warnings,
 )
 from config import (
     Config,
@@ -25,7 +27,9 @@ from config import (
     RiskConfig,
     ScannerConfig,
 )
+from data.hyperliquid import PerpSpec
 from journal import append_journal_entry
+from risk.sizing import position_size
 from strategy.params import StrategyParams
 from tests.conftest import make_clearinghouse_state, make_client
 
@@ -131,8 +135,9 @@ def test_build_snapshot_from_fixtures(tmp_path, btc_fixtures):
     assert "last_close" in sig and "quality_score" in sig and "is_top_pick" in sig
     # live price (still-open wave bar) + a stale-price/chasing alert
     assert "live_price" in sig and "price_alert" in sig
-    # data-quality flags travel with the signal
+    # data-quality flags travel with the signal, and so do size flags
     assert isinstance(sig["data_warnings"], list)
+    assert sig["size_warnings"] == []  # nothing sized, nothing to flag
     # the top pick (if any) must be a tradable, R:R-passing setup
     if block["top_pick"] is not None:
         pick = next(s for s in block["signals"] if s["asset"] == block["top_pick"])
@@ -293,6 +298,34 @@ def test_open_position_gets_management_verdict(tmp_path, btc_fixtures):
     assert pos["open_risk"] == max(0.0, pos["entry"] - pos["suggested_stop"]) * pos["size"]
 
 
+def test_funding_paid_reaches_the_snapshot_cli_and_journal(tmp_path, btc_fixtures, capsys):
+    addr = "0x" + "ab" * 20
+    cfg = make_config(tmp_path, address=addr)
+    position = {
+        "coin": "BTC",
+        "szi": "0.5",
+        "entryPx": "50000.0",
+        "cumFunding": {"allTime": "-3.0", "sinceOpen": "-1.25", "sinceChange": "-1.25"},
+    }
+    state = make_clearinghouse_state([position])
+    client = make_client(btc_fixtures, tmp_path, clearinghouse_states={addr: state})
+    snapshot = build_snapshot(cfg, client)
+
+    (pos,) = snapshot["positions"]
+    assert pos["cum_funding"] == -1.25  # received, not paid
+
+    from run import print_positions_table
+
+    print_positions_table(snapshot)
+    out = capsys.readouterr().out
+    assert "FUNDING PAID" in out and "-1.25" in out
+
+    journal = tmp_path / "journal.jsonl"
+    append_journal_entry(snapshot, journal)
+    (entry,) = [json.loads(line) for line in journal.read_text().splitlines()]
+    assert entry["positions"][0]["cum_funding"] == -1.25
+
+
 def test_manual_position_merges_without_an_address(tmp_path, btc_fixtures):
     from config import ManualPosition
 
@@ -421,6 +454,76 @@ def test_pipeline_passes_sz_decimals_to_the_strategy(tmp_path, btc_fixtures, mon
     build_snapshot(make_config(tmp_path), make_client(btc_fixtures, tmp_path))
 
     assert seen == {"BTC": 5}
+
+
+def test_two_percent_rule_sizes_on_equity_at_month_start(tmp_path, long_setup_fixtures):
+    # Elder (p.204): "Measure your account equity on the first day of each month" —
+    # the 2% limit is set from that figure for the whole month, not from today's
+    # equity, so a winning (or losing) streak doesn't resize trades mid-month.
+    cfg = make_config(tmp_path, equity=12_000.0, equity_at_month_start=8_000.0)
+    snapshot = build_snapshot(cfg, make_client(long_setup_fixtures, tmp_path))
+
+    (sig,) = swing(snapshot)["signals"]
+    assert sig["action"] == "long"
+    ps = sig["position_size"]
+    assert ps["risk_budget"] == pytest.approx(80.0)  # 1% of 8,000, not of 12,000
+    expected = position_size(8_000.0, sig["entry"], sig["stop"], 0.01, sz_decimals=5)
+    assert ps["size"] == expected.size
+
+
+def test_size_is_worked_out_from_the_rounded_entry_and_stop(tmp_path, long_setup_fixtures):
+    # The suggested size must be the one an order at the exchange's prices gives:
+    # both the buy-stop and the stop sit on Hyperliquid's grid before sizing.
+    snapshot = build_snapshot(make_config(tmp_path), make_client(long_setup_fixtures, tmp_path))
+
+    (sig,) = swing(snapshot)["signals"]
+    assert sig["action"] == "long"
+    tick = 0.1  # BTC (szDecimals 5) quotes one price decimal
+    for level in (sig["entry"], sig["stop"]):
+        assert level / tick == pytest.approx(round(level / tick), abs=1e-6)
+    ps = sig["position_size"]
+    assert ps["risk_per_unit"] == pytest.approx(abs(sig["entry"] - sig["stop"]))
+    assert ps["size"] == position_size(10_000.0, sig["entry"], sig["stop"], 0.01, 5).size
+
+
+def test_size_warnings_flag_sizes_the_exchange_would_refuse():
+    # The Iron Triangle sizes on risk alone; Hyperliquid adds two limits. Flag a
+    # notional above the perp's max leverage x equity, or under the $10 minimum.
+    gold = PerpSpec(sz_decimals=4, max_leverage=25)
+    assert size_warnings(1.0, 4_000.0, 10_000.0, gold) == []  # $4,000 = 0.4x equity
+
+    (over,) = size_warnings(100.0, 4_000.0, 10_000.0, gold)  # $400,000 = 40x equity
+    assert "40.0× equity" in over and "25× max leverage" in over
+
+    isolated = PerpSpec(sz_decimals=3, max_leverage=50, only_isolated=True)
+    (over,) = size_warnings(100.0, 6_500.0, 10_000.0, isolated)  # 65x
+    assert "50× max leverage" in over and "isolated margin only" in over
+
+    (tiny,) = size_warnings(0.002, 4_000.0, 10_000.0, gold)  # $8
+    assert "$10 minimum" in tiny
+    # Unknown leverage cap: only the minimum order value can be checked.
+    assert size_warnings(100.0, 4_000.0, 10_000.0, None) == []
+
+
+def test_unexecutable_size_is_flagged_never_capped(tmp_path, long_setup_fixtures, capsys):
+    # A $40 account: 1% risk buys a few hundredths of a unit at ~142, under
+    # Hyperliquid's $10 minimum order value. The flag is information: the action
+    # and the Iron-Triangle size stay exactly what Elder's rules give.
+    cfg = make_config(tmp_path, equity=40.0, equity_at_month_start=40.0)
+    snapshot = build_snapshot(cfg, make_client(long_setup_fixtures, tmp_path))
+
+    (sig,) = swing(snapshot)["signals"]
+    assert sig["action"] == "long"
+    ps = sig["position_size"]
+    assert ps["size"] == position_size(40.0, sig["entry"], sig["stop"], 0.01, 5).size
+    assert 0 < ps["size"] * sig["entry"] < 10.0
+    (warning,) = sig["size_warnings"]
+    assert "$10 minimum" in warning
+
+    from run import print_signals_tables
+
+    print_signals_tables(snapshot)
+    assert f"! size: {warning}" in capsys.readouterr().out
 
 
 def test_guard_uses_automatic_open_position_risk(tmp_path, btc_fixtures):

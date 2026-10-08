@@ -48,15 +48,22 @@ Their common names differ from the Hyperliquid tickers:
 - **First screen (tide):** strategic bias from the slope of the tide EMA13, with tiny
   slopes treated as **flat/no-trend** so ranges do not become false signals.
 - **Second screen (wave):** the 2-EMA Force Index looks for pullbacks *against* the wave
-  but *with* the tide, and the latest completed wave close must be in or near the wave
-  EMA13-EMA26 **value zone** so the scanner does not chase extended prices.
+  but *with* the tide. Elder never buys above the upper channel line nor sells short
+  below the lower one, so a long is refused when the latest completed wave close is above
+  the upper line of the **wave channel**, a short when it is below the lower line — the
+  scanner does not chase. Where the close sits versus the EMA13-EMA26 **value zone** is
+  shown as context.
 - **Third screen (entry):** buy-stop 1 tick above the prior bar's high (longs) /
   sell-stop 1 tick below the prior bar's low (shorts), timed off the latest completed
   bar of the entry timeframe, plus an alternative limit at the projected EMA13 offset by
   the average pullback penetration. The stop-entry is a theoretical Elder order: if
-  unfilled it is rolled to the latest completed bar's high/low while the setup remains
-  valid, and it expires after the configured number of completed wave bars.
+  unfilled it is lowered (raised, for a short) each wave bar to the latest completed bar's
+  high/low, until filled — it stays valid as long as the tide holds and no Impulse
+  censors the trade (Elder: "until the weekly indicator reverses"), with no fixed expiry.
   The third screen **times** the entry; it never vetoes it (see below).
+  Every level sits on Hyperliquid's price grid, rounded on the prudent side: buy-stop
+  up / sell-stop down, a long's stop and buy limit down / a short's stop and sell limit
+  up, the target toward the entry. Reward:risk and the size come from the rounded levels.
 - **Impulse censorship (applied last):** any **red** Impulse on the **tide or wave**
   forbids longs; any **green** forbids shorts.
 - **Best-trade ranking:** every validated setup gets a 0–100 quality score blending
@@ -69,11 +76,14 @@ Their common names differ from the Hyperliquid tickers:
 - **Data-quality flags:** a signal says when its own *inputs* are weak — a tide series too
   short for a converged EMA26, or a near-frozen market (a tradfi perp over the weekend
   still prints bars on ~5–10% of normal volume). Flags never change an action.
-- **Risk:** 2% Rule (Iron Triangle sizing, default 1% risk per trade, hard cap 2%) and
+- **Risk:** 2% Rule (Iron Triangle sizing, default 1% risk per trade, hard cap 2%, on the
+  equity of the first day of the month) and
   the 6% monthly guard that blocks all new entries once monthly losses + open risk reach
   6% of the month-start equity. When a public address is configured, open risk is
   calculated automatically from each held position's current Elder stop; the manual
   `open_trade_risk` field is only extra risk for positions the scanner cannot see.
+  A size the exchange would refuse — a notional above the perp's max leverage × equity,
+  or under Hyperliquid's $10 minimum order — is flagged (`⚠` on the size), never capped.
 - **Journal:** each refresh can append a compact JSONL entry with the per-horizon top
   picks, signal levels/reasons, open-position verdicts, stops and open risk.
 - **SafeZone stops:** protective and trailing stops use Elder-style adverse bar noise
@@ -136,7 +146,10 @@ Two PnL columns are shown for each position: **Elder** (computed from the last *
 wave close — the same basis as the verdict) and **live** (the exchange mark price /
 `unrealizedPnl`, which matches what Hyperliquid shows in real time). The verdict and the
 "in profit" gate always use the Elder/close value, so they don't flicker with intraday
-noise; the live column is there to reconcile with your exchange screen.
+noise; the live column is there to reconcile with your exchange screen. A **funding paid**
+column (Hyperliquid's `cumFunding.sinceOpen`, from the same read-only `clearinghouseState`
+call; negative = received) shows the holding cost neither PnL includes — in the dashboard,
+the CLI positions table and the journal.
 
 Indicators are exactly the ones in the spec — EMA13/EMA26, MACD-Histogram(12,26,9),
 2-EMA Force Index (EMA-13 FI shown for context), Impulse color. Divergence warnings reuse
@@ -209,16 +222,19 @@ Edit `config.toml`:
   `refresh_seconds`, and `min_tide_bars` (below which the tide is flagged as
   not-yet-converged). Any Hyperliquid candle interval works: `1m`…`1w`.
 - `[strategy]` — tune the Elder thresholds and ranking weights without editing code:
-  flat tide-slope cutoff, EMA-penetration/channel/divergence lookbacks, value-zone
-  proximity, SafeZone lookback/factors, theoretical stop-order expiry, minimum R:R,
+  flat tide-slope cutoff, EMA-penetration/channel/divergence lookbacks, SafeZone
+  lookback/factors, minimum R:R,
   "excellent" R:R, tide-strength scale, Force Index pullback scale, score weights, and
   the low-volume data-quality thresholds. **Every lookback is a count of bars** on the
   relevant screen, so the same numbers carry across horizons. Any key can be overridden
   for one horizon with a `[scanner.horizons.strategy]` sub-block.
-- `risk.equity` — account equity used for sizing
-- `risk.risk_pct` — risk per trade (default `0.01` = 1%; hard-capped at 2%)
+- `risk.equity` — current account equity (shown in the header, and the margin behind
+  the max-leverage check)
+- `risk.risk_pct` — risk per trade (default `0.01` = 1%; hard-capped at 2%), as a fraction
+  of `risk.equity_at_month_start`: Elder sets the 2% limit once a month, from the equity on
+  the first day of the month
 - `risk.equity_at_month_start`, `risk.month_realized_losses`, `risk.open_trade_risk` —
-  bookkeeping inputs for the 6% Rule. `open_trade_risk` is an optional manual add-on for
+  bookkeeping inputs for the 2% and 6% Rules. `open_trade_risk` is an optional manual add-on for
   trades not visible from the configured public address; visible positions are risked
   automatically from their Elder trailing stop.
 - `positions.address` — **public** wallet address (0x…) used to read your open positions

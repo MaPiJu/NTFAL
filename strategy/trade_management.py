@@ -64,6 +64,9 @@ class OpenPosition:
     # so they match what Hyperliquid shows. None falls back to the wave close.
     mark_price: float | None = None
     unrealized_pnl: float | None = None
+    # Hyperliquid's cumFunding.sinceOpen: USD of funding PAID since the position
+    # opened (negative = received). None when unknown (e.g. a manual position).
+    cum_funding: float | None = None
 
 
 @dataclass(frozen=True)
@@ -90,6 +93,7 @@ class TradeManagement:
     suggested_stop: float  # SafeZone trailing stop, ratcheted to >= break-even in profit
     verdict: Verdict
     reasons: list[str]
+    cum_funding: float | None = None  # funding paid since open (negative = received)
 
 
 def _to_float(value: Any) -> float | None:
@@ -105,8 +109,10 @@ def parse_positions(state: Mapping[str, Any]) -> list[OpenPosition]:
     `szi` is the signed position size (negative = short); a zero size means the
     position is closed and is skipped. The live `unrealizedPnl` and a mark price
     derived from `positionValue` are carried through so the displayed PnL matches
-    the exchange. Read-only: this only *reads* public account state — no key, no
-    signing, no order is ever involved.
+    the exchange, with `cumFunding.sinceOpen` — the funding paid since the position
+    opened (negative = received), a holding cost the price PnL leaves out.
+    Read-only: this only *reads* public account state — no key, no signing, no
+    order is ever involved.
     """
     out: list[OpenPosition] = []
     for ap in state.get("assetPositions", []):
@@ -117,6 +123,7 @@ def parse_positions(state: Mapping[str, Any]) -> list[OpenPosition]:
         size = abs(szi)
         pos_value = _to_float(p.get("positionValue"))
         mark_price = pos_value / size if pos_value is not None and size else None
+        funding = p.get("cumFunding") or {}
         out.append(
             OpenPosition(
                 asset=str(p["coin"]),
@@ -125,6 +132,7 @@ def parse_positions(state: Mapping[str, Any]) -> list[OpenPosition]:
                 size=size,
                 mark_price=mark_price,
                 unrealized_pnl=_to_float(p.get("unrealizedPnl")),
+                cum_funding=_to_float(funding.get("sinceOpen")),
             )
         )
     return out
@@ -275,4 +283,5 @@ def assess_position(
         suggested_stop=suggested_stop,
         verdict=verdict,
         reasons=reasons,
+        cum_funding=pos.cum_funding,
     )

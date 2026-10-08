@@ -96,7 +96,9 @@ penetration_lookback_bars = 35
 force_index_extreme_lookback_bars = 25
 channel_lookback_bars = 26
 # Elder fits the channel (around the slow EMA26) so it contains ~95% of the last
-# `channel_lookback_bars` tide bars (p.167); used as the fallback profit target.
+# `channel_lookback_bars` bars (p.167). The TIDE channel is the fallback profit
+# target; the WAVE channel is the chasing veto (p.168: "never buy above the upper
+# channel line or sell short below the lower channel line").
 channel_containment = 0.95
 min_reward_risk = 2.0
 divergence_lookback = 60
@@ -107,18 +109,12 @@ divergence_max_separation = 40
 rr_excellent = 3.0
 strong_tide_slope = 0.03
 fi_scale_lookback = 20
-# Require the latest completed wave close to be in/near the wave EMA13-EMA26
-# value zone before a new entry is actionable. 0.03 = max 3% beyond the zone.
-value_zone_max_distance_pct = 0.03
 # Elder SafeZone-style stops: average adverse noise over the lookback of wave
 # bars, multiplied by the factor, behind the recent wave extreme. Shorts use a
 # wider factor than longs (Elder p.220: >=3 vs >=2 — shorting near highs is noisier).
 safezone_lookback_bars = 20
 safezone_factor_long = 2.0
 safezone_factor_short = 3.0
-# The theoretical stop-entry is valid only for this many completed wave bars;
-# if still unfilled it should be rolled to the latest high/low while conditions hold.
-entry_order_expire_bars = 2
 score_reward_risk_weight = 0.40
 score_impulse_weight = 0.25
 score_tide_weight = 0.20
@@ -133,18 +129,21 @@ low_volume_bars = 6
 low_volume_baseline_bars = 1000
 
 [risk]
-# Account equity in USD (used by the 2% Iron Triangle sizing).
+# Current account equity in USD (shown in the dashboard header).
 equity = 10000.0
-# Risk per trade as a fraction of equity. Default 1%, HARD CAP 2% — values
-# above 0.02 are clamped, never silently exceeded.
+# Risk per trade as a fraction of the MONTH-START equity (equity_at_month_start
+# below — Elder p.204: "Measure your account equity on the first day of each
+# month"). Default 1%, HARD CAP 2% — values above 0.02 are clamped, never
+# silently exceeded.
 #
 # NOTE: each horizon sizes its suggestion as a standalone trade risking
 # `risk_pct`. The same asset may show a swing long AND a micro short; taking
 # several at once multiplies your risk. The 6% rule below caps total OPEN risk,
 # not the number of simultaneous suggestions.
 risk_pct = 0.01
-# 6% Rule bookkeeping:
-#   equity_at_month_start: equity on the 1st of the current month
+# 2% and 6% Rule bookkeeping:
+#   equity_at_month_start: equity on the 1st of the current month — the base of
+#                          both the 2% sizing and the 6% monthly limit
 #   month_realized_losses: realized losses so far this month (positive number)
 #   open_trade_risk:       optional manual extra risk for trades not visible from
 #                          the configured Hyperliquid address. Visible positions

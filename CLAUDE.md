@@ -76,11 +76,14 @@ data, not code — adding or retuning one is a config edit.
 FI(2) is **not** also printing a *new multi-period low* (longs) / *high* (shorts) — a
 fresh extreme means the move is accelerating, not a pullback, so stand aside.
 
-**Value-zone filter is directional (no chasing):** enter on a pullback *to* value, never
-chasing. A long is vetoed only when the wave close is extended **above** the EMA13–EMA26
-value zone; a short only when extended **below** it. A pullback extended the *other* way is
-an Elder bargain (its falling-knife guard is the new-extreme caveat above), so it is **not**
-vetoed by the value zone.
+**Chasing veto is the wave channel, and directional (Elder, p.168):** "never buy above the
+upper channel line or sell short below the lower channel line". A long is vetoed only when
+the wave close is **above** the upper line of the **wave** channel (the same EMA26 envelope
+as the tide target, fit on wave bars); a short only when it is **below** the lower line. A
+pullback extended the *other* way is an Elder bargain (its falling-knife guard is the
+new-extreme caveat above), so it is **not** vetoed. The wave close's position versus the
+EMA13–EMA26 value zone (`in_value` / `near_value` / `extended` beyond the channel) is shown
+as context only.
 
 **Impulse censorship overlay (applied last):** if the **tide** or the **wave** Impulse is
 **red**, longs are forbidden; if either is **green**, shorts are forbidden. The Impulse
@@ -109,6 +112,9 @@ managed on the same chain that would have entered it. Per held position, produce
 - **HOLD** otherwise; always surface a **SafeZone trailing-stop** suggestion (behind the
   recent wave extreme by the average adverse bar noise × a factor — **2 for longs, 3 for
   shorts** per Elder, since shorting near highs is noisier — ratcheted to ≥ break-even in profit).
+Each position also shows the **funding paid since it opened** (`cumFunding.sinceOpen` from
+`clearinghouseState`; negative = received) — a holding cost the price PnL leaves out. It is
+context only and never changes a verdict.
 Output is informational only; a human exits manually.
 
 Divergence warnings reuse Elder indicators only: recent price/indicator disagreement on
@@ -118,9 +124,10 @@ line between the two extremes** (Elder's "absolute must", p.87) — no crossover
 divergence — and only when the two extremes sit ~20–40 bars apart (Elder/Lovvorn, p.88).
 
 "Average penetration": over the last ~4–6 weeks *of wave bars*, measure how far pullbacks
-pierce below (uptrend) / above (downtrend) the fast EMA; average those penetrations; project
-the next bar's EMA (`today_EMA + (today_EMA − yesterday_EMA)`) and offset by that average to
-set the limit.
+pierce below (uptrend) / above (downtrend) the fast EMA — **one value per pullback**, its
+deepest bar (a run of consecutive piercing bars is one pullback; Fig. 39.3, p.159–160: A–D);
+average those penetrations; project the next bar's EMA (`today_EMA + (today_EMA −
+yesterday_EMA)`) and offset by that average to set the limit.
 
 **Every lookback is a count of bars on the relevant screen's timeframe**, never a wall-clock
 duration. That is what lets one implementation serve a weekly tide and a 4h tide.
@@ -137,9 +144,18 @@ They never change an action — they tell the operator how much to trust it:
   indicator and an intraday signal read off them is noise.
 
 ## Risk module (the two pillars)
-- **2% Rule:** `max_risk_per_trade = equity * risk_pct` with `risk_pct` default **1%**,
-  hard cap **2%**. Position size = `floor(max_risk_per_trade / abs(entry - stop))`
+- **2% Rule:** `max_risk_per_trade = equity_at_month_start * risk_pct` with `risk_pct`
+  default **1%**, hard cap **2%** — Elder sets the limit once a month, from the equity on
+  the first day of the month (p.204). Position size = `floor(max_risk_per_trade / abs(entry - stop))`
   ("Iron Triangle"). Never silently exceed the cap.
+- **Tick rounding:** every level (entry, limit, stop, target) sits on Hyperliquid's price
+  grid, rounded on the prudent side — buy-stop up, sell-stop down; a long's stop and buy
+  limit down, a short's stop and sell limit up; the target toward the entry. Reward:risk
+  and the Iron-Triangle size are computed from the rounded entry and stop.
+- **Exchange limits — flag, don't cap:** a size whose notional (size × entry) exceeds the
+  perp's `maxLeverage` × equity (from `meta`, with `onlyIsolated` noted), or falls under
+  Hyperliquid's $10 minimum order value, carries a `size_warnings` entry. The size stays the
+  Iron Triangle's and the action never changes.
 - **6% Rule:** if `month_realized_losses + sum(open_trade_risk) >= 0.06 * equity_at_month_start`,
   block all new-entry suggestions for the rest of the month (flag clearly in the UI). The
   guard is **global**, computed once across every horizon.

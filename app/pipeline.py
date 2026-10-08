@@ -23,7 +23,13 @@ import httpx
 import pandas as pd
 
 from config import WATCHLIST_ALL, Config, HorizonConfig
-from data.hyperliquid import HyperliquidError, coin_dex, completed_bars
+from data.hyperliquid import (
+    MIN_ORDER_VALUE_USD,
+    HyperliquidError,
+    PerpSpec,
+    coin_dex,
+    completed_bars,
+)
 from data.provider import MarketDataProvider
 from indicators import ema, force_index, impulse_color, macd_histogram
 from risk.sizing import MonthlyGuard, position_size, six_percent_guard
@@ -150,25 +156,50 @@ def live_price_alert(
     return None
 
 
-def expand_watchlist(watchlist: tuple[str, ...], client: MarketDataProvider) -> dict[str, int]:
-    """Resolve watchlist entries to {coin: szDecimals}, sorted by name.
+def size_warnings(size: float, entry: float, equity: float, spec: PerpSpec | None) -> list[str]:
+    """Why a suggested size may not be placeable as is — flagged, never capped.
+
+    The Iron Triangle sizes on risk alone; Hyperliquid adds two limits: the
+    notional (size x entry) can't exceed the perp's max leverage x equity, and an
+    order under $10 is refused. Like the data-quality flags, these never change
+    the action or the size: the operator decides.
+    """
+    out: list[str] = []
+    notional = size * entry
+    if spec is not None and spec.max_leverage and notional > spec.max_leverage * equity:
+        margin = ", isolated margin only" if spec.only_isolated else ""
+        out.append(
+            f"size × entry = ${notional:,.0f} is {notional / equity:.1f}× equity, above "
+            f"the {spec.max_leverage}× max leverage{margin} — not placeable at this size"
+        )
+    if notional < MIN_ORDER_VALUE_USD:
+        out.append(
+            f"size × entry = ${notional:,.2f} is under Hyperliquid's "
+            f"${MIN_ORDER_VALUE_USD:.0f} minimum order value — not placeable"
+        )
+    return out
+
+
+def expand_watchlist(watchlist: tuple[str, ...], client: MarketDataProvider) -> dict[str, PerpSpec]:
+    """Resolve watchlist entries to {coin: PerpSpec} (szDecimals, max leverage…),
+    sorted by name.
 
     "*" expands to every tradable native (crypto) perp; "<dex>:*" to every
     tradable perp of a HIP-3 builder dex (e.g. "xyz:*" = the tradfi universe:
     stocks, indices, gold, oil, forex…). Explicit coins are validated.
     """
-    sz_decimals: dict[str, int] = {}
+    specs: dict[str, PerpSpec] = {}
     explicit: list[str] = []
     for item in watchlist:
         if item == WATCHLIST_ALL:
-            sz_decimals.update(client.tradable_perps())
+            specs.update(client.tradable_perps())
         elif item.endswith(":" + WATCHLIST_ALL):
-            sz_decimals.update(client.tradable_perps(item[: -len(":" + WATCHLIST_ALL)]))
+            specs.update(client.tradable_perps(item[: -len(":" + WATCHLIST_ALL)]))
         else:
             explicit.append(item)
     if explicit:
-        sz_decimals.update(client.validate_watchlist(explicit))
-    return dict(sorted(sz_decimals.items()))
+        specs.update(client.validate_watchlist(explicit))
+    return dict(sorted(specs.items()))
 
 
 def mask_address(address: str) -> str:
@@ -264,7 +295,7 @@ def build_horizon(
     cfg: Config,
     client: MarketDataProvider,
     horizon: HorizonConfig,
-    coins: dict[str, int],
+    coins: dict[str, PerpSpec],
     now_ms: int,
     held: set[str],
     on_progress: Callable[[str, str], None] | None = None,
@@ -311,11 +342,12 @@ def build_horizon(
             horizon=horizon.name,
             intervals=horizon.intervals,
             min_tide_bars=horizon.min_tide_bars,
-            sz_decimals=coins.get(coin),
+            sz_decimals=coins[coin].sz_decimals,
         )
         evaluated.append(sig)
         row = asdict(sig)
         row["position_size"] = None
+        row["size_warnings"] = []
         row["last_close"] = float(wave["close"].iloc[-1])
         # Live price = the still-open wave bar's close (falls back to the last
         # completed close when there is no open bar). Lets the operator see how
@@ -351,7 +383,7 @@ def build_horizon(
 def _finalize_block(
     block: dict[str, Any],
     cfg: Config,
-    coins: dict[str, int],
+    coins: dict[str, PerpSpec],
     guard_blocked: bool,
 ) -> dict[str, Any]:
     """Apply position sizing and Elder's "which trade?" ranking to one block.
@@ -368,15 +400,19 @@ def _finalize_block(
         # still sized and merely flagged, per the spec: flag, don't hide.)
         tradable = (row["reward_risk"] or 0.0) > 0
         if row["action"] != "stand_aside" and tradable and not guard_blocked:
-            row["position_size"] = asdict(
-                position_size(
-                    cfg.risk.equity,
-                    row["entry"],
-                    row["stop"],
-                    cfg.risk.risk_pct,
-                    sz_decimals=coins.get(row["asset"], 2),
-                )
+            spec = coins.get(row["asset"])
+            # Elder's 2% Rule (p.204) is set once a month, from the equity on the
+            # first day of the month — not from today's equity.
+            sized = position_size(
+                cfg.risk.equity_at_month_start,
+                row["entry"],
+                row["stop"],
+                cfg.risk.risk_pct,
+                sz_decimals=spec.sz_decimals if spec is not None else 2,
             )
+            row["position_size"] = asdict(sized)
+            # Margin is posted from the equity in the account now.
+            row["size_warnings"] = size_warnings(sized.size, row["entry"], cfg.risk.equity, spec)
 
     # "Which trade do I take?" — ranked within the horizon, since setups are only
     # comparable against others on the same clock. While the 6% guard is active
@@ -419,6 +455,7 @@ def build_snapshot(
     snapshot: dict[str, Any] = {
         "generated_at": datetime.now(tz=UTC).isoformat(timespec="seconds"),
         "equity": cfg.risk.equity,
+        "equity_at_month_start": cfg.risk.equity_at_month_start,
         "risk_pct": cfg.risk.risk_pct,
         "guard": asdict(guard),
         **risks,
@@ -498,6 +535,7 @@ def refresh_horizon(
     snapshot["horizons"][name] = _finalize_block(block, cfg, coins, blocked)
     snapshot["generated_at"] = datetime.now(tz=UTC).isoformat(timespec="seconds")
     snapshot["equity"] = cfg.risk.equity
+    snapshot["equity_at_month_start"] = cfg.risk.equity_at_month_start
     snapshot["risk_pct"] = cfg.risk.risk_pct
     snapshot["positions_horizon"] = cfg.scanner.positions_horizon
     snapshot["horizon_order"] = [h.name for h in cfg.scanner.horizons]

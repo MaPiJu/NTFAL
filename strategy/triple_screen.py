@@ -68,8 +68,8 @@ class Signal:
     market_regime: str  # trending / flat, derived from the tide EMA13 slope filter
     entry_impulse: str | None  # 3rd-screen Impulse — context for the operator, never a veto
     divergences: list[str]  # Elder MACD-Histogram / Force Index divergence warnings
-    value_zone_status: str  # in_value / near_value / extended
-    entry_order_plan: str | None  # how to roll/expire the theoretical stop-entry
+    value_zone_status: str  # in_value / near_value / extended (beyond the wave channel)
+    entry_order_plan: str | None  # how to trail the theoretical stop-entry, and when to cancel it
     # Second entry technique: stop & reward:risk for the limit (pullback) fill,
     # which differ from the breakout entry's. None when there is no limit entry.
     entry_limit_stop: float | None = None
@@ -97,6 +97,27 @@ def tick_size(price: float, sz_decimals: int | None = None) -> float:
     if sz_decimals is not None:
         tick = max(tick, 10.0 ** -(MAX_PRICE_DECIMALS - sz_decimals))
     return tick
+
+
+def round_to_tick(
+    price: float, direction: Literal["up", "down"], sz_decimals: int | None = None
+) -> float:
+    """`price` on Hyperliquid's price grid, rounded `direction`.
+
+    A price already on the grid (up to float noise, e.g. 4126.3 + 0.1) stays put.
+    Non-positive prices have no grid and are returned unchanged.
+    """
+    if price <= 0:
+        return price
+    tick = tick_size(price, sz_decimals)
+    steps = price / tick
+    nearest = round(steps)
+    if abs(steps - nearest) < 1e-6:
+        steps_on_grid = nearest
+    else:
+        steps_on_grid = math.ceil(steps) if direction == "up" else math.floor(steps)
+    # The tick is a power of ten: round away the float noise of the product.
+    return round(steps_on_grid * tick, max(0, round(-math.log10(tick))))
 
 
 def tide_trend(
@@ -129,19 +150,23 @@ def average_penetration(
     span: int = EMA_FAST,
     lookback: int = DEFAULT_PARAMS.penetration_lookback_bars,
 ) -> float | None:
-    """Average distance pullbacks pierce the wave EMA13 over the last `lookback` bars.
+    """Average depth of the pullbacks through the wave EMA13 over the last `lookback` bars.
 
     side="down": how far lows dip below the EMA (for longs in an uptrend);
     side="up":   how far highs poke above the EMA (for shorts in a downtrend).
-    Bars without a penetration are ignored; returns None if there were none.
+    Elder measures each pullback once (Fig. 39.3, p.159-160: occasions A-D): every
+    run of consecutive piercing bars is one pullback, measured at its deepest bar,
+    and those depths are averaged. Returns None if nothing pierced the EMA.
     """
     e = ema(wave["close"], span)
     raw = e - wave["low"] if side == "down" else wave["high"] - e
     pen = raw.clip(lower=0).iloc[-lookback:]
-    pen = pen[pen > 0]
-    if pen.empty:
+    pierced = pen > 0
+    if not pierced.any():
         return None
-    return float(pen.mean())
+    # A new pullback starts on each piercing bar that follows a non-piercing one.
+    pullback_id = (pierced & ~pierced.shift(1, fill_value=False)).cumsum()
+    return float(pen[pierced].groupby(pullback_id[pierced]).max().mean())
 
 
 def force_index_new_extreme(
@@ -167,31 +192,29 @@ def force_index_new_extreme(
     return now < float(prior.min()) if side == "long" else now > float(prior.max())
 
 
-def value_zone_status(wave: pd.DataFrame, max_distance_pct: float = 0.03) -> str:
+def value_zone_status(wave: pd.DataFrame, params: StrategyParams = DEFAULT_PARAMS) -> str:
     """Classify the last wave close versus Elder's wave EMA13-EMA26 value zone.
 
-    The Triple Screen should enter on pullbacks to value, not after price has
-    already run away. "Near" allows a small configurable overshoot so strong
-    trends are not rejected for being a few ticks outside the zone.
+    "in_value" inside the zone; "near_value" outside it but inside the wave
+    channel; "extended" beyond the wave channel line. Context for the operator
+    only — the chasing veto (`evaluate_asset`) reads the same channel line, but
+    only in the trade's direction.
     """
-    close = float(wave["close"].iloc[-1])
-    e13 = float(ema(wave["close"], EMA_FAST).iloc[-1])
-    e26 = float(ema(wave["close"], EMA_SLOW).iloc[-1])
-    low, high = sorted((e13, e26))
-    if low <= close <= high:
+    side = value_zone_extension(wave)
+    if side == "inside":
         return "in_value"
-    if close > high:
-        return "near_value" if (close - high) / high <= max_distance_pct else "extended"
-    return "near_value" if (low - close) / low <= max_distance_pct else "extended"
+    close = float(wave["close"].iloc[-1])
+    upper, lower = channel(wave, params)
+    beyond = close > upper if side == "above" else close < lower
+    return "extended" if beyond else "near_value"
 
 
 def value_zone_extension(wave: pd.DataFrame) -> Literal["above", "below", "inside"]:
     """Which side of the wave EMA13-EMA26 value zone the last close sits on.
 
-    Makes the "extended" veto directional. Elder only warns against *chasing* —
-    buying after price has run above value, or shorting after it has broken below
-    value. A pullback extended the *other* way (a long far below value, a short
-    far above) is a bargain, so it must not be vetoed by the value-zone filter.
+    Elder only warns against *chasing* — buying after price has run above value,
+    or shorting after it has broken below value. A pullback extended the *other*
+    way (a long far below value, a short far above) is a bargain.
     """
     close = float(wave["close"].iloc[-1])
     e13 = float(ema(wave["close"], EMA_FAST).iloc[-1])
@@ -281,20 +304,26 @@ def safezone_stop_for_limit(
 def theoretical_entry_order_plan(
     action: Action,
     entry: float | None,
-    params: StrategyParams = DEFAULT_PARAMS,
     wave_label: str = "wave",
+    tide_label: str = "tide",
 ) -> str | None:
-    """Human-readable lifecycle for the stop-entry order Elder would trail."""
+    """Human-readable lifecycle for the stop-entry order Elder would trail.
+
+    Elder (p.161) keeps lowering the buy-stop each day "until stopped in or until
+    the weekly indicator reverses and cancels its buy signal" — no fixed expiry:
+    the order lives as long as the tide and the Impulse censorship allow the trade.
+    """
     if action not in ("long", "short") or entry is None:
         return None
-    direction = "buy-stop" if action == "long" else "sell-stop"
+    if action == "long":
+        direction, move, level, trend, color = "buy-stop", "lower", "high + 1 tick", "up", "red"
+    else:
+        direction, move, level, trend, color = "sell-stop", "raise", "low - 1 tick", "down", "green"
     return (
-        f"Place a theoretical {direction} at {entry:.6g}; if not filled, roll it each "
-        f"{wave_label} bar to the latest completed bar's "
-        f"{'high + 1 tick' if action == 'long' else 'low - 1 tick'} "
-        f"while the tide, Force Index pullback, value-zone filter and Impulse veto "
-        f"remain valid; expire after {params.entry_order_expire_bars} completed "
-        f"{wave_label} bars."
+        f"Place a theoretical {direction} at {entry:.6g}; if not filled, {move} it each "
+        f"{wave_label} bar to the latest completed bar's {level}. It stays valid until "
+        f"filled as long as the {tide_label} tide stays {trend} and no {color} Impulse "
+        f"(tide or wave) censors the {action}; cancel it when either fails."
     )
 
 
@@ -307,18 +336,19 @@ def projected_ema(wave_close: pd.Series, span: int = EMA_FAST) -> float:
 
 
 def channel(
-    tide: pd.DataFrame,
+    bars: pd.DataFrame,
     params: StrategyParams = DEFAULT_PARAMS,
     span: int = EMA_SLOW,
 ) -> tuple[float, float]:
-    """(upper, lower) tide channel around the slow EMA26 — Elder's percentage
-    envelope (p.167), used as a fallback target when price already trades beyond
-    the tide value zone.
+    """(upper, lower) channel around the slow EMA26 — Elder's percentage envelope
+    (p.167). On the tide it is the fallback target when price already trades
+    beyond the tide value zone; on the wave it is the chasing veto (p.168: never
+    buy above the upper line, never sell short below the lower one).
 
     Elder draws the channel parallel to the *slower* EMA and widens it until it
     contains ~95% of recent bars. The bars left outside (1 - `containment`) are
     split between the two edges, so each half-width is the
-    `1 - (1 - containment) / 2` quantile of the **relative** excursion of tide
+    `1 - (1 - containment) / 2` quantile of the **relative** excursion of the
     highs above / lows below the EMA (penetration / EMA at that bar) over the
     lookback, projected onto the latest EMA.
 
@@ -327,14 +357,14 @@ def channel(
     even for a market that has since crashed — a deliberate 24/7 adaptation that
     fits the two sides independently rather than as one symmetric coefficient.
     """
-    e = ema(tide["close"], span)
+    e = ema(bars["close"], span)
     window = slice(-params.channel_lookback_bars, None)
     # Relative excursion of each bar's high above / low below the EMA (0 when the
     # bar doesn't poke out). Each edge leaves half of the (1 - containment) budget
     # outside, so the channel as a whole contains ~containment of the bars —
     # Elder's "contains ~95% of bars" fit (p.167).
-    up = ((tide["high"] - e) / e).clip(lower=0).iloc[window]
-    down = ((e - tide["low"]) / e).clip(lower=0).iloc[window]
+    up = ((bars["high"] - e) / e).clip(lower=0).iloc[window]
+    down = ((e - bars["low"]) / e).clip(lower=0).iloc[window]
     last = float(e.iloc[-1])
     q = 1.0 - (1.0 - params.channel_containment) / 2.0
     upper = last * (1.0 + (float(up.quantile(q)) if not up.empty else 0.0))
@@ -388,6 +418,33 @@ def _short_levels(
     value_low = min(e13, e26)
     target = value_low if value_low < entry else channel(tide, params)[1]
     return entry, limit, stop, target
+
+
+def _round_levels(
+    side: Literal["long", "short"],
+    entry: float,
+    limit: float | None,
+    stop: float,
+    target: float,
+    sz_decimals: int | None = None,
+) -> tuple[float, float | None, float, float]:
+    """Put a setup's levels on Hyperliquid's price grid, each on the prudent side.
+
+    The stop-entry moves further out (buy-stop up, sell-stop down), the limit to a
+    better price and the protective stop further away (long: both down; short:
+    both up), the target toward the entry — rounding never flatters the trade.
+    """
+    if side == "long":
+        entry_dir, limit_dir, stop_dir = "up", "down", "down"
+    else:
+        entry_dir, limit_dir, stop_dir = "down", "up", "up"
+    target_dir = "down" if target > entry else "up"
+    return (
+        round_to_tick(entry, entry_dir, sz_decimals),
+        round_to_tick(limit, limit_dir, sz_decimals) if limit is not None else None,
+        round_to_tick(stop, stop_dir, sz_decimals),
+        round_to_tick(target, target_dir, sz_decimals),
+    )
 
 
 def _last_pivot(values: pd.Series, *, kind: Literal["low", "high"]) -> tuple[int, float] | None:
@@ -639,7 +696,8 @@ def evaluate_asset(
     `tide` and `wave` must be OHLCV frames of *completed* bars (open/high/low/
     close/volume columns, oldest first); `entry_frame` is the optional third
     screen's lower-timeframe bars. `sz_decimals` (from `meta`) caps the decimals
-    of the stop-entry price, per Hyperliquid's tick rules.
+    of every price level, per Hyperliquid's tick rules; each level is rounded to
+    that grid on the prudent side (see `_round_levels`).
     """
     labels = intervals or DEFAULT_INTERVALS
     t_imp = str(impulse_color(tide["close"]).iloc[-1])
@@ -655,7 +713,7 @@ def evaluate_asset(
         min_separation=params.divergence_min_separation,
         max_separation=params.divergence_max_separation,
     )
-    vz_status = value_zone_status(wave, params.value_zone_max_distance_pct)
+    vz_status = value_zone_status(wave, params)
 
     candidate: Action = "stand_aside"
     if trend == "up":
@@ -691,33 +749,40 @@ def evaluate_asset(
     elif candidate == "short" and "green" in (t_imp, w_imp):
         candidate = "stand_aside"
         reason = f"short vetoed by Impulse (tide={t_imp}, wave={w_imp}: green forbids shorts)"
-    elif candidate in ("long", "short") and vz_status == "extended":
-        # The "extended" veto is directional (Elder only warns against *chasing*):
-        # veto a long only when price is extended ABOVE value, a short only when
-        # extended BELOW. A pullback the other way is a bargain — its falling-knife
+    elif candidate in ("long", "short"):
+        # Elder (p.168): "never buy above the upper channel line or sell short below
+        # the lower channel line" — on the wave, where the entry is decided. The veto
+        # is directional: a pullback the other way is a bargain, and its falling-knife
         # guard is the Force-Index new-extreme filter above, not this veto.
-        zone_side = value_zone_extension(wave)
-        chasing = (candidate == "long" and zone_side == "above") or (
-            candidate == "short" and zone_side == "below"
-        )
-        if chasing:
-            vetoed = candidate
+        upper, lower = channel(wave, params)
+        close = float(wave["close"].iloc[-1])
+        if candidate == "long" and close > upper:
             candidate = "stand_aside"
             reason = (
-                f"{vetoed} vetoed: the {labels['wave']} close is extended {zone_side} the "
-                f"EMA13-EMA26 value zone (chasing)"
+                f"long vetoed: the {labels['wave']} close {close:.6g} is above the upper "
+                f"{labels['wave']} channel line {upper:.6g} (chasing)"
+            )
+        elif candidate == "short" and close < lower:
+            candidate = "stand_aside"
+            reason = (
+                f"short vetoed: the {labels['wave']} close {close:.6g} is below the lower "
+                f"{labels['wave']} channel line {lower:.6g} (chasing)"
             )
 
     entry = limit = stop = target = rr = None
     entry_impulse = None
+    # Every level is put on the exchange's price grid before reward:risk (and,
+    # downstream, the size) is worked out from it.
     if candidate == "long":
         entry, limit, stop, target = _long_levels(tide, wave, params, sz_decimals)
         entry, entry_impulse = _entry_screen_levels(candidate, entry_frame, entry, sz_decimals)
+        entry, limit, stop, target = _round_levels("long", entry, limit, stop, target, sz_decimals)
         if entry > stop:
             rr = (target - entry) / (entry - stop)
     elif candidate == "short":
         entry, limit, stop, target = _short_levels(tide, wave, params, sz_decimals)
         entry, entry_impulse = _entry_screen_levels(candidate, entry_frame, entry, sz_decimals)
+        entry, limit, stop, target = _round_levels("short", entry, limit, stop, target, sz_decimals)
         if stop > entry:
             rr = (entry - target) / (stop - entry)
 
@@ -725,7 +790,11 @@ def evaluate_asset(
     # fill, since a deep pullback can clear the breakout stop.
     limit_stop = limit_rr = None
     if candidate in ("long", "short") and limit is not None and target is not None:
-        limit_stop = safezone_stop_for_limit(wave, candidate, limit, params)
+        limit_stop = round_to_tick(
+            safezone_stop_for_limit(wave, candidate, limit, params),
+            "down" if candidate == "long" else "up",
+            sz_decimals,
+        )
         if candidate == "long" and limit > limit_stop:
             limit_rr = (target - limit) / (limit - limit_stop)
         elif candidate == "short" and limit_stop > limit:
@@ -739,7 +808,7 @@ def evaluate_asset(
         score = compute_quality_score(
             rr, impulse_confirmation(candidate, t_imp, w_imp), strength, pull, params
         )
-    order_plan = theoretical_entry_order_plan(candidate, entry, params, labels["wave"])
+    order_plan = theoretical_entry_order_plan(candidate, entry, labels["wave"], labels["tide"])
 
     return Signal(
         asset=asset,

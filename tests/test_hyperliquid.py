@@ -11,11 +11,16 @@ from data.hyperliquid import (
     MAX_CANDLES_PER_REQUEST,
     HyperliquidClient,
     HyperliquidError,
+    PerpSpec,
     coin_dex,
     completed_bars,
     parse_candles,
 )
 from tests.conftest import META, load_fixture, make_clearinghouse_state, make_client
+
+
+def sz_of(specs: dict[str, PerpSpec]) -> dict[str, int]:
+    return {coin: spec.sz_decimals for coin, spec in specs.items()}
 
 
 def test_parse_candles_types_and_order():
@@ -41,7 +46,7 @@ def test_parse_candles_empty():
 def test_validate_watchlist(tmp_path, btc_fixtures):
     client = make_client(btc_fixtures, tmp_path)
     sz = client.validate_watchlist(["BTC", "ETH", "SOL", "HYPE"])
-    assert sz == {"BTC": 5, "ETH": 4, "SOL": 2, "HYPE": 2}
+    assert sz_of(sz) == {"BTC": 5, "ETH": 4, "SOL": 2, "HYPE": 2}
 
     with pytest.raises(HyperliquidError, match="DOGEZILLA"):
         client.validate_watchlist(["BTC", "DOGEZILLA"])
@@ -50,7 +55,7 @@ def test_validate_watchlist(tmp_path, btc_fixtures):
 def test_tradable_perps_excludes_delisted(tmp_path, btc_fixtures):
     client = make_client(btc_fixtures, tmp_path)
     perps = client.tradable_perps()
-    assert perps == {"BTC": 5, "ETH": 4, "HYPE": 2, "SOL": 2}
+    assert sz_of(perps) == {"BTC": 5, "ETH": 4, "HYPE": 2, "SOL": 2}
     assert "OLD" not in perps  # delisted
     assert list(perps) == sorted(perps)
 
@@ -64,7 +69,7 @@ def test_validate_watchlist_mixed_dexes(tmp_path, btc_fixtures):
     log: list[dict] = []
     client = make_client(btc_fixtures, tmp_path, requests_log=log)
     sz = client.validate_watchlist(["BTC", "xyz:GOLD"])
-    assert sz == {"BTC": 5, "xyz:GOLD": 4}
+    assert sz_of(sz) == {"BTC": 5, "xyz:GOLD": 4}
     # one meta request per dex involved: native (no dex key) + "xyz"
     meta_dexes = {req.get("dex", "") for req in log if req["type"] == "meta"}
     assert meta_dexes == {"", "xyz"}
@@ -87,8 +92,19 @@ def test_validate_watchlist_rejects_explicit_delisted_coin(tmp_path, btc_fixture
 def test_tradable_perps_builder_dex(tmp_path, btc_fixtures):
     client = make_client(btc_fixtures, tmp_path)
     perps = client.tradable_perps("xyz")
-    assert perps == {"xyz:GOLD": 4, "xyz:SP500": 4}
+    assert sz_of(perps) == {"xyz:GOLD": 4, "xyz:SP500": 4}
     assert "xyz:RETIRED" not in perps  # delisted
+
+
+def test_meta_exposes_leverage_limits(tmp_path, btc_fixtures):
+    # Whether a suggested size can be placed at all depends on more than
+    # szDecimals: the perp's leverage cap, and whether it trades on isolated
+    # margin only (some xyz perps do). Both come from the same `meta` request.
+    client = make_client(btc_fixtures, tmp_path)
+    specs = client.validate_watchlist(["BTC", "xyz:SP500"])
+    assert specs["BTC"] == PerpSpec(sz_decimals=5, max_leverage=40, only_isolated=False)
+    assert specs["xyz:SP500"] == PerpSpec(sz_decimals=4, max_leverage=30, only_isolated=True)
+    assert client.tradable_perps("xyz")["xyz:GOLD"] == PerpSpec(4, 25)
 
 
 def test_cache_path_is_filename_safe(tmp_path, btc_fixtures):

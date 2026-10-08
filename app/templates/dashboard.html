@@ -24,6 +24,8 @@
         your public address. Two PnL views: <strong>Elder</strong> (from the last
         completed bar of the managing horizon — the basis for the verdict) and
         <strong>live</strong> (exchange mark price, matches Hyperliquid now).
+        <strong>Funding paid</strong> is the funding paid since the position opened
+        (negative = received) — a holding cost neither PnL includes.
         <strong>Verdict is informational only</strong>; you decide and place any
         order manually.
       </p>
@@ -31,7 +33,9 @@
         <thead>
           <tr>
             <th>Asset</th><th>Side</th><th>Entry</th><th>Close</th><th>Mark (live)</th>
-            <th>PnL (Elder)</th><th>PnL (live)</th><th>Impulse tide/wave</th>
+            <th>PnL (Elder)</th><th>PnL (live)</th>
+            <th title="cumFunding since open: positive = paid, negative = received">Funding paid</th>
+            <th>Impulse tide/wave</th>
             <th>Target</th><th>Trail stop</th><th>Verdict</th><th>Why</th>
           </tr>
         </thead>

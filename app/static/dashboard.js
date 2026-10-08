@@ -115,6 +115,23 @@ function warningsHTML(s) {
   return `<br><strong class="warn">! Data quality:</strong> <span class="warn">${warns.join(" · ")}</span>`;
 }
 
+// The suggested size breaks an exchange limit (max leverage, $10 minimum order).
+// Flagged, never capped: the size shown is still the Iron Triangle's.
+function sizeCell(s) {
+  if (!s.position_size) return "—";
+  const warns = s.size_warnings || [];
+  const size = fmt(s.position_size.size, 6);
+  if (!warns.length) return size;
+  const title = warns.join(" · ").replace(/"/g, "&quot;");
+  return `<span class="rr-bad" title="${title}">${size} ⚠</span>`;
+}
+
+function sizeWarningsHTML(s) {
+  const warns = s.size_warnings || [];
+  if (!warns.length) return "";
+  return `<br><strong class="warn">! Size:</strong> <span class="warn">${warns.join(" · ")}</span>`;
+}
+
 function warnBadge(s) {
   const warns = s.data_warnings || [];
   if (!warns.length) return "";
@@ -160,7 +177,6 @@ function renderTable(block) {
         : `<span class="${s.rr_ok ? "rr-good" : "rr-bad"}">${rr.toFixed(2)}${s.rr_ok ? "" : " ⚠"}</span>`;
     const limitRr = s.reward_risk_limit;
     const limitRrCell = limitRr === null || limitRr === undefined ? "—" : limitRr.toFixed(2);
-    const size = s.position_size ? fmt(s.position_size.size, 6) : "—";
     const row = document.createElement("tr");
     row.dataset.action = s.action;
     if (s.is_top_pick) row.classList.add("top-pick");
@@ -181,8 +197,8 @@ function renderTable(block) {
       <td>${limitRrCell}</td>
       <td>${fmt(s.target)}</td>
       <td>${scoreCell(s)}</td>
-      <td>${size}</td>
-      <td class="reason">${s.reason}<br><strong>Value zone:</strong> ${(s.value_zone_status || "—").replace("_", " ")}${s.price_alert ? `<br><strong>⚠ Live price:</strong> ${s.price_alert}` : ""}${s.entry_order_plan ? `<br><strong>Order plan:</strong> ${s.entry_order_plan}` : ""}${(s.divergences || []).length ? `<br><strong>Divergences:</strong> ${s.divergences.join(", ")}` : ""}${warningsHTML(s)}</td>`;
+      <td>${sizeCell(s)}</td>
+      <td class="reason">${s.reason}<br><strong>Value zone:</strong> ${(s.value_zone_status || "—").replace("_", " ")}${s.price_alert ? `<br><strong>⚠ Live price:</strong> ${s.price_alert}` : ""}${s.entry_order_plan ? `<br><strong>Order plan:</strong> ${s.entry_order_plan}` : ""}${(s.divergences || []).length ? `<br><strong>Divergences:</strong> ${s.divergences.join(", ")}` : ""}${warningsHTML(s)}${sizeWarningsHTML(s)}</td>`;
     tbody.appendChild(row);
   }
 }
@@ -195,6 +211,15 @@ function positionsByAsset(snapshot) {
   const map = new Map();
   for (const p of snapshot.positions || []) map.set(p.asset, p);
   return map;
+}
+
+// Hyperliquid's cumFunding.sinceOpen: funding PAID since the position opened
+// (negative = received). A cost the price PnL doesn't show. Unknown for manual
+// positions.
+function fundingText(p) {
+  if (p.cum_funding === null || p.cum_funding === undefined) return "—";
+  const cls = p.cum_funding > 0 ? "rr-bad" : "rr-good";
+  return `<span class="${cls}">${fmt(p.cum_funding, 6)}</span>`;
 }
 
 function verdictBadge(verdict) {
@@ -216,7 +241,7 @@ function renderPositions(snapshot) {
   const tbody = document.querySelector("#positions-table tbody");
   tbody.innerHTML = "";
   if (positions.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="12" class="reason">No open positions (or held coins are too new to evaluate).</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="13" class="reason">No open positions (or held coins are too new to evaluate).</td></tr>`;
     return;
   }
   // Most urgent first: exit, then take profits, then hold.
@@ -235,6 +260,7 @@ function renderPositions(snapshot) {
       <td>${fmt(p.live_price)}</td>
       <td class="${elderCls}">${fmt(p.pnl_elder, 6)}</td>
       <td class="${liveCls}">${fmt(p.pnl_live, 6)}</td>
+      <td>${fundingText(p)}</td>
       <td>${impulseDot(p.tide_impulse)} / ${impulseDot(p.wave_impulse)}</td>
       <td>${target}</td>
       <td>${fmt(p.suggested_stop)}</td>
@@ -262,6 +288,7 @@ function positionPanelHTML(p) {
         <span>Mark (live) <b>${fmt(p.live_price)}</b></span>
         <span>PnL Elder <b>${pnlText(p.pnl_elder, p.return_pct_elder)}</b></span>
         <span>PnL live <b>${pnlText(p.pnl_live, p.return_pct_live)}</b></span>
+        <span title="cumFunding since open — positive = paid, negative = received">Funding paid <b>${fundingText(p)}</b></span>
         <span>Target <b>${fmt(p.target)}${p.target_reached ? " ✓" : ""}</b></span>
         <span>Trail stop <b>${fmt(p.suggested_stop)}</b></span>
       </div>
@@ -421,7 +448,8 @@ function renderAll() {
   const block = currentBlock();
 
   document.getElementById("meta").textContent =
-    `equity $${fmt(snapshot.equity, 8)} · risk/trade ${(snapshot.risk_pct * 100).toFixed(1)}% · ` +
+    `equity $${fmt(snapshot.equity, 8)} · risk/trade ${(snapshot.risk_pct * 100).toFixed(1)}% ` +
+    `of month-start equity $${fmt(snapshot.equity_at_month_start ?? snapshot.equity, 8)} · ` +
     `open risk $${fmt(snapshot.total_open_trade_risk ?? snapshot.guard.total_at_risk, 8)} · ` +
     `updated ${ago(snapshot.generated_at)}`;
 
@@ -438,7 +466,7 @@ function renderAll() {
   const stacking = document.getElementById("stacking-note");
   stacking.textContent =
     `Every horizon sizes its suggestion as a standalone trade risking ` +
-    `${(snapshot.risk_pct * 100).toFixed(1)}% of equity. Taking setups from several ` +
+    `${(snapshot.risk_pct * 100).toFixed(1)}% of month-start equity. Taking setups from several ` +
     `horizons at once multiplies your risk — the 6% rule caps total open risk, not ` +
     `the number of simultaneous suggestions.`;
   stacking.classList.remove("hidden");
