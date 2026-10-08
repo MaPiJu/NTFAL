@@ -616,6 +616,44 @@ def test_xyz_bars_skip_the_weekend_and_the_weekly_tide_is_built_from_weekdays(
     assert pos["asset"] == "xyz:SP500"
 
 
+def test_watch_refreshes_never_overlap(tmp_path, monkeypatch):
+    # --watch runs one job per horizon on a thread pool, and the cadences line up
+    # (every swing refresh fires with a scalp and a micro one). Each job loads,
+    # recomputes and writes the snapshot: run concurrently, the last writer puts
+    # back the stop memory it loaded and the stop moves back. One at a time.
+    import threading
+    import time
+
+    import run
+
+    class Client:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return None
+
+    spans: list[tuple[float, float]] = []
+
+    def slow_build(cfg, client, on_progress=None, previous=None):
+        start = time.monotonic()
+        time.sleep(0.2)
+        spans.append((start, time.monotonic()))
+        return {"generated_at": "now", "horizons": {}}
+
+    monkeypatch.setattr(run, "HyperliquidClient", lambda cache_dir: Client())
+    monkeypatch.setattr(run, "build_snapshot", slow_build)
+    cfg = make_config(tmp_path)
+    jobs = [threading.Thread(target=run.do_refresh, args=(cfg,)) for _ in range(2)]
+    for job in jobs:
+        job.start()
+    for job in jobs:
+        job.join()
+
+    first, second = sorted(spans)
+    assert first[1] <= second[0]
+
+
 def test_two_percent_rule_sizes_on_equity_at_month_start(tmp_path, long_setup_fixtures):
     # Elder (p.204): "Measure your account equity on the first day of each month" —
     # the 2% limit is set from that figure for the whole month, not from today's

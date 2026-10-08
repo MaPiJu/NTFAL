@@ -19,6 +19,7 @@ import argparse
 import json
 import math
 import sys
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +32,12 @@ from app.pipeline import (
 from config import Config, load_config
 from data.hyperliquid import HyperliquidClient
 from journal import append_journal_entry
+
+# --watch runs one job per horizon on a thread pool, and their cadences line up
+# (every swing refresh fires with a scalp and a micro one). A refresh loads,
+# recomputes and rewrites the whole snapshot, so two at once would let the last
+# writer put back what it loaded — the stop memory included. One at a time.
+_REFRESH_LOCK = threading.Lock()
 
 
 def num(x: float | None) -> str:
@@ -250,18 +257,19 @@ def _progress(horizon: str, coin: str) -> None:
 
 def do_refresh(cfg: Config, horizon: str | None = None) -> dict[str, Any]:
     """Refresh every horizon, or just one and merge it into the stored snapshot."""
-    # Both paths read the previous snapshot: besides the horizons a partial
-    # refresh merges into, it holds the stop memory (a suggested stop never
-    # moves back).
-    previous = load_snapshot(snapshot_path(cfg))
-    with HyperliquidClient(cache_dir=cfg.cache_dir) as client:
-        if horizon is None or not previous.get("horizons"):
-            # Nothing to merge into yet — a partial refresh would leave the
-            # other horizons missing from the dashboard, so do a full one.
-            snapshot = build_snapshot(cfg, client, on_progress=_progress, previous=previous)
-        else:
-            snapshot = refresh_horizon(cfg, client, horizon, previous, on_progress=_progress)
-    out = write_snapshot(cfg, snapshot)
+    with _REFRESH_LOCK:
+        # Both paths read the previous snapshot: besides the horizons a partial
+        # refresh merges into, it holds the stop memory (a suggested stop never
+        # moves back).
+        previous = load_snapshot(snapshot_path(cfg))
+        with HyperliquidClient(cache_dir=cfg.cache_dir) as client:
+            if horizon is None or not previous.get("horizons"):
+                # Nothing to merge into yet — a partial refresh would leave the
+                # other horizons missing from the dashboard, so do a full one.
+                snapshot = build_snapshot(cfg, client, on_progress=_progress, previous=previous)
+            else:
+                snapshot = refresh_horizon(cfg, client, horizon, previous, on_progress=_progress)
+        out = write_snapshot(cfg, snapshot)
     picks = {n: b.get("top_pick") for n, b in snapshot.get("horizons", {}).items()}
     picked = ", ".join(f"{n}={p}" for n, p in picks.items() if p) or "no qualifying setup"
     print(f"snapshot written to {out} · best: {picked}")
