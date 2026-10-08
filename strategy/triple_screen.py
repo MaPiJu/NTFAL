@@ -376,8 +376,9 @@ def channel(
 
     A ratio (not a price distance) keeps the channel proportional to price, and
     the lower line positive after a crash: a low below its EMA pokes out by less
-    than 100% of it. (Only highs more than doubling their own EMA — a parabolic
-    market — could push k to 100%.)
+    than 100% of it. Only highs more than doubling their own EMA — a parabolic
+    market — can push k to 100% or more; the lower line is then floored at 0,
+    which is no price: callers treat it as "no lower line".
     """
     e = ema(bars["close"], span)
     # How far each bar pokes out of its own EMA, either way, as a fraction of it
@@ -394,7 +395,7 @@ def channel(
     # Keeping m bars inside takes the m-th smallest excursion.
     inside = max(1, math.ceil(params.channel_containment * len(excursion) - 1e-9))
     k = float(excursion.sort_values().iloc[inside - 1])
-    return last * (1.0 + k), last * (1.0 - k)
+    return last * (1.0 + k), last * max(0.0, 1.0 - k)
 
 
 def _long_levels(
@@ -427,8 +428,9 @@ def _short_levels(
     wave: pd.DataFrame,
     params: StrategyParams = DEFAULT_PARAMS,
     sz_decimals: int | None = None,
-) -> tuple[float, float | None, float, float]:
-    """(entry, entry_limit, stop, target) for a short setup."""
+) -> tuple[float, float | None, float, float | None]:
+    """(entry, entry_limit, stop, target) for a short setup; no target when price
+    is already below value and the tide channel has no lower line."""
     prior_low = float(wave["low"].iloc[-1])
     tick = tick_size(prior_low, sz_decimals)
     entry = prior_low - tick  # sell-stop 1 tick below the prior bar's low
@@ -442,7 +444,7 @@ def _short_levels(
     e26 = float(ema(tide["close"], EMA_SLOW).iloc[-1])
     value_low = min(e13, e26)
     target = value_low if value_low < entry else channel(tide, params)[1]
-    return entry, limit, stop, target
+    return entry, limit, stop, target if target > 0 else None
 
 
 def _round_levels(
@@ -450,9 +452,9 @@ def _round_levels(
     entry: float,
     limit: float | None,
     stop: float,
-    target: float,
+    target: float | None,
     sz_decimals: int | None = None,
-) -> tuple[float, float | None, float, float]:
+) -> tuple[float, float | None, float, float | None]:
     """Put a setup's levels on Hyperliquid's price grid, each on the prudent side.
 
     The stop-entry moves further out (buy-stop up, sell-stop down), the limit to a
@@ -463,12 +465,12 @@ def _round_levels(
         entry_dir, limit_dir, stop_dir = "up", "down", "down"
     else:
         entry_dir, limit_dir, stop_dir = "down", "up", "up"
-    target_dir = "down" if target > entry else "up"
+    target_dir = "down" if target is not None and target > entry else "up"
     return (
         round_to_tick(entry, entry_dir, sz_decimals),
         round_to_tick(limit, limit_dir, sz_decimals) if limit is not None else None,
         round_to_tick(stop, stop_dir, sz_decimals),
-        round_to_tick(target, target_dir, sz_decimals),
+        round_to_tick(target, target_dir, sz_decimals) if target is not None else None,
     )
 
 
@@ -808,7 +810,7 @@ def evaluate_asset(
         entry, limit, stop, target = _short_levels(tide, wave, params, sz_decimals)
         entry, entry_impulse = _entry_screen_levels(candidate, entry_frame, entry, sz_decimals)
         entry, limit, stop, target = _round_levels("short", entry, limit, stop, target, sz_decimals)
-        if stop > entry:
+        if stop > entry and target is not None:
             rr = (entry - target) / (stop - entry)
 
     # Stop & reward:risk for the limit (pullback) entry — recalibrated to that

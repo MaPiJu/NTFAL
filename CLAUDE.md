@@ -206,7 +206,9 @@ pipeline to every screen and to held positions).
   tide **channel** (Elder's symmetrical channel around the slow **EMA26**: one coefficient
   k, `EMA26·(1 ± k)`, the smallest that keeps ~95% of the past **100** bars inside, each bar
   measured against its own EMA — p.79, p.167; all the history there is when shorter) when
-  price already trades beyond value; **stop** on the **wave**.
+  price already trades beyond value — a parabolic tide can push k to 100% or more, which
+  leaves no lower line (floored at 0): a short then gets **no** channel target, hence no
+  R:R and no size, rather than a negative one; **stop** on the **wave**.
   Reward:risk target ≥ **2:1**; **flag** setups below it (flag, don't hide — on short
   horizons the value-zone target tightens faster than the SafeZone stop, so sub-2:1 setups
   are the norm there and the operator needs to see them).

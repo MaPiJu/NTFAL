@@ -89,7 +89,7 @@ class TradeManagement:
     tide_impulse: str
     wave_impulse: str
     in_profit: bool  # by the Elder (close) PnL — keeps the verdict on completed bars
-    target: float  # tide value-zone edge (or channel) in the trade's direction
+    target: float | None  # tide value-zone edge (or channel) in the trade's direction
     target_reached: bool
     suggested_stop: float  # SafeZone trailing stop, ratcheted to >= break-even in profit
     verdict: Verdict
@@ -143,9 +143,10 @@ def parse_positions(state: Mapping[str, Any]) -> list[OpenPosition]:
 
 def _profit_target(
     pos: OpenPosition, tide: pd.DataFrame, params: StrategyParams = DEFAULT_PARAMS
-) -> float:
+) -> float | None:
     """Tide value-zone edge in the trade's direction, or the tide channel band
-    when price already trades beyond value (mirrors the entry targets)."""
+    when price already trades beyond value (mirrors the entry targets). None for
+    a short when the channel has no lower line (a parabolic tide: see channel)."""
     e13 = float(ema(tide["close"], EMA_FAST).iloc[-1])
     e26 = float(ema(tide["close"], EMA_SLOW).iloc[-1])
     if pos.side == "long":
@@ -156,7 +157,8 @@ def _profit_target(
     value_edge = min(e13, e26)
     if value_edge < pos.entry:
         return value_edge
-    return channel(tide, params)[1]
+    lower = channel(tide, params)[1]
+    return lower if lower > 0 else None
 
 
 def safezone_stop(
@@ -224,7 +226,12 @@ def assess_position(
     in_profit = pnl_elder > 0
 
     target = _profit_target(pos, tide, params)
-    target_reached = close_price >= target if pos.side == "long" else close_price <= target
+    if target is None:
+        target_reached = False
+    elif pos.side == "long":
+        target_reached = close_price >= target
+    else:
+        target_reached = close_price <= target
     suggested_stop = safezone_stop(pos, wave, in_profit=in_profit, params=params)
     if previous_stop is not None:
         pick = max if pos.side == "long" else min

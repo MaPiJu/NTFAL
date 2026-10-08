@@ -234,6 +234,23 @@ def test_a_remembered_stop_the_close_went_through_was_hit(side):
     assert not assess_position(pos, weekly, daily).stop_hit  # a fresh stop is never crossed
 
 
+def test_a_held_short_has_no_target_when_the_channel_has_no_lower_line():
+    # Same pump-then-crash tide: its lower channel line is floored at zero, which
+    # is no target for a short held below value.
+    pumped = [1.0, 1.05, 3.0, 2.6, 2.2, 1.9, 1.65, 1.45, 1.3, 1.18, 1.08, 1.0, 0.93, 0.87, 0.82]
+    weekly = make_ohlcv(
+        pumped,
+        lows=[c * 0.98 for c in pumped],
+        highs=[3.5 if i == 2 else c * 1.02 for i, c in enumerate(pumped)],
+        freq="W",
+    )
+    daily = make_ohlcv([1.2 - 0.01 * i for i in range(60)])
+
+    tm = assess_position(OpenPosition("X", "short", entry=0.80, size=1.0), weekly, daily)
+
+    assert tm.target is None and not tm.target_reached
+
+
 def test_safezone_stop_ratchets_to_breakeven_in_profit():
     daily = make_ohlcv([100.0 + i for i in range(60)])  # recent lows ~156
     # Entry just under the current price but ABOVE the SafeZone level, so the

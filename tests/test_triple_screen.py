@@ -510,6 +510,38 @@ def test_channel_lower_band_stays_positive_after_a_crash():
     assert lower < e26 <= upper
 
 
+# A new listing that pumped (one weekly high at 3.5x its EMA26) then crashed:
+# its symmetric channel coefficient passes 100%.
+PUMPED = [1.0, 1.05, 3.0, 2.6, 2.2, 1.9, 1.65, 1.45, 1.3, 1.18, 1.08, 1.0, 0.93, 0.87, 0.82]
+WEEKLY_PUMP_CRASH = make_ohlcv(
+    PUMPED,
+    lows=[c * 0.98 for c in PUMPED],
+    highs=[3.5 if i == 2 else c * 1.02 for i, c in enumerate(PUMPED)],
+    freq="W",
+)
+
+
+def test_a_channel_past_100_percent_never_gives_a_negative_target():
+    # One coefficient sets both lines, so highs more than doubling their EMA push
+    # k past 1: the lower line is then no price at all. It is floored at zero and
+    # a short gets no channel target (hence no R:R, no size, no Apgar credit)
+    # rather than a negative target and a huge fake reward:risk.
+    _upper, lower = channel(WEEKLY_PUMP_CRASH)
+    assert lower == 0.0
+
+    closes = [1.2 - 0.01 * i for i in range(40)]
+    closes += [closes[-1] + 0.03, closes[-1] + 0.01]
+    closes += [closes[-1] - 0.01 * i for i in range(1, 12)]
+    closes.append(closes[-1] + 0.01)  # a mild rally to sell
+    daily = make_ohlcv(closes, lows=[c - 0.005 for c in closes], highs=[c + 0.005 for c in closes])
+
+    sig = evaluate_asset("X", WEEKLY_PUMP_CRASH, daily)
+
+    assert sig.action == "short"
+    assert sig.target is None and sig.reward_risk is None and not sig.rr_ok
+    assert sig.apgar is not None and sig.apgar.lines[3].score == 0
+
+
 def test_channel_backbone_is_slow_ema26():
     # Elder draws the channel parallel to the SLOW EMA26, not the fast EMA13: the
     # symmetrical channel is centered on it.
