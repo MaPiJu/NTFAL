@@ -539,6 +539,20 @@ def test_data_warning_on_a_near_frozen_market():
     assert not any("near-closed" in w for w in data_warnings(WEEKLY_UP, DAILY_LONG))
 
 
+def test_data_warning_survives_a_whole_frozen_weekend():
+    # A tradfi weekend lasts ~49h: ~196 bars on a 15m wave. The "normal volume"
+    # baseline must span far more than that, or by Saturday it is itself made of
+    # weekend bars and the near-frozen flag switches off (live xyz:GOLD 15m: only
+    # 5 of 192 weekend bars flagged with a 60-bar baseline).
+    n_week, n_weekend = 1000, 150
+    closes = [100.0 + 0.01 * i for i in range(n_week + n_weekend)]
+    volumes = [1000.0] * n_week + [30.0] * n_weekend  # weekend at 3% of normal
+    frozen = make_ohlcv(closes, volumes=volumes, freq="15min")
+
+    warns = data_warnings(WEEKLY_UP, frozen)
+    assert any("near-closed" in w for w in warns)
+
+
 def test_data_warnings_do_not_change_the_action():
     # Flags describe the inputs; they never censor. Same bars, same verdict.
     loud = evaluate_asset("BTC", WEEKLY_UP, DAILY_LONG, min_tide_bars=9999)

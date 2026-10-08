@@ -491,7 +491,7 @@ def data_warnings(
 
     vol = wave["volume"].dropna()
     recent = vol.iloc[-params.low_volume_bars :]
-    baseline = float(vol.iloc[-params.divergence_lookback :].median()) if len(vol) else 0.0
+    baseline = float(vol.iloc[-params.low_volume_baseline_bars :].median()) if len(vol) else 0.0
     if len(recent) and baseline > 0:
         ratio = float(recent.mean()) / baseline
         if ratio < params.low_volume_ratio:

@@ -48,3 +48,6 @@ class StrategyParams:
     # median volume (a tradfi perp over the weekend is a frozen oracle).
     low_volume_ratio: float = 0.25
     low_volume_bars: int = 6
+    # Bars of wave volume whose median is "normal". Must span well over a week of
+    # wave bars (1000 x 15m ~ 10 days), or a ~49h weekend becomes the baseline.
+    low_volume_baseline_bars: int = 1000

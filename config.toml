@@ -113,6 +113,9 @@ score_pullback_weight = 0.15
 # 0.25 = warn when the last few bars average under 25% of the recent median.
 low_volume_ratio = 0.25
 low_volume_bars = 6
+# "Normal" volume = median of this many wave bars. Must span well over a week of
+# wave bars (1000 x 15m ~ 10 days) so a ~49h weekend can't become the baseline.
+low_volume_baseline_bars = 1000
 
 [risk]
 # Account equity in USD (used by the 2% Iron Triangle sizing).
