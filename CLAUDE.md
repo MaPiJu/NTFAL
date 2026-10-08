@@ -112,6 +112,9 @@ managed on the same chain that would have entered it. Per held position, produce
 - **HOLD** otherwise; always surface a **SafeZone trailing-stop** suggestion (behind the
   recent wave extreme by the average adverse bar noise × a factor — **2 for longs, 3 for
   shorts** per Elder, since shorting near highs is noisier — ratcheted to ≥ break-even in profit).
+Each position also shows the **funding paid since it opened** (`cumFunding.sinceOpen` from
+`clearinghouseState`; negative = received) — a holding cost the price PnL leaves out. It is
+context only and never changes a verdict.
 Output is informational only; a human exits manually.
 
 Divergence warnings reuse Elder indicators only: recent price/indicator disagreement on

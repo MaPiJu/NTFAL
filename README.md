@@ -146,7 +146,10 @@ Two PnL columns are shown for each position: **Elder** (computed from the last *
 wave close — the same basis as the verdict) and **live** (the exchange mark price /
 `unrealizedPnl`, which matches what Hyperliquid shows in real time). The verdict and the
 "in profit" gate always use the Elder/close value, so they don't flicker with intraday
-noise; the live column is there to reconcile with your exchange screen.
+noise; the live column is there to reconcile with your exchange screen. A **funding paid**
+column (Hyperliquid's `cumFunding.sinceOpen`, from the same read-only `clearinghouseState`
+call; negative = received) shows the holding cost neither PnL includes — in the dashboard,
+the CLI positions table and the journal.
 
 Indicators are exactly the ones in the spec — EMA13/EMA26, MACD-Histogram(12,26,9),
 2-EMA Force Index (EMA-13 FI shown for context), Impulse color. Divergence warnings reuse

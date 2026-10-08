@@ -61,6 +61,7 @@ def append_journal_entry(snapshot: dict[str, Any], path: Path) -> None:
                 "close_price": p["close_price"],
                 "suggested_stop": p["suggested_stop"],
                 "open_risk": p.get("open_risk"),
+                "cum_funding": p.get("cum_funding"),
                 "verdict": p["verdict"],
                 "reasons": p.get("reasons", []),
             }

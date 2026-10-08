@@ -298,6 +298,34 @@ def test_open_position_gets_management_verdict(tmp_path, btc_fixtures):
     assert pos["open_risk"] == max(0.0, pos["entry"] - pos["suggested_stop"]) * pos["size"]
 
 
+def test_funding_paid_reaches_the_snapshot_cli_and_journal(tmp_path, btc_fixtures, capsys):
+    addr = "0x" + "ab" * 20
+    cfg = make_config(tmp_path, address=addr)
+    position = {
+        "coin": "BTC",
+        "szi": "0.5",
+        "entryPx": "50000.0",
+        "cumFunding": {"allTime": "-3.0", "sinceOpen": "-1.25", "sinceChange": "-1.25"},
+    }
+    state = make_clearinghouse_state([position])
+    client = make_client(btc_fixtures, tmp_path, clearinghouse_states={addr: state})
+    snapshot = build_snapshot(cfg, client)
+
+    (pos,) = snapshot["positions"]
+    assert pos["cum_funding"] == -1.25  # received, not paid
+
+    from run import print_positions_table
+
+    print_positions_table(snapshot)
+    out = capsys.readouterr().out
+    assert "FUNDING PAID" in out and "-1.25" in out
+
+    journal = tmp_path / "journal.jsonl"
+    append_journal_entry(snapshot, journal)
+    (entry,) = [json.loads(line) for line in journal.read_text().splitlines()]
+    assert entry["positions"][0]["cum_funding"] == -1.25
+
+
 def test_manual_position_merges_without_an_address(tmp_path, btc_fixtures):
     from config import ManualPosition
 

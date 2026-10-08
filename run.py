@@ -153,18 +153,21 @@ def print_positions_table(snapshot: dict[str, Any]) -> None:
 
     header = (
         f"{'ASSET':<14} {'SIDE':<6} {'ENTRY':>12} {'CLOSE':>12} {'MARK':>12} "
-        f"{'PnL ELDER':>12} {'PnL LIVE':>12} {'IMP T/W':<11} {'TARGET':>12} "
-        f"{'TRAIL STOP':>12} {'OPEN RISK':>12} {'VERDICT':<13}"
+        f"{'PnL ELDER':>12} {'PnL LIVE':>12} {'FUNDING PAID':>12} {'IMP T/W':<11} "
+        f"{'TARGET':>12} {'TRAIL STOP':>12} {'OPEN RISK':>12} {'VERDICT':<13}"
     )
     print("\n" + header)
     print("-" * len(header))
     for p in positions:
         target = num(p["target"]) + ("✓" if p["target_reached"] else "")
         verdict = VERDICT_LABEL.get(p["verdict"], p["verdict"])
+        # cumFunding.sinceOpen: paid since open (negative = received).
+        funding = p.get("cum_funding")
+        funding_cell = f"{funding:,.2f}" if funding is not None else "—"
         print(
             f"{p['asset']:<14} {p['side']:<6} {num(p['entry']):>12} "
             f"{num(p['close_price']):>12} {num(p['live_price']):>12} "
-            f"{p['pnl_elder']:>12,.2f} {p['pnl_live']:>12,.2f} "
+            f"{p['pnl_elder']:>12,.2f} {p['pnl_live']:>12,.2f} {funding_cell:>12} "
             f"{p['tide_impulse'] + '/' + p['wave_impulse']:<11} "
             f"{target:>12} {num(p['suggested_stop']):>12} {num(p.get('open_risk')):>12} "
             f"{verdict:<13}"

@@ -67,6 +67,29 @@ def test_parse_positions_carries_live_price_and_pnl():
     assert pos.mark_price == pytest.approx(189.0 / 4709.0)  # positionValue / size
 
 
+def test_parse_positions_reads_funding_paid_since_open():
+    # Funding is a cost of holding a perp that the price PnL doesn't show.
+    # clearinghouseState reports it per position as cumFunding; sinceOpen is the
+    # funding PAID since the position opened (negative = received).
+    state = make_clearinghouse_state(
+        [
+            {
+                "coin": "xyz:GOLD",
+                "szi": "2.0",
+                "entryPx": "4000.0",
+                "cumFunding": {"allTime": "50.0", "sinceOpen": "12.5", "sinceChange": "3.0"},
+            },
+            {"coin": "BTC", "szi": "-0.1", "entryPx": "60000.0"},  # no funding field
+        ]
+    )
+    gold, btc = parse_positions(state)
+    assert gold.cum_funding == 12.5
+    assert btc.cum_funding is None
+
+    tm = assess_position(gold, WEEKLY_UP_GREEN, make_ohlcv([100.0 + i for i in range(60)]))
+    assert tm.cum_funding == 12.5  # carried through to the verdict
+
+
 def test_live_and_elder_pnl_are_both_reported():
     daily = make_ohlcv([100.0 + i for i in range(60)])  # daily close 159
     pos = OpenPosition("BTC", "long", entry=120.0, size=2.0, mark_price=170.0, unrealized_pnl=99.0)

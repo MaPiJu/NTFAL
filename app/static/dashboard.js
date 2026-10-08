@@ -213,6 +213,15 @@ function positionsByAsset(snapshot) {
   return map;
 }
 
+// Hyperliquid's cumFunding.sinceOpen: funding PAID since the position opened
+// (negative = received). A cost the price PnL doesn't show. Unknown for manual
+// positions.
+function fundingText(p) {
+  if (p.cum_funding === null || p.cum_funding === undefined) return "—";
+  const cls = p.cum_funding > 0 ? "rr-bad" : "rr-good";
+  return `<span class="${cls}">${fmt(p.cum_funding, 6)}</span>`;
+}
+
 function verdictBadge(verdict) {
   return `<span class="badge verdict-${verdict}">${VERDICT_LABEL[verdict] || verdict}</span>`;
 }
@@ -232,7 +241,7 @@ function renderPositions(snapshot) {
   const tbody = document.querySelector("#positions-table tbody");
   tbody.innerHTML = "";
   if (positions.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="12" class="reason">No open positions (or held coins are too new to evaluate).</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="13" class="reason">No open positions (or held coins are too new to evaluate).</td></tr>`;
     return;
   }
   // Most urgent first: exit, then take profits, then hold.
@@ -251,6 +260,7 @@ function renderPositions(snapshot) {
       <td>${fmt(p.live_price)}</td>
       <td class="${elderCls}">${fmt(p.pnl_elder, 6)}</td>
       <td class="${liveCls}">${fmt(p.pnl_live, 6)}</td>
+      <td>${fundingText(p)}</td>
       <td>${impulseDot(p.tide_impulse)} / ${impulseDot(p.wave_impulse)}</td>
       <td>${target}</td>
       <td>${fmt(p.suggested_stop)}</td>
@@ -278,6 +288,7 @@ function positionPanelHTML(p) {
         <span>Mark (live) <b>${fmt(p.live_price)}</b></span>
         <span>PnL Elder <b>${pnlText(p.pnl_elder, p.return_pct_elder)}</b></span>
         <span>PnL live <b>${pnlText(p.pnl_live, p.return_pct_live)}</b></span>
+        <span title="cumFunding since open — positive = paid, negative = received">Funding paid <b>${fundingText(p)}</b></span>
         <span>Target <b>${fmt(p.target)}${p.target_reached ? " ✓" : ""}</b></span>
         <span>Trail stop <b>${fmt(p.suggested_stop)}</b></span>
       </div>
