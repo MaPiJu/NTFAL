@@ -17,7 +17,8 @@ Le décalage est constant : **PDF = imprimée + 16**. Pages lues (imprimées) : 
 `black --check .` → OK (29 fichiers). **Après corrections** : **123 passed** ; ruff et black OK.
 **Lot 2** (Q2, Q3, Q4, Q7, Q9, Q10, Q11 phase 1, Q13 — voir §3 bis) : de 124 à **141 passed** ;
 ruff et black OK à chaque commit. **Lot 3** (Q5, Q6, Q8, Q11 phase 2, Q12 — voir §3 ter) : de 141 à
-**166 passed** ; ruff et black OK à chaque commit.
+**166 passed**, puis **183 passed** après les correctifs de sa revue adversariale (§3 ter, fin) ;
+ruff et black OK à chaque commit.
 Les références `fichier:ligne` des tableaux renvoient au commit audité `c32ab4b`.
 
 **Vérifications en direct.** Un script jetable placé **hors du dépôt** a interrogé l'endpoint public
@@ -209,7 +210,7 @@ Décisions de l'opérateur appliquées telles quelles ; écarts au livre signal�
 | Q5 | `8298f7e` | `trade_apgar()` : tide Impulse vert 2 / bleu 1 / rouge 0 ; wave Impulse bleu 2 / vert 1 / rouge 0 ; clôture du wave sous la valeur 2 / dedans 1 / au-dessus 0 ; R:R ≥ 2 → 2, ≥ 1 → 1, sinon 0 ; divergence du wave favorable 2 / aucune 1 / défavorable 0 (miroir pour un short). A-trade = ≥ 7 et aucun 0 ; `select_best` = meilleur Apgar parmi les A-trades, départage par R:R. Détail des 5 lignes au dashboard et au CLI ; le journal garde total + A-trade. Supprimés : `compute_quality_score`, `impulse_confirmation`, `pullback_quality`, `tide_slope_strength`/`tide_strength` (ne servaient qu'au score), `score_*`, `rr_excellent`, `strong_tide_slope`, `fi_scale_lookback` | `test_trade_apgar_*`, `test_an_a_trade_needs_seven_points_and_no_zero_line`, `test_select_best_*`, `test_signal_carries_its_trade_apgar` (`ImportError: TradeApgar`), `test_trade_apgar_reaches_the_snapshot_and_the_cli` (`KeyError: 'apgar'`) |
 | Q6 | `c0b17fe` | `channel()` : plus petit k tel qu'au moins `channel_containment` des barres de la fenêtre aient high ≤ EMA26·(1+k) et low ≥ EMA26·(1−k), chaque barre contre sa propre EMA ; lignes EMA26·(1 ± k) ; `channel_lookback_bars = 100` (tout l'historique s'il est plus court) | `test_channel_is_one_symmetric_coefficient_around_the_slow_ema` (`4.7 == 0.5` : demi-largeurs inégales), `test_channel_fits_the_last_100_bars_or_all_there_is` (`26 == 100`) |
 | Q8 | `194ce7d` | `stop_memory` dans le snapshot (clé actif\|sens\|entrée) ; `assess_position(previous_stop=…)` : max (long) / min (short), donc raison affichée et risque ouvert (règle des 6 %) sur le stop retenu ; nouvelle clé = remise à zéro ; `build_snapshot(previous=…)` et `refresh_horizon` relisent le snapshot, `run.py` le charge aussi pour un rafraîchissement complet | `test_suggested_stop_never_moves_against_the_trade` (`TypeError: … 'previous_stop'`), `test_a_suggested_stop_never_moves_back_across_refreshes`, `test_stop_memory_resets_when_the_position_changes`, `test_cli_refresh_reads_the_previous_snapshot_on_both_paths` (`ImportError: stop_memory_key`) |
-| Q12 | `a9d4001` | `data/sessions.py` + `[sessions.xyz]` (ven. 21:00 → dim. 22:00 UTC) : barres entièrement comprises dans la fermeture retirées avant tout indicateur (tous les écrans, positions comprises) ; écran 1w reconstruit depuis les barres 1d du lundi au vendredi ; jours fériés laissés à l'avertissement « marché quasi gelé » | `tests/test_sessions.py`, `test_parses_a_weekend_closure_per_dex`, `test_xyz_bars_skip_the_weekend_and_the_weekly_tide_is_built_from_weekdays` (`ModuleNotFoundError: data.sessions`) |
+| Q12 | `a9d4001`, `62ed8df` (fuseau) | `data/sessions.py` + `[sessions.xyz]` (ven. 21:00 → dim. 22:00 UTC à l'origine ; ven. 17:00 → dim. 18:00 heure de New York depuis `62ed8df`) : barres entièrement comprises dans la fermeture retirées avant tout indicateur (tous les écrans, positions comprises) ; écran 1w reconstruit depuis les barres 1d du lundi au vendredi ; jours fériés laissés à l'avertissement « marché quasi gelé » | `tests/test_sessions.py`, `test_parses_a_weekend_closure_per_dex`, `test_xyz_bars_skip_the_weekend_and_the_weekly_tide_is_built_from_weekdays` (`ModuleNotFoundError: data.sessions`) |
 
 Tests existants alignés : `test_quality_score_rewards_better_reward_risk` et
 `test_impulse_confirmation_counts_agreeing_screens` supprimés avec leurs fonctions ; les tests de
@@ -241,6 +242,42 @@ l'or, l'argent et le pétrole sur 187–249 barres) : le veto ne joue presque pl
   20 % / 9 % / 2 % ; aux instants de week-end, l'action diffère sur 7 % / 38 % / 49 % — avec le
   calendrier, un instant de week-end reprend le signal de la dernière barre de séance jusqu'à la
   réouverture.
+- ces chiffres, mesurés avec la fenêtre UTC, sont identiques avec la fenêtre New York (`62ed8df`) :
+  toutes les barres intrajournalières du cache tombent en heure d'été (après le 2026-03-08).
+
+### Revue adversariale du lot 3
+
+Avant la PR, le diff du lot 3 a été relu en cinq axes (sessions, mémoire du stop, Apgar, canal +
+funding, documentation), chaque constat soumis à un vérificateur chargé de le **réfuter** ; puis les
+correctifs eux-mêmes ont été relus de la même façon. 12 défauts ont été confirmés (reproduits), 5
+constats réfutés. Chaque défaut est corrigé par un commit dédié, avec un test vu en échec avant :
+
+| Commit | Défaut confirmé | Correctif | Test (échec avant) |
+|---|---|---|---|
+| `c3085bd` | Q8 : un échec de lecture `clearinghouseState` cachait la position, la mémoire du stop était réécrite sans elle et le stop reculait au rafraîchissement suivant | la mémoire garde le stop d'une position seulement cachée | `test_a_failed_position_lookup_keeps_the_stop_memory` (`{} == {…}`) |
+| `b6a0826` | Q8 (régression de `c3085bd`) : la mémoire d'une position **manuelle** retirée (ou d'un dex jamais interrogé) n'était jamais oubliée ; la même position redéclarée sortait aussitôt | ne garder que les positions encore détenues ou cachées par un échec **tenté** (`failed_dexes`) | `test_an_undeclared_manual_position_forgets_its_stop` |
+| `7f9d0ec` | Q8 / règle des 6 % : une position cachée par un échec de lecture comptait pour zéro risque ouvert, la garde des 6 % pouvait se débloquer | `hidden_positions` : dernier risque connu toujours compté ; `unread_dexes` signalé au CLI et au dashboard | `test_a_failed_lookup_keeps_the_hidden_positions_risk_in_the_6_percent_rule` (`KeyError: 'unread_dexes'`) |
+| `e32585c` | Q8 : un stop mémorisé que la clôture a traversé donnait « hold » avec un stop du mauvais côté du marché et un risque ouvert nul | `stop_hit` ⇒ EXIT (« the stop was hit ») ; risque ouvert mesuré depuis la clôture | `test_a_remembered_stop_the_close_went_through_was_hit`, `test_open_risk_is_zero_once_the_stop_locks_in_profit` (`0.0 == 60.0`) |
+| `28acbe0` | Q8 : les jobs `--watch` concurrents (cadences alignées) écrasaient la mémoire du stop (dernier écrivain) | verrou autour de lecture → calcul → écriture | `test_watch_refreshes_never_overlap` |
+| `58e08db` | Q8 : un snapshot tronqué (écriture interrompue) se relisait vide et perdait toute la mémoire | écriture atomique (fichier temporaire + `os.replace`) ; un seul processus de rafraîchissement (README) | `test_a_failed_snapshot_write_leaves_the_previous_one_intact` (`KeyError: 'stop_memory'`) |
+| `ab76c23` | Q8 : un `clearinghouseState` non-JSON ou une position illisible faisait échouer tout le rafraîchissement | erreur ⇒ seul ce dex est en échec | `test_clearinghouse_state_rejects_a_non_json_body`, `test_a_malformed_position_payload_drops_only_its_dex` |
+| `c621d72` | Q5 : les tableaux triaient sur le total Apgar brut, un setup non-A pouvait passer devant le ★ | tri : choix, puis A-trades, puis Apgar et R:R (CLI et dashboard) | `test_cli_table_lists_the_pick_then_a_trades_first` |
+| `a9f4cb8` | Q5 : un bloc d'horizon antérieur à l'Apgar (rafraîchissement partiel) faisait planter le CLI et la bannière du dashboard | lignes du meilleur trade protégées | `test_cli_survives_a_block_from_before_the_apgar` (`KeyError: 'apgar'`) |
+| `6bb32e7` | Q6 : avec k ≥ 100 % (tide parabolique), la ligne basse du canal et la cible d'un short devenaient **négatives** (R:R fictif de 28:1) | ligne basse plancher 0 ⇒ pas de cible (ni R:R, ni taille) ; idem pour un short détenu | `test_a_channel_past_100_percent_never_gives_a_negative_target`, `test_a_held_short_has_no_target_when_the_channel_has_no_lower_line` |
+| `9813333` | Q6 (suite de `6bb32e7`) : sans cible, l'ordre limite d'un short perdait aussi son stop | stop de la limite calculé dès qu'il y a une limite | `test_a_short_without_a_target_keeps_its_limit_stop` |
+| `04a1ec9` | Q11 : un `metaAndAssetCtxs` non-JSON faisait échouer tout le rafraîchissement | erreur ⇒ seuls les taux de ce dex manquent | `test_funding_rates_reject_a_non_json_body` |
+| `62ed8df` | Q12 : la fenêtre ven. 21:00 → dim. 22:00 **UTC** n'est juste qu'en heure d'été ; trade.xyz fige son prix externe de ven. 17:00 à dim. 18:00 **heure de New York** (horaires CME) | `WeekendClosure` prend un fuseau IANA ; `[sessions.xyz]` = `America/New_York`, ven. 17:00 → dim. 18:00 (identique aujourd'hui, une heure plus tard en UTC du 2026-11-01 au 2027-03-14) ; dépendance `tzdata` | `test_a_new_york_closure_follows_daylight_saving`, `test_closure_rejects_an_unknown_timezone` ; `867cfed` ajoute la semaine du passage à l'heure d'été |
+
+**Écart à la décision littérale (Q12).** La décision fixait « vendredi 21:00 → dimanche 22:00 UTC ». La
+fenêtre est désormais exprimée en heure de New York, d'après la documentation de trade.xyz (le prix
+externe se fige du vendredi 17:00 au dimanche 18:00 ET) : elle reproduit exactement la fenêtre
+décidée tant que dure l'heure d'été, et la suit en hiver. Vérifiée contre une référence calculée
+barre par barre (zoneinfo) sur une année de barres 1h, 15m, 4h et 1d : aucun écart.
+
+Constats réfutés (non corrigés) : la barre 1d du dimanche, gardée car elle contient la réouverture
+(conforme à la règle « entièrement comprise ») ; un k juste sous 100 % qui donne une cible lointaine
+mais positive (conforme au canal du livre) ; l'absence de phrase explicative pour un short sans cible
+(l'Apgar affiche « reward:risk none 0 ») ; deux constats documentaires.
 
 ---
 
@@ -259,7 +296,7 @@ l'or, l'argent et le pétrole sur 187–249 barres) : le veto ne joue presque pl
 | Q9 | Arrondi des niveaux au tick (H11) | Stop, limite et objectif non arrondis. | **Appliqué (lot 2, `5541621`).** `round_to_tick(price, direction, sz_decimals)` sur `tick_size()` : buy-stop ↑, sell-stop ↓, stop long ↓, stop short ↑, limite d'achat ↓, limite de vente ↑, objectif vers l'entrée ; le stop de la limite suit le stop. R:R et taille (Iron Triangle) sont calculés sur l'entrée et le stop arrondis. Hors périmètre : le trailing stop des positions ouvertes (`trade_management`) n'est pas arrondi. |
 | Q10 | Levier max et notionnel minimum (H12, H13) | Non contrôlés. | **Appliqué (lot 2, `2f48417`).** `validate_watchlist` et `tradable_perps` renvoient un `PerpSpec` (`sz_decimals`, `max_leverage`, `only_isolated`) ; pipeline et Protocol suivent. Avertissement `size_warnings` quand taille × entrée > maxLeverage × équité courante (marge isolée mentionnée) ou < 10 USD, affiché au dashboard (⚠ sur la taille + raison) et au CLI (`! size:`) ; ni l'action ni la taille ne changent. Exemple en direct (mission) : un short SP500 sur micro demandait 10,4 × l'équité (max 50×). |
 | Q11 | Funding (H14) | Non traité. | **Phase 1 appliquée (lot 2, `115dd04`).** `parse_positions` lit `cumFunding.sinceOpen` (`cum_funding`), affiché comme « funding payé » au dashboard, au CLI et dans le journal. Signe vérifié en direct sur 6 positions `xyz` publiques : opposé à la somme des `userFunding.usdc` (négatif = payé) ⇒ positif = payé, négatif = reçu. **Phase 2 appliquée (lot 3, `6911a1f`)** : l'opérateur autorise `metaAndAssetCtxs` (liste de `CLAUDE.md` amendée) ; taux horaire (positif = les longs paient) et coût estimé sur `holding_hours` (swing 14 j, scalp 2 j, micro 4 h), en % du notionnel signé selon le sens ; avertissement au-delà de la moitié du risque du trade, sans effet sur l'action. Mesure en direct : BRENTOIL −0,031 %/h ⇒ ≈ 10,4 % pour un short de 14 j ; CL ≈ 3,8 %. |
-| Q12 | Séances vs 24/7 pour les perps tradfi (H5, H17) | Barres gelées du week-end dans les EMA ; barres hebdo jeudi→mercredi. | Au minimum, documenter les deux faits dans le README ; **Appliqué (lot 3, `a9d4001`)**, option lourde : filtre calendaire par dex (`[sessions.xyz]` : ven. 21:00 → dim. 22:00 UTC) avant tout indicateur, tide hebdo reconstruit du lundi au vendredi ; jours fériés laissés à l'avertissement « marché quasi gelé ». Écart avant/après mesuré au §3 ter, documenté dans le README. |
+| Q12 | Séances vs 24/7 pour les perps tradfi (H5, H17) | Barres gelées du week-end dans les EMA ; barres hebdo jeudi→mercredi. | Au minimum, documenter les deux faits dans le README ; **Appliqué (lot 3, `a9d4001`)**, option lourde : filtre calendaire par dex (`[sessions.xyz]` : ven. 17:00 → dim. 18:00 heure de New York, soit ven. 21:00 → dim. 22:00 UTC en été — `62ed8df`) avant tout indicateur, tide hebdo reconstruit du lundi au vendredi ; jours fériés laissés à l'avertissement « marché quasi gelé ». Écart avant/après mesuré au §3 ter, documenté dans le README. |
 | Q13 | Règle d'Elder « jamais acheter au-dessus du canal supérieur ni vendre sous l'inférieur » | p.168 (PDF 184). Non implémentée ; le veto de la zone de valeur la couvre en partie. | **Appliqué avec Q2 (lot 2, `f89a1a6`)** : c'est désormais le veto « chasing », sur le canal du wave. |
 
 ---
@@ -277,7 +314,8 @@ l'or, l'argent et le pétrole sur 187–249 barres) : le veto ne joue presque pl
 - **Lot 2** : Q2 et Q13 (`f89a1a6`), Q3 (`44616b2`), Q4 (`66aeca6`), Q7 (`6a25870`), Q9 (`5541621`),
   Q10 (`2f48417`) et Q11 phase 1 (`115dd04`) sont appliquées (§3 bis).
 - **Lot 3** : Q11 phase 2 (`6911a1f`, `46085fe`), Q5 (`8298f7e`), Q6 (`c0b17fe`), Q8 (`194ce7d`) et Q12
-  (`a9d4001`) sont appliquées (§3 ter). Les 13 questions sont tranchées. Restent ouverts : D4
+  (`a9d4001`) sont appliquées (§3 ter) ; la revue adversariale du lot 3 a confirmé 12 défauts, tous
+  corrigés (§3 ter, fin). Les 13 questions sont tranchées. Restent ouverts : D4
   (raffinement facultatif des divergences), l'arrondi au tick du trailing stop des positions ouvertes
   (hors du périmètre de Q9), et deux effets à surveiller — le veto « chasing » quasi inactif sur 1d
   avec le canal symétrique, et, le week-end, un signal tradfi qui reprend celui de la dernière barre de
