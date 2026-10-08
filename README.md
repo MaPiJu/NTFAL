@@ -66,11 +66,15 @@ Their common names differ from the Hyperliquid tickers:
   up, the target toward the entry. Reward:risk and the size come from the rounded levels.
 - **Impulse censorship (applied last):** any **red** Impulse on the **tide or wave**
   forbids longs; any **green** forbids shorts.
-- **Best-trade ranking:** every validated setup gets a 0–100 quality score blending
-  Elder's selection criteria — reward:risk (dominant; 2:1 floor, 3:1 = full credit),
-  Impulse agreement across both screens, tide strength, and wave pullback depth.
-  The highest-scoring setup clearing the 2:1 floor is flagged as that horizon's **best
-  trade** (`★`); the table is sorted best-first. The 6% guard suppresses any pick.
+- **Best-trade ranking — Trade Apgar:** every validated setup is scored with Elder's
+  Trade Apgar (p.238–242), five questions at 0/1/2 written for this "pullback to value"
+  system (for a long; mirrored for a short): tide Impulse (green 2, blue 1, red 0), wave
+  Impulse (blue 2, green 1, red 0), wave close vs value (below 2, in the zone 1, above 0),
+  reward:risk (≥ 2 → 2, ≥ 1 → 1, below → 0), wave divergence (bullish 2, none 1,
+  bearish 0). An **A-trade** totals 7+ with no zero; the A-trade with the best Apgar
+  (ties: better R:R) is that horizon's **best trade** (`★`), and there is none without
+  an A-trade. The table is sorted best-first and shows the five lines. The 6% guard
+  suppresses any pick.
 - **Divergences:** recent bullish/bearish divergences between price and MACD-Histogram /
   13-EMA Force Index are surfaced as Elder warnings.
 - **Data-quality flags:** a signal says when its own *inputs* are weak — a tide series too
@@ -227,11 +231,10 @@ Edit `config.toml`:
   `refresh_seconds`, `min_tide_bars` (below which the tide is flagged as
   not-yet-converged) and `holding_hours` (typical holding time, for the funding-cost
   estimate; omit it for no estimate). Any Hyperliquid candle interval works: `1m`…`1w`.
-- `[strategy]` — tune the Elder thresholds and ranking weights without editing code:
+- `[strategy]` — tune the Elder thresholds without editing code:
   flat tide-slope cutoff, EMA-penetration/channel/divergence lookbacks, SafeZone
-  lookback/factors, minimum R:R,
-  "excellent" R:R, tide-strength scale, Force Index pullback scale, score weights, and
-  the low-volume data-quality thresholds. **Every lookback is a count of bars** on the
+  lookback/factors, minimum R:R (also the Apgar's full-marks R:R), and the low-volume
+  data-quality thresholds. **Every lookback is a count of bars** on the
   relevant screen, so the same numbers carry across horizons. Any key can be overridden
   for one horizon with a `[scanner.horizons.strategy]` sub-block.
 - `risk.equity` — current account equity (shown in the header, and the margin behind

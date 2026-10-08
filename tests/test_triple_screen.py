@@ -11,17 +11,16 @@ from strategy.triple_screen import (
     EMA_FAST,
     EMA_SLOW,
     Signal,
+    TradeApgar,
     _divergence_for_indicator,
     _long_levels,
     _short_levels,
     average_adverse_noise,
     average_penetration,
     channel,
-    compute_quality_score,
     data_warnings,
     detect_divergences,
     evaluate_asset,
-    impulse_confirmation,
     projected_ema,
     round_to_tick,
     safezone_initial_stop,
@@ -29,6 +28,7 @@ from strategy.triple_screen import (
     select_best,
     tick_size,
     tide_trend,
+    trade_apgar,
     value_zone_extension,
     value_zone_status,
 )
@@ -553,59 +553,118 @@ def test_channel_contains_about_95_percent_of_bars():
     assert 0.90 <= inside < 1.0  # Elder's 90-95%, with only the extremes outside
 
 
-def test_quality_score_rewards_better_reward_risk():
-    base = dict(impulse_agreement=1.0, tide_strength=0.03, pullback_depth=1.0)
-    better = compute_quality_score(reward_risk=3.0, **base)
-    worse = compute_quality_score(reward_risk=2.0, **base)
-    assert 0.0 <= worse < better <= 1.0
+def _scores(apgar: TradeApgar) -> list[int]:
+    return [line.score for line in apgar.lines]
 
 
-def test_impulse_confirmation_counts_agreeing_screens():
-    assert impulse_confirmation("long", "green", "green") == 1.0
-    assert impulse_confirmation("long", "green", "blue") == 0.5
-    assert impulse_confirmation("long", "blue", "blue") == 0.0
-    assert impulse_confirmation("short", "red", "red") == 1.0
-    assert impulse_confirmation("short", "red", "blue") == 0.5
+def test_trade_apgar_scores_a_long_pullback_to_value():
+    # Elder (p.238-242): five questions, each scored 0/1/2, and "each strategy
+    # demands its own Apgar". For this system's long: tide Impulse green 2 / blue 1
+    # / red 0; wave Impulse blue 2 / green 1 / red 0; wave close below value 2 / in
+    # the zone 1 / above 0; R:R >= 2 -> 2, 1-2 -> 1, < 1 -> 0; wave divergence
+    # bullish 2 / none 1 / bearish 0.
+    best = trade_apgar("long", "green", "blue", "below", 2.5, ["bullish Force Index divergence"])
+    assert _scores(best) == [2, 2, 2, 2, 2] and best.total == 10 and best.a_trade
+    assert [line.answer for line in best.lines] == [
+        "green",
+        "blue",
+        "below value",
+        "2.50",
+        "bullish",
+    ]
+    middling = trade_apgar("long", "blue", "green", "inside", 1.5, [])
+    assert _scores(middling) == [1, 1, 1, 1, 1] and middling.total == 5
+    worst = trade_apgar("long", "red", "red", "above", 0.8, ["bearish MACD-Histogram divergence"])
+    assert _scores(worst) == [0, 0, 0, 0, 0]
+    # R:R edges: exactly 2 earns 2, exactly 1 earns 1; no R:R at all earns 0.
+    assert _scores(trade_apgar("long", "green", "blue", "below", 2.0, []))[3] == 2
+    assert _scores(trade_apgar("long", "green", "blue", "below", 1.0, []))[3] == 1
+    assert _scores(trade_apgar("long", "green", "blue", "below", None, []))[3] == 0
 
 
-def _mk_signal(asset: str, action: str, rr: float | None, score: float | None, rr_ok: bool):
+def test_trade_apgar_mirrors_for_a_short():
+    best = trade_apgar("short", "red", "blue", "above", 3.0, ["bearish Force Index divergence"])
+    assert _scores(best) == [2, 2, 2, 2, 2]
+    assert best.lines[2].answer == "above value"
+    assert _scores(trade_apgar("short", "blue", "red", "inside", 1.0, [])) == [1, 1, 1, 1, 1]
+    worst = trade_apgar(
+        "short", "green", "green", "below", None, ["bullish MACD-Histogram divergence"]
+    )
+    assert _scores(worst) == [0, 0, 0, 0, 0]
+
+
+def test_an_a_trade_needs_seven_points_and_no_zero_line():
+    # Elder (p.239): "only healthy ideas whose score is 7 or higher, and not a
+    # single line rated zero".
+    seven = trade_apgar("long", "green", "green", "inside", 2.5, [])  # 2+1+1+2+1
+    assert seven.total == 7 and seven.a_trade
+    six = trade_apgar("long", "blue", "green", "inside", 2.5, [])  # 1+1+1+2+1
+    assert six.total == 6 and not six.a_trade
+    # 8 points, but an adverse divergence scores a zero: not an A-trade.
+    zero = trade_apgar("long", "green", "blue", "below", 2.5, ["bearish Force Index divergence"])
+    assert zero.total == 8 and not zero.a_trade
+    # A divergence both ways is still an adverse one.
+    mixed = ["bullish Force Index divergence", "bearish MACD-Histogram divergence"]
+    assert _scores(trade_apgar("long", "green", "blue", "below", 2.5, mixed))[4] == 0
+
+
+def _mk_signal(asset: str, action: str, rr: float | None, apgar: TradeApgar | None) -> Signal:
     return Signal(
         asset=asset,
         action=action,
         reason="",
         tide_trend="up",
         tide_impulse="green",
-        wave_impulse="green",
+        wave_impulse="blue",
         force_index_2=-1.0,
         entry=10.0,
         entry_limit=None,
         stop=9.0,
         target=13.0,
         reward_risk=rr,
-        rr_ok=rr_ok,
-        tide_strength=0.02,
-        pullback_quality=0.5,
-        quality_score=score,
+        rr_ok=rr is not None and rr >= 2.0,
         market_regime="trending",
         entry_impulse=None,
         divergences=[],
         value_zone_status="in_value",
         entry_order_plan=None,
+        apgar=apgar,
     )
 
 
-def test_select_best_picks_highest_quality_tradable_above_floor():
-    a = _mk_signal("A", "long", 2.5, 0.60, rr_ok=True)
-    b = _mk_signal("B", "long", 3.5, 0.90, rr_ok=True)  # best
-    c = _mk_signal("C", "stand_aside", None, None, rr_ok=False)  # not tradable
-    d = _mk_signal("D", "long", 1.5, 0.95, rr_ok=False)  # below the 2:1 floor
-    assert select_best([a, b, c, d]).asset == "B"
+def _long(asset: str, rr: float, zone: str = "below", divs: list[str] | None = None) -> Signal:
+    return _mk_signal(asset, "long", rr, trade_apgar("long", "green", "blue", zone, rr, divs or []))
 
 
-def test_select_best_returns_none_when_nothing_qualifies():
-    only_aside = _mk_signal("A", "stand_aside", None, None, rr_ok=False)
-    sub_floor = _mk_signal("B", "long", 1.2, 0.9, rr_ok=False)
-    assert select_best([only_aside, sub_floor]) is None
+def test_select_best_picks_the_highest_apgar_a_trade_tie_broken_by_reward_risk():
+    bullish = ["bullish Force Index divergence"]
+    eight = _long("A", 2.5, zone="inside")  # 2+2+1+2+1 = 8
+    ten_low_rr = _long("B", 2.2, divs=bullish)  # 10
+    ten_high_rr = _long("C", 3.0, divs=bullish)  # 10, better R:R -> the pick
+    zero_line = _long("D", 4.0, divs=["bearish Force Index divergence"])  # 8, has a zero
+    aside = _mk_signal("E", "stand_aside", None, None)
+    assert select_best([eight, ten_low_rr, ten_high_rr, zero_line, aside]).asset == "C"
+    assert select_best([eight, zero_line, aside]).asset == "A"
+    # The R:R line grades the reward: a 1.5:1 A-trade (9 points) is eligible.
+    assert select_best([_long("F", 1.5, divs=bullish)]).asset == "F"
+
+
+def test_select_best_returns_none_without_an_a_trade():
+    six = _mk_signal("A", "long", 2.5, trade_apgar("long", "blue", "green", "inside", 2.5, []))
+    zero_line = _long("B", 4.0, divs=["bearish Force Index divergence"])
+    aside = _mk_signal("C", "stand_aside", None, None)
+    assert select_best([six, zero_line, aside]) is None
+
+
+def test_signal_carries_its_trade_apgar():
+    sig = evaluate_asset("BTC", WEEKLY_UP, DAILY_LONG)
+    assert sig.action == "long"
+    assert sig.apgar is not None and len(sig.apgar.lines) == 5
+    assert sig.apgar.total == sum(_scores(sig.apgar))
+    assert sig.apgar.lines[3].score == (2 if sig.reward_risk >= 2 else 1)
+    assert (
+        evaluate_asset("BTC", WEEKLY_UP, make_ohlcv([100.0 + i for i in range(60)])).apgar is None
+    )
 
 
 def test_average_penetration_and_projection():

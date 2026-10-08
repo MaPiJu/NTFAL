@@ -81,7 +81,7 @@ holding_hours = 4
 flat_trend_slope_pct = 0.00008
 
 [strategy]
-# Strategy thresholds/weights. Defaults mirror the Elder scanner's built-in
+# Strategy thresholds. Defaults mirror the Elder scanner's built-in
 # behavior; tune here instead of editing code. Every lookback is a count of
 # BARS on the relevant screen's timeframe, so the same numbers carry across
 # horizons. Any key here may be overridden per horizon with a
@@ -106,25 +106,20 @@ channel_lookback_bars = 26
 # target; the WAVE channel is the chasing veto (p.168: "never buy above the upper
 # channel line or sell short below the lower channel line").
 channel_containment = 0.95
+# Elder's 2:1 floor: sub-2:1 setups are flagged, and the Trade Apgar gives its
+# reward:risk line full marks (2) from here, 1 from 1:1, 0 below.
 min_reward_risk = 2.0
 divergence_lookback = 60
 # Elder/Lovvorn (p.88): only flag a divergence when its two extremes are this
 # many bars apart (most tradable at 20-40; the closer to 20 the better).
 divergence_min_separation = 20
 divergence_max_separation = 40
-rr_excellent = 3.0
-strong_tide_slope = 0.03
-fi_scale_lookback = 20
 # Elder SafeZone-style stops: average adverse noise over the lookback of wave
 # bars, multiplied by the factor, behind the recent wave extreme. Shorts use a
 # wider factor than longs (Elder p.220: >=3 vs >=2 — shorting near highs is noisier).
 safezone_lookback_bars = 20
 safezone_factor_long = 2.0
 safezone_factor_short = 3.0
-score_reward_risk_weight = 0.40
-score_impulse_weight = 0.25
-score_tide_weight = 0.20
-score_pullback_weight = 0.15
 # Flag a horizon's signal when the recent wave bars carry far less volume than
 # usual — a tradfi perp over the weekend is a near-frozen oracle, not a market.
 # 0.25 = warn when the last few bars average under 25% of the recent median.

@@ -40,6 +40,13 @@ def pct(x: float | None, digits: int = 2) -> str:
     return f"{x:+.{digits}%}" if x is not None else "—"
 
 
+def apgar_detail(apgar: dict[str, Any]) -> str:
+    """The Trade Apgar's five lines: question, observed answer, score."""
+    lines = " · ".join(f"{x['question']} {x['answer']} {x['score']}" for x in apgar["lines"])
+    verdict = "A-trade" if apgar["a_trade"] else "not an A-trade (needs >= 7 and no zero)"
+    return f"apgar {apgar['total']}/10: {lines} — {verdict}"
+
+
 def print_horizon_table(name: str, block: dict[str, Any]) -> None:
     """The signals table for one timeframe chain."""
     iv = block["intervals"]
@@ -51,21 +58,23 @@ def print_horizon_table(name: str, block: dict[str, Any]) -> None:
     if best is not None:
         print(
             f"★ BEST {name.upper()} TRADE: {best['asset']} {best['action']} "
-            f"(score {best['quality_score'] * 100:.0f}/100, R:R {best['reward_risk']:.2f}, "
+            f"(Apgar {best['apgar']['total']}/10, R:R {best['reward_risk']:.2f}, "
             f"entry {best['entry']:,.6g}, stop {best['stop']:,.6g}, target {best['target']:,.6g})"
         )
 
-    # Best trade first: tradable setups by Elder score (desc), then the rest by name.
-    def sort_key(s: dict[str, Any]) -> tuple[int, float, str]:
+    # Best trade first: tradable setups by Trade Apgar, then R:R (desc), then the
+    # stand-aside rest by name.
+    def sort_key(s: dict[str, Any]) -> tuple[int, int, float, str]:
         aside = s["action"] == "stand_aside"
-        return (1 if aside else 0, -(s["quality_score"] or 0.0), s["asset"])
+        apgar = (s.get("apgar") or {}).get("total", 0)
+        return (1 if aside else 0, -apgar, -(s["reward_risk"] or 0.0), s["asset"])
 
     # 14-wide asset column: tradfi names like "xyz:BRENTOIL" are longer than tickers.
     header = (
         f"{'ASSET':<14} {'REGIME':<8} {'TIDE':<7} {'IMP T/W/E':<14} {'FI(2)':>14} {'ACTION':<13} "
         f"{'CLOSE':>12} {'MARK':>12} {'DRIFT':>7} {'ENTRY':>12} {'STOP':>12} {'R:R':>7} "
         f"{'LIMIT':>12} {'LIM STOP':>12} {'LIM R:R':>7} {'TARGET':>12} "
-        f"{'SCORE':>6} {'SIZE':>10} {'FUND/H':>9} {'FUND EST':>9}"
+        f"{'APGAR':>6} {'SIZE':>10} {'FUND/H':>9} {'FUND EST':>9}"
     )
     print("\n" + header)
     print("-" * len(header))
@@ -77,7 +86,8 @@ def print_horizon_table(name: str, block: dict[str, Any]) -> None:
         size = num(s["position_size"]["size"]) if s["position_size"] else "—"
         if s.get("size_warnings"):
             size += "⚠"
-        score = f"{s['quality_score'] * 100:.0f}" if s.get("quality_score") is not None else "—"
+        apgar = s.get("apgar")
+        score = f"{apgar['total']}{' A' if apgar['a_trade'] else ''}" if apgar else "—"
         action = (
             s["action"]
             + (" ⚠" if s.get("price_alert") else "")
@@ -105,6 +115,8 @@ def print_horizon_table(name: str, block: dict[str, Any]) -> None:
         order = f" · order: {s['entry_order_plan']}" if s.get("entry_order_plan") else ""
         alert = f" · ⚠ {s['price_alert']}" if s.get("price_alert") else ""
         print(f"  {s['asset']}: {s['reason']} · value zone: {vz}{order}{alert}{suffix}")
+        if s.get("apgar"):
+            print(f"    {apgar_detail(s['apgar'])}")
         for w in s.get("data_warnings") or []:
             print(f"    ! data quality: {w}")
         for w in s.get("size_warnings") or []:

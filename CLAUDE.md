@@ -96,6 +96,23 @@ system says what *not* to do — it filters the table above.
 > cancel the very setups the second screen just found. Its color is surfaced as context
 > for the operator and nothing more. This is guarded by a regression test.
 
+### Best-trade pick — Trade Apgar (p.238–242)
+Each horizon ranks its validated setups with Elder's **Trade Apgar**: five questions scored
+0/1/2, and "each strategy demands its own Apgar" (p.242). This system's ("pullback to
+value"), for a long — mirrored for a short (red ↔ green, below ↔ above, bullish ↔ bearish):
+
+| Line | 2 | 1 | 0 |
+|------|---|---|---|
+| a. tide Impulse | green | blue | red |
+| b. wave Impulse | blue | green | red |
+| c. wave close vs EMA13–EMA26 value zone | below | inside | above |
+| d. reward:risk | ≥ 2 (`min_reward_risk`) | ≥ 1 | < 1 |
+| e. wave divergence | bullish | none | bearish (even with a bullish one) |
+
+An **A-trade** totals **≥ 7 with no line at 0** (p.239). The horizon's pick is the A-trade
+with the best Apgar, ties broken on reward:risk; no A-trade, no pick. The Apgar only ranks:
+it never creates, vetoes or changes a signal. Its five lines are shown in every UI.
+
 ## Trade-management spec (open positions — exits)
 The Triple Screen decides *entries*; managing an already-open position uses Elder's own
 exit tools only — **no new indicators**. Positions are judged on the horizon named by

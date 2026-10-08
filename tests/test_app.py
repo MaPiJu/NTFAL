@@ -135,16 +135,16 @@ def test_build_snapshot_from_fixtures(tmp_path, btc_fixtures):
     assert sig["tide_impulse"] in {"green", "red", "blue"}
     assert sig["horizon"] == "swing"
     # fields surfaced for the dashboard / ranking
-    assert "last_close" in sig and "quality_score" in sig and "is_top_pick" in sig
+    assert "last_close" in sig and "apgar" in sig and "is_top_pick" in sig
     # live price (still-open wave bar) + a stale-price/chasing alert
     assert "live_price" in sig and "price_alert" in sig
     # data-quality flags travel with the signal, and so do size flags
     assert isinstance(sig["data_warnings"], list)
     assert sig["size_warnings"] == []  # nothing sized, nothing to flag
-    # the top pick (if any) must be a tradable, R:R-passing setup
+    # the top pick (if any) must be a tradable A-trade
     if block["top_pick"] is not None:
         pick = next(s for s in block["signals"] if s["asset"] == block["top_pick"])
-        assert pick["action"] != "stand_aside" and pick["rr_ok"] and pick["is_top_pick"]
+        assert pick["action"] != "stand_aside" and pick["apgar"]["a_trade"] and pick["is_top_pick"]
 
     charts = block["charts"]["BTC"]
     for role in ("tide", "wave"):
@@ -570,6 +570,28 @@ def test_signals_carry_the_funding_rate_and_its_cost(tmp_path, long_setup_fixtur
 
     print_signals_tables(snapshot)
     assert f"! funding: {sig['funding_warning']}" in capsys.readouterr().out
+
+
+def test_trade_apgar_reaches_the_snapshot_and_the_cli(tmp_path, long_setup_fixtures, capsys):
+    snapshot = build_snapshot(make_config(tmp_path), make_client(long_setup_fixtures, tmp_path))
+
+    (sig,) = swing(snapshot)["signals"]
+    apgar = sig["apgar"]
+    assert [line["question"] for line in apgar["lines"]] == [
+        "tide Impulse",
+        "wave Impulse",
+        "wave close vs value",
+        "reward:risk",
+        "wave divergence",
+    ]
+    assert apgar["total"] == sum(line["score"] for line in apgar["lines"])
+
+    from run import print_signals_tables
+
+    print_signals_tables(snapshot)
+    out = capsys.readouterr().out
+    detail = " · ".join(f"{x['question']} {x['answer']} {x['score']}" for x in apgar["lines"])
+    assert f"apgar {apgar['total']}/10: {detail}" in out
 
 
 def test_a_failing_funding_lookup_drops_only_that_dex():
