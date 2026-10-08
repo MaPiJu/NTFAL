@@ -361,6 +361,25 @@ def test_channel_widens_with_containment():
     assert wide_upper > narrow_upper
 
 
+def test_channel_contains_about_95_percent_of_bars():
+    # Elder (p.79, p.167): a well-drawn channel contains ~95% of recent prices —
+    # "between 90% and 95%" (p.226). The 5% left outside is split between BOTH
+    # edges; fitting each edge to its own 95th percentile leaves ~5% above AND ~5%
+    # below, i.e. only ~85-90% inside. Flat EMA26 at 100 with distinct excursions,
+    # so containment is a plain count over the lookback window.
+    n = 40
+    highs = [100.0 + 1.0 + (i * 7 % n) / 10 for i in range(n)]
+    lows = [100.0 - 1.0 - (i * 11 % n) / 10 for i in range(n)]
+    weekly = make_ohlcv([100.0] * n, lows=lows, highs=highs, freq="W")
+    params = StrategyParams()
+
+    upper, lower = channel(weekly, params)
+    window = weekly.iloc[-params.channel_lookback_bars :]
+    inside = ((window["high"] <= upper) & (window["low"] >= lower)).mean()
+
+    assert 0.90 <= inside < 1.0  # Elder's 90-95%, with only the extremes outside
+
+
 def test_quality_score_rewards_better_reward_risk():
     base = dict(impulse_agreement=1.0, tide_strength=0.03, pullback_depth=1.0)
     better = compute_quality_score(reward_risk=3.0, **base)

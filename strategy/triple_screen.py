@@ -306,9 +306,11 @@ def channel(
     the tide value zone.
 
     Elder draws the channel parallel to the *slower* EMA and widens it until it
-    contains ~95% of recent bars. Each half-width is the `containment`-quantile of
-    the **relative** excursion of tide highs above / lows below the EMA
-    (penetration / EMA at that bar) over the lookback, projected onto the latest EMA.
+    contains ~95% of recent bars. The bars left outside (1 - `containment`) are
+    split between the two edges, so each half-width is the
+    `1 - (1 - containment) / 2` quantile of the **relative** excursion of tide
+    highs above / lows below the EMA (penetration / EMA at that bar) over the
+    lookback, projected onto the latest EMA.
 
     Measuring the excursion as a *ratio* (not an absolute price distance) keeps the
     channel proportional to the current price and the lower band strictly positive
@@ -318,14 +320,15 @@ def channel(
     e = ema(tide["close"], span)
     window = slice(-params.channel_lookback_bars, None)
     # Relative excursion of each bar's high above / low below the EMA (0 when the
-    # bar doesn't poke out). The containment-quantile leaves ~(1-containment) of
-    # bars outside the channel — Elder's "contains ~95% of bars" fit (p.183).
+    # bar doesn't poke out). Each edge leaves half of the (1 - containment) budget
+    # outside, so the channel as a whole contains ~containment of the bars —
+    # Elder's "contains ~95% of bars" fit (p.183).
     up = ((tide["high"] - e) / e).clip(lower=0).iloc[window]
     down = ((e - tide["low"]) / e).clip(lower=0).iloc[window]
     last = float(e.iloc[-1])
-    containment = params.channel_containment
-    upper = last * (1.0 + (float(up.quantile(containment)) if not up.empty else 0.0))
-    lower = last * (1.0 - (float(down.quantile(containment)) if not down.empty else 0.0))
+    q = 1.0 - (1.0 - params.channel_containment) / 2.0
+    upper = last * (1.0 + (float(up.quantile(q)) if not up.empty else 0.0))
+    lower = last * (1.0 - (float(down.quantile(q)) if not down.empty else 0.0))
     return upper, lower
 
 
