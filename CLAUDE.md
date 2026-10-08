@@ -172,8 +172,10 @@ They never change an action — they tell the operator how much to trust it:
 
 ## Trading sessions (tradfi perps)
 The `xyz` dex's markets close for the weekend; Elder counts trading days (p.125: five a
-week). `[sessions.<dex>]` in `config.toml` gives a dex its weekend closure (`xyz`: Friday
-21:00 → Sunday 22:00 UTC; a dex without one trades 24/7). For such a dex, **before any
+week). `[sessions.<dex>]` in `config.toml` gives a dex its weekend closure, in a stated
+`timezone` (IANA name, default UTC) so it follows daylight saving — `xyz`: Friday 17:00 →
+Sunday 18:00 **New York time**, trade.xyz's external-price weekend (the CME's): Fri 21:00 →
+Sun 22:00 UTC in summer, 22:00 → 23:00 UTC in winter. A dex without one trades 24/7. For such a dex, **before any
 indicator**: bars lying *entirely* inside the closure are dropped (a bar straddling the
 close or the reopening is kept), and a **1w screen is rebuilt from the Monday–Friday daily
 bars** (Hyperliquid's own 1w candles open on Thursday and carry the weekend). Weekday

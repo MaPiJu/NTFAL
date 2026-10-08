@@ -12,8 +12,11 @@ from data.sessions import WeekendClosure, drop_closed_bars, weekly_from_weekdays
 from strategy.triple_screen import data_warnings
 from tests.conftest import make_ohlcv, synthetic_candles
 
-# The xyz dex's underlying markets close from Friday 21:00 to Sunday 22:00 UTC.
+# A closure stated in UTC: Friday 21:00 to Sunday 22:00.
 XYZ_WEEKEND = WeekendClosure.parse("Fri 21:00", "Sun 22:00")
+# The xyz dex's actual schedule (trade.xyz's external price, the CME's hours):
+# Friday 17:00 to Sunday 18:00 New York time — the window above in summer time.
+NEW_YORK_WEEKEND = WeekendClosure.parse("Fri 17:00", "Sun 18:00", "America/New_York")
 
 
 def ms(text: str) -> int:
@@ -55,6 +58,34 @@ def test_hourly_bars_inside_the_weekend_close_are_dropped():
     assert "Fri 21:00" not in labels and "Sat 12:00" not in labels
     assert "Sun 21:00" not in labels
     assert "Sun 22:00" in labels  # the reopening
+
+
+def test_a_new_york_closure_follows_daylight_saving():
+    # Summer time (EDT, UTC-4): Fri 17:00 -> Sun 18:00 New York is exactly
+    # Fri 21:00 -> Sun 22:00 UTC.
+    summer = bars("1h", "2026-09-28T00:00", 192)
+    assert starts(drop_closed_bars(summer, NEW_YORK_WEEKEND)) == starts(
+        drop_closed_bars(summer, XYZ_WEEKEND)
+    )
+
+    # Winter time (EST, UTC-5, from 2026-11-01): the closure is an hour later in
+    # UTC — Friday's 21:00 UTC hour is the last live CME hour, Sunday's 22:00 UTC
+    # hour is still closed.
+    winter = drop_closed_bars(bars("1h", "2026-11-02T00:00", 192), NEW_YORK_WEEKEND)
+    labels = starts(winter)
+    assert "Fri 21:00" in labels and "Fri 22:00" not in labels
+    assert "Sun 22:00" not in labels and "Sun 23:00" in labels
+    assert len(labels) == 192 - 49
+
+    # The week DST ends (Sunday 2026-11-01 02:00): it closes Fri 21:00 UTC (EDT)
+    # and reopens Sun 23:00 UTC (EST) — 50 hourly bars dropped.
+    switch = bars("1h", "2026-10-26T00:00", 192)
+    assert len(switch) - len(drop_closed_bars(switch, NEW_YORK_WEEKEND)) == 50
+
+
+def test_closure_rejects_an_unknown_timezone():
+    with pytest.raises(ValueError, match="time zone"):
+        WeekendClosure.parse("Fri 17:00", "Sun 18:00", "America/Atlantis")
 
 
 def test_daily_bars_keep_friday_and_sunday_but_not_saturday():

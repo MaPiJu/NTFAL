@@ -12,6 +12,8 @@ dependencies = [
     "jinja2>=3.1",
     "python-dotenv>=1.0",
     "apscheduler>=3.10",
+    # IANA time zones for the session calendar where the OS has none (Windows).
+    "tzdata>=2024.1",
 ]
 
 [dependency-groups]

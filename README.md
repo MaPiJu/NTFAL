@@ -46,13 +46,16 @@ Their common names differ from the Hyperliquid tickers:
 ### Trading sessions (weekends)
 
 Hyperliquid prints these perps 24/7, but the markets behind them close for the weekend:
-from Friday 21:00 to Sunday 22:00 UTC their bars carry a fraction of the usual volume and
-range, and they would flatten every EMA. Elder counts trading days (five a week), so the
+from Friday 17:00 to Sunday 18:00 New York time — trade.xyz pins its external price over
+the CME's weekend, i.e. Friday 21:00 → Sunday 22:00 UTC in summer time and 22:00 → 23:00
+UTC in winter — their bars carry a fraction of the usual volume and range, and they would
+flatten every EMA. Elder counts trading days (five a week), so the
 `xyz` dex has a weekend calendar (`[sessions.xyz]` in `config.toml`):
 
 - bars lying **entirely** inside the closure are dropped before any indicator — Saturday's
   daily bar, about 26% of 4h bars and 29% of 1h/15m/5m bars; a bar straddling the close
-  or the reopening (Friday's daily bar, the Sunday 22:00 hour) is kept;
+  or the reopening (Friday's daily bar, the Sunday reopening hour) is kept; the window is
+  set in New York time (`timezone = "America/New_York"`), so it follows daylight saving;
 - the **weekly tide is rebuilt from the Monday–Friday daily bars** (one bar per week, open
   Monday, close Friday): Hyperliquid's own 1w candles open on **Thursday** (epoch
   alignment) and carry the weekend;

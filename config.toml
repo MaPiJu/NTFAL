@@ -133,12 +133,17 @@ low_volume_baseline_bars = 1000
 [sessions.xyz]
 # The tradfi perps' underlying markets (gold, oil, indices…) close for the
 # weekend, while Hyperliquid keeps printing near-frozen bars. Bars that sit
-# entirely inside this window (UTC) are dropped before any indicator, and a 1w
-# screen is rebuilt from the Monday-Friday daily bars (Hyperliquid's own weekly
-# candles open on Thursday and carry the weekend). Weekday holidays are left to
-# the near-frozen data warning. A dex without a [sessions.<dex>] block trades 24/7.
-weekend_close = "Fri 21:00"
-weekend_open = "Sun 22:00"
+# entirely inside this window are dropped before any indicator, and a 1w screen
+# is rebuilt from the Monday-Friday daily bars (Hyperliquid's own weekly candles
+# open on Thursday and carry the weekend). Weekday holidays are left to the
+# near-frozen data warning. A dex without a [sessions.<dex>] block trades 24/7.
+# trade.xyz pins its external price from Friday 17:00 to Sunday 18:00 New York
+# time (the CME's weekend). Stated in New York time, the window follows daylight
+# saving: Fri 21:00 -> Sun 22:00 UTC in summer, Fri 22:00 -> Sun 23:00 UTC in
+# winter. `timezone` is an IANA name; without it the times are UTC.
+timezone = "America/New_York"
+weekend_close = "Fri 17:00"
+weekend_open = "Sun 18:00"
 
 [risk]
 # Current account equity in USD (shown in the dashboard header).

@@ -124,7 +124,11 @@ safezone_factor_short = 4.0
 def test_parses_a_weekend_closure_per_dex(tmp_path):
     body = BASE + '\n[sessions.xyz]\nweekend_close = "Fri 21:00"\nweekend_open = "Sun 22:00"\n'
     cfg = load_config(write(tmp_path, body))
-    assert cfg.sessions == {"xyz": WeekendClosure.parse("Fri 21:00", "Sun 22:00")}
+    assert cfg.sessions == {"xyz": WeekendClosure.parse("Fri 21:00", "Sun 22:00")}  # UTC
+    zoned = body.replace("[sessions.xyz]", '[sessions.xyz]\ntimezone = "America/New_York"')
+    assert load_config(write(tmp_path, zoned)).sessions == {
+        "xyz": WeekendClosure.parse("Fri 21:00", "Sun 22:00", "America/New_York")
+    }
     assert load_config(write(tmp_path, BASE)).sessions == {}  # 24/7 unless configured
 
     bad = BASE + '\n[sessions.xyz]\nweekend_close = "Friday"\nweekend_open = "Sun 22:00"\n'
@@ -201,8 +205,11 @@ def test_shipped_config_is_valid_and_hyperliquid_only():
     assert cfg.scanner.positions_horizon == "swing"
     # Elder's 2:1 floor is the shipped default.
     assert cfg.strategy.min_reward_risk == 2.0
-    # The xyz dex's tradfi markets close Friday 21:00 -> Sunday 22:00 UTC.
-    assert cfg.sessions == {"xyz": WeekendClosure.parse("Fri 21:00", "Sun 22:00")}
+    # The xyz dex's tradfi markets close Friday 17:00 -> Sunday 18:00 New York
+    # time (trade.xyz's external-price schedule): 21:00 -> 22:00 UTC in summer.
+    assert cfg.sessions == {
+        "xyz": WeekendClosure.parse("Fri 17:00", "Sun 18:00", "America/New_York")
+    }
     # Funding is estimated over a typical holding time per horizon.
     assert [h.holding_hours for h in cfg.scanner.horizons] == [14 * 24, 2 * 24, 4]
 

@@ -185,7 +185,9 @@ def _sessions(raw: dict[str, Any]) -> dict[str, WeekendClosure]:
     out: dict[str, WeekendClosure] = {}
     for dex, table in raw.items():
         try:
-            out[dex] = WeekendClosure.parse(table["weekend_close"], table["weekend_open"])
+            out[dex] = WeekendClosure.parse(
+                table["weekend_close"], table["weekend_open"], table.get("timezone", "UTC")
+            )
         except (KeyError, TypeError, ValueError) as exc:
             raise ConfigError(f"[sessions.{dex}]: {exc}") from exc
     return out
