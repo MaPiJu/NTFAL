@@ -77,14 +77,19 @@ function stampsOf(snapshot) {
     .join("|");
 }
 
-// Best trade first: tradable setups ranked by Trade Apgar, then reward:risk
-// (desc), then the stand-aside rest by name. Returns a sorted copy.
+// Best trade first: the pick, then the other A-trades, then the remaining
+// setups — each group by Trade Apgar, then reward:risk (desc) — then the
+// stand-aside rest by name. Returns a sorted copy.
 function rankedSignals(block) {
   const apgar = (s) => (s.apgar ? s.apgar.total : 0);
+  const notPick = (s) => (s.is_top_pick ? 0 : 1);
+  const notA = (s) => (s.apgar && s.apgar.a_trade ? 0 : 1);
   return [...block.signals].sort((a, b) => {
     const aside = (s) => (s.action === "stand_aside" ? 1 : 0);
     if (aside(a) !== aside(b)) return aside(a) - aside(b);
     if (aside(a) === 1) return a.asset.localeCompare(b.asset);
+    if (notPick(a) !== notPick(b)) return notPick(a) - notPick(b);
+    if (notA(a) !== notA(b)) return notA(a) - notA(b);
     if (apgar(a) !== apgar(b)) return apgar(b) - apgar(a);
     return (b.reward_risk ?? 0) - (a.reward_risk ?? 0);
   });

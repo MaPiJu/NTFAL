@@ -75,12 +75,20 @@ def print_horizon_table(name: str, block: dict[str, Any]) -> None:
             f"entry {best['entry']:,.6g}, stop {best['stop']:,.6g}, target {best['target']:,.6g})"
         )
 
-    # Best trade first: tradable setups by Trade Apgar, then R:R (desc), then the
-    # stand-aside rest by name.
-    def sort_key(s: dict[str, Any]) -> tuple[int, int, float, str]:
+    # Best trade first: the pick, then the other A-trades, then the remaining
+    # setups — each group by Trade Apgar, then R:R (desc) — then the stand-aside
+    # rest by name.
+    def sort_key(s: dict[str, Any]) -> tuple[int, int, int, int, float, str]:
         aside = s["action"] == "stand_aside"
-        apgar = (s.get("apgar") or {}).get("total", 0)
-        return (1 if aside else 0, -apgar, -(s["reward_risk"] or 0.0), s["asset"])
+        apgar = s.get("apgar") or {}
+        return (
+            1 if aside else 0,
+            0 if s.get("is_top_pick") else 1,
+            0 if apgar.get("a_trade") else 1,
+            -apgar.get("total", 0),
+            -(s["reward_risk"] or 0.0),
+            s["asset"],
+        )
 
     # 14-wide asset column: tradfi names like "xyz:BRENTOIL" are longer than tickers.
     header = (

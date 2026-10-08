@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import UTC, datetime
 
 import httpx
@@ -37,6 +37,7 @@ from data.sessions import WeekendClosure
 from journal import append_journal_entry
 from risk.sizing import position_size
 from strategy.params import StrategyParams
+from strategy.triple_screen import Signal, trade_apgar
 from tests.conftest import make_clearinghouse_state, make_client, synthetic_candles
 
 SWING = HorizonConfig(
@@ -748,6 +749,61 @@ def test_trade_apgar_reaches_the_snapshot_and_the_cli(tmp_path, long_setup_fixtu
     out = capsys.readouterr().out
     detail = " · ".join(f"{x['question']} {x['answer']} {x['score']}" for x in apgar["lines"])
     assert f"apgar {apgar['total']}/10: {detail}" in out
+
+
+def _table_row(asset: str, apgar, rr: float, top: bool = False) -> dict:
+    sig = Signal(
+        asset=asset,
+        action="long",
+        reason="r",
+        tide_trend="up",
+        tide_impulse="green",
+        wave_impulse="blue",
+        force_index_2=-1.0,
+        entry=10.0,
+        entry_limit=None,
+        stop=9.0,
+        target=13.0,
+        reward_risk=rr,
+        rr_ok=rr >= 2.0,
+        market_regime="trending",
+        entry_impulse=None,
+        divergences=[],
+        value_zone_status="in_value",
+        entry_order_plan=None,
+        apgar=apgar,
+    )
+    extra = {"position_size": None, "size_warnings": [], "last_close": 10.0, "live_price": 10.0}
+    return asdict(sig) | extra | {"price_alert": None, "is_top_pick": top}
+
+
+def _swing_block(rows: list[dict]) -> dict:
+    return {
+        "label": "Swing",
+        "intervals": {"tide": "1w", "wave": "1d", "entry": "4h"},
+        "generated_at": "2026-10-08T13:00:00+00:00",
+        "signals": rows,
+        "skipped": [],
+    }
+
+
+def test_cli_table_lists_the_pick_then_a_trades_first(capsys):
+    # "Sorted best-first": the starred pick on top, then the other A-trades, then
+    # setups the Apgar rules out — even when one of those totals more points.
+    from run import print_horizon_table
+
+    bearish = ["bearish Force Index divergence"]
+    not_a = _table_row("AAA", trade_apgar("long", "green", "blue", "below", 2.5, bearish), 2.5)
+    pick = _table_row("BBB", trade_apgar("long", "green", "green", "inside", 2.5, []), 2.5, True)
+    other_a = _table_row("CCC", trade_apgar("long", "green", "green", "inside", 2.2, []), 2.2)
+    assert not_a["apgar"]["total"] == 8 and not not_a["apgar"]["a_trade"]
+    assert pick["apgar"]["total"] == 7 and pick["apgar"]["a_trade"]
+
+    print_horizon_table("swing", _swing_block([not_a, other_a, pick]))
+
+    table = [line.split()[0] for line in capsys.readouterr().out.splitlines() if line.strip()]
+    order = [name for name in table if name in {"AAA", "BBB", "CCC"}]
+    assert order == ["BBB", "CCC", "AAA"]
 
 
 def test_cli_shows_tiny_funding_rates_with_two_significant_digits():
