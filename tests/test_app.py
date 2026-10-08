@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from datetime import UTC, datetime
 
 import httpx
 import pytest
@@ -32,10 +33,11 @@ from config import (
     ScannerConfig,
 )
 from data.hyperliquid import PerpSpec
+from data.sessions import WeekendClosure
 from journal import append_journal_entry
 from risk.sizing import position_size
 from strategy.params import StrategyParams
-from tests.conftest import make_clearinghouse_state, make_client
+from tests.conftest import make_clearinghouse_state, make_client, synthetic_candles
 
 SWING = HorizonConfig(
     name="swing",
@@ -71,6 +73,7 @@ def make_config(
     horizons=(SWING,),
     positions_horizon="swing",
     strategy=None,
+    sessions=None,
     **risk_overrides,
 ) -> Config:
     risk = {
@@ -91,6 +94,7 @@ def make_config(
         positions=PositionsConfig(address=address, manual=tuple(manual)),
         journal=JournalConfig(enabled=False, path=cache_dir / "journal.jsonl"),
         cache_dir=cache_dir,
+        sessions=sessions or {},
     )
 
 
@@ -520,6 +524,44 @@ def test_cli_refresh_reads_the_previous_snapshot_on_both_paths(tmp_path, btc_fix
 
     assert run.do_refresh(cfg)["positions"][0]["suggested_stop"] == tighter  # full
     assert run.do_refresh(cfg, "swing")["positions"][0]["suggested_stop"] == tighter  # one
+
+
+def test_xyz_bars_skip_the_weekend_and_the_weekly_tide_is_built_from_weekdays(
+    tmp_path, btc_fixtures
+):
+    # Tradfi perps on the xyz dex: bars entirely inside the weekend close are
+    # dropped before any indicator, and the weekly tide is rebuilt from Monday-
+    # Friday daily bars instead of Hyperliquid's Thursday-anchored 1w candles —
+    # for scanned coins and for a held coin fetched on demand alike. A native
+    # perp (no session calendar) is untouched.
+    daily = synthetic_candles("1d", 300, start=2000.0, step=1.0)
+    fixtures = btc_fixtures | {("xyz:GOLD", "1d"): daily, ("xyz:SP500", "1d"): daily}
+    addr = "0x" + "56" * 20
+    held = make_clearinghouse_state([{"coin": "xyz:SP500", "szi": "1.0", "entryPx": "2100.0"}])
+    log: list[dict] = []
+    client = make_client(
+        fixtures, tmp_path, requests_log=log, clearinghouse_states={(addr, "xyz"): held}
+    )
+    closure = WeekendClosure.parse("Fri 21:00", "Sun 22:00")
+    cfg = make_config(
+        tmp_path, watchlist=("BTC", "xyz:GOLD"), address=addr, sessions={"xyz": closure}
+    )
+
+    snapshot = build_snapshot(cfg, client)
+
+    asked = {(r["req"]["coin"], r["req"]["interval"]) for r in log if r["type"] == "candleSnapshot"}
+    assert ("BTC", "1w") in asked
+    assert ("xyz:GOLD", "1w") not in asked and ("xyz:SP500", "1w") not in asked
+    charts = swing(snapshot)["charts"]
+
+    def weekdays(candles):
+        return {datetime.fromtimestamp(c["time"], UTC).weekday() for c in candles}
+
+    assert weekdays(charts["xyz:GOLD"]["tide"]["candles"]) == {0}  # Monday-anchored
+    assert 5 not in weekdays(charts["xyz:GOLD"]["wave"]["candles"])  # no Saturday
+    assert 5 in weekdays(charts["BTC"]["wave"]["candles"])  # crypto trades 24/7
+    (pos,) = snapshot["positions"]
+    assert pos["asset"] == "xyz:SP500"
 
 
 def test_two_percent_rule_sizes_on_equity_at_month_start(tmp_path, long_setup_fixtures):

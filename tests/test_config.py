@@ -8,6 +8,7 @@ import pytest
 
 from config import ConfigError, ManualPosition, load_config
 from data.hyperliquid import INTERVAL_MS
+from data.sessions import WeekendClosure
 
 BASE = """
 [scanner]
@@ -120,6 +121,17 @@ safezone_factor_short = 4.0
     assert micro.params.safezone_factor_short == 4.0  # still inherits the rest
 
 
+def test_parses_a_weekend_closure_per_dex(tmp_path):
+    body = BASE + '\n[sessions.xyz]\nweekend_close = "Fri 21:00"\nweekend_open = "Sun 22:00"\n'
+    cfg = load_config(write(tmp_path, body))
+    assert cfg.sessions == {"xyz": WeekendClosure.parse("Fri 21:00", "Sun 22:00")}
+    assert load_config(write(tmp_path, BASE)).sessions == {}  # 24/7 unless configured
+
+    bad = BASE + '\n[sessions.xyz]\nweekend_close = "Friday"\nweekend_open = "Sun 22:00"\n'
+    with pytest.raises(ConfigError, match="sessions.xyz"):
+        load_config(write(tmp_path, bad))
+
+
 def test_rejects_an_unknown_strategy_key(tmp_path):
     body = BASE + "\n[strategy]\nmagic_indicator = 3\n"
     with pytest.raises(ConfigError, match="magic_indicator"):
@@ -189,6 +201,8 @@ def test_shipped_config_is_valid_and_hyperliquid_only():
     assert cfg.scanner.positions_horizon == "swing"
     # Elder's 2:1 floor is the shipped default.
     assert cfg.strategy.min_reward_risk == 2.0
+    # The xyz dex's tradfi markets close Friday 21:00 -> Sunday 22:00 UTC.
+    assert cfg.sessions == {"xyz": WeekendClosure.parse("Fri 21:00", "Sun 22:00")}
     # Funding is estimated over a typical holding time per horizon.
     assert [h.holding_hours for h in cfg.scanner.horizons] == [14 * 24, 2 * 24, 4]
 

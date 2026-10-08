@@ -130,6 +130,16 @@ low_volume_bars = 6
 # wave bars (1000 x 15m ~ 10 days) so a ~49h weekend can't become the baseline.
 low_volume_baseline_bars = 1000
 
+[sessions.xyz]
+# The tradfi perps' underlying markets (gold, oil, indices…) close for the
+# weekend, while Hyperliquid keeps printing near-frozen bars. Bars that sit
+# entirely inside this window (UTC) are dropped before any indicator, and a 1w
+# screen is rebuilt from the Monday-Friday daily bars (Hyperliquid's own weekly
+# candles open on Thursday and carry the weekend). Weekday holidays are left to
+# the near-frozen data warning. A dex without a [sessions.<dex>] block trades 24/7.
+weekend_close = "Fri 21:00"
+weekend_open = "Sun 22:00"
+
 [risk]
 # Current account equity in USD (shown in the dashboard header).
 equity = 10000.0

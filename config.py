@@ -8,13 +8,14 @@ from __future__ import annotations
 
 import os
 import tomllib
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
 
 from data.hyperliquid import INTERVAL_MS
+from data.sessions import WeekendClosure
 from strategy.params import StrategyParams
 
 DEFAULT_CONFIG_PATH = Path("config.toml")
@@ -120,6 +121,9 @@ class Config:
     positions: PositionsConfig
     journal: JournalConfig
     cache_dir: Path
+    # dex -> weekend closure of its markets ([sessions.<dex>]); a dex without
+    # one (the native crypto perps) trades 24/7.
+    sessions: dict[str, WeekendClosure] = field(default_factory=dict)
 
 
 class ConfigError(ValueError):
@@ -175,6 +179,16 @@ def _horizons(raw_list: list[dict[str, Any]], base: StrategyParams) -> tuple[Hor
     if duplicates:
         raise ConfigError(f"duplicate horizon name(s): {', '.join(sorted(duplicates))}")
     return horizons
+
+
+def _sessions(raw: dict[str, Any]) -> dict[str, WeekendClosure]:
+    out: dict[str, WeekendClosure] = {}
+    for dex, table in raw.items():
+        try:
+            out[dex] = WeekendClosure.parse(table["weekend_close"], table["weekend_open"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ConfigError(f"[sessions.{dex}]: {exc}") from exc
+    return out
 
 
 def load_config(path: Path = DEFAULT_CONFIG_PATH) -> Config:
@@ -236,4 +250,5 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> Config:
             path=Path(j.get("path", "cache/trading_journal.jsonl")),
         ),
         cache_dir=Path(raw.get("cache", {}).get("dir", "cache")),
+        sessions=_sessions(raw.get("sessions", {})),
     )

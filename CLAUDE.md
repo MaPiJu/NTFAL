@@ -162,9 +162,21 @@ They never change an action — they tell the operator how much to trust it:
   few bars a large share of it is still that seed; ~60 bars puts the seed under 1%. The
   tradfi perps on the `xyz` dex are recent listings, so this fires on the swing horizon
   today (e.g. `xyz:SP500` had 27 weekly bars at time of writing).
-- **Near-frozen market** — a tradfi perp over the weekend still prints bars, at a fraction
-  of normal volume and range. Force Index is volume-scaled, so those bars flatten every
-  indicator and an intraday signal read off them is noise.
+- **Near-frozen market** — a tradfi perp on a weekday holiday still prints bars, at a
+  fraction of normal volume and range. Force Index is volume-scaled, so those bars flatten
+  every indicator and an intraday signal read off them is noise. (Weekends are removed by
+  the session calendar below.)
+
+## Trading sessions (tradfi perps)
+The `xyz` dex's markets close for the weekend; Elder counts trading days (p.125: five a
+week). `[sessions.<dex>]` in `config.toml` gives a dex its weekend closure (`xyz`: Friday
+21:00 → Sunday 22:00 UTC; a dex without one trades 24/7). For such a dex, **before any
+indicator**: bars lying *entirely* inside the closure are dropped (a bar straddling the
+close or the reopening is kept), and a **1w screen is rebuilt from the Monday–Friday daily
+bars** (Hyperliquid's own 1w candles open on Thursday and carry the weekend). Weekday
+holidays are not in the calendar; the near-frozen flag covers them. This shapes the
+*inputs* only — it is not an indicator (`data/sessions.py`, applied by `screen_bars` in the
+pipeline to every screen and to held positions).
 
 ## Risk module (the two pillars)
 - **2% Rule:** `max_risk_per_trade = equity_at_month_start * risk_pct` with `risk_pct`
@@ -204,6 +216,8 @@ They never change an action — they tell the operator how much to trust it:
   validate watchlist against the perp `meta` universe; current funding rates per dex from
   `metaAndAssetCtxs`; `clearinghouseState` open positions for a public address (read-only); cache OHLCV to parquet; parse string OHLCV fields
   to float; respect the 5000-candle limit.
+- `data/sessions.py` — weekend closure per dex: drop closed-market bars, rebuild weekly bars
+  from Monday–Friday daily bars.
 - `data/provider.py` — the `MarketDataProvider` Protocol the pipeline is typed against
   (satisfied by `HyperliquidClient`).
 - `indicators/` — pure functions on pandas DataFrames (EMA, MACD-Hist, Force Index, Impulse color).

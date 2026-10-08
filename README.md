@@ -43,6 +43,32 @@ Their common names differ from the Hyperliquid tickers:
 | US500 — S&P 500 | `xyz:SP500` |
 | US100 — Nasdaq-100 | `xyz:XYZ100` |
 
+### Trading sessions (weekends)
+
+Hyperliquid prints these perps 24/7, but the markets behind them close for the weekend:
+from Friday 21:00 to Sunday 22:00 UTC their bars carry a fraction of the usual volume and
+range, and they would flatten every EMA. Elder counts trading days (five a week), so the
+`xyz` dex has a weekend calendar (`[sessions.xyz]` in `config.toml`):
+
+- bars lying **entirely** inside the closure are dropped before any indicator — Saturday's
+  daily bar, about 26% of 4h bars and 29% of 1h/15m/5m bars; a bar straddling the close
+  or the reopening (Friday's daily bar, the Sunday 22:00 hour) is kept;
+- the **weekly tide is rebuilt from the Monday–Friday daily bars** (one bar per week, open
+  Monday, close Friday): Hyperliquid's own 1w candles open on **Thursday** (epoch
+  alignment) and carry the weekend;
+- weekday holidays are not in the calendar — the near-frozen-market flag covers them;
+- on a weekend the signal is the one of the last session bar, until the reopening.
+
+Measured on a cache of the six perps taken 2026-10-08 13:07 UTC (a Thursday), same code
+and same bars with and without the calendar: 9 of the 18 current signals change a level,
+an Impulse or the R:R (e.g. `xyz:GOLD` swing wave Impulse red → blue, `xyz:SP500` swing tide
+Impulse green → blue, `xyz:CL` micro R:R 0.36 → 1.05), none changes its action. Replaying
+every wave-bar close (swing and scalp: last 200 wave bars; micro: last 800), the action
+differs at 9% / 3% / 1% of weekday decisions (swing / scalp / micro) and the tide at
+20% / 9% / 2%; on weekend decision times the action differs at 7% / 38% / 49%, since
+without the calendar the frozen weekend bars drive the signal. A dex without a
+`[sessions.<dex>]` block — the native crypto perps — is left 24/7.
+
 ## How it works
 
 - **First screen (tide):** strategic bias from the slope of the tide EMA13, with tiny
@@ -78,8 +104,9 @@ Their common names differ from the Hyperliquid tickers:
 - **Divergences:** recent bullish/bearish divergences between price and MACD-Histogram /
   13-EMA Force Index are surfaced as Elder warnings.
 - **Data-quality flags:** a signal says when its own *inputs* are weak — a tide series too
-  short for a converged EMA26, or a near-frozen market (a tradfi perp over the weekend
-  still prints bars on ~5–10% of normal volume). Flags never change an action.
+  short for a converged EMA26, or a near-frozen market (a tradfi perp on a weekday
+  holiday still prints bars on ~5–10% of normal volume; weekends are dropped by the
+  session calendar above). Flags never change an action.
 - **Risk:** 2% Rule (Iron Triangle sizing, default 1% risk per trade, hard cap 2%, on the
   equity of the first day of the month) and
   the 6% monthly guard that blocks all new entries once monthly losses + open risk reach

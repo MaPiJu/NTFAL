@@ -31,6 +31,7 @@ from data.hyperliquid import (
     completed_bars,
 )
 from data.provider import MarketDataProvider
+from data.sessions import WeekendClosure, drop_closed_bars, weekly_from_weekdays
 from indicators import ema, force_index, impulse_color, macd_histogram
 from risk.sizing import MonthlyGuard, position_size, six_percent_guard
 from strategy.trade_management import OpenPosition, assess_position, parse_positions
@@ -305,15 +306,39 @@ def position_open_risk(position: dict[str, Any]) -> float:
     return max(0.0, per_unit) * float(position["size"])
 
 
+def screen_bars(
+    client: MarketDataProvider,
+    coin: str,
+    interval: str,
+    lookback: int,
+    now_ms: int,
+    closure: WeekendClosure | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """(completed bars the indicators may see, raw bars incl. the open one) for one
+    screen of one coin.
+
+    On a dex with a weekend `closure` (data/sessions.py), bars lying entirely
+    inside it are dropped, and a weekly screen is rebuilt from the Monday-Friday
+    daily bars instead of Hyperliquid's Thursday-anchored 1w candles. Without
+    one, these are simply the completed bars.
+    """
+    if closure is not None and interval == "1w":
+        raw = client.refresh(coin, "1d", lookback * 7)
+        return completed_bars(weekly_from_weekdays(raw), now_ms), raw
+    raw = client.refresh(coin, interval, lookback)
+    return drop_closed_bars(completed_bars(raw, now_ms), closure), raw
+
+
 def _position_frames(
     client: MarketDataProvider,
     horizon: HorizonConfig,
     coin: str,
     now_ms: int,
+    closure: WeekendClosure | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame] | None:
     """Completed tide + wave bars for a held coin, or None if too new."""
-    tide = completed_bars(client.refresh(coin, horizon.tide, horizon.lookback_tide), now_ms)
-    wave = completed_bars(client.refresh(coin, horizon.wave, horizon.lookback_wave), now_ms)
+    tide, _ = screen_bars(client, coin, horizon.tide, horizon.lookback_tide, now_ms, closure)
+    wave, _ = screen_bars(client, coin, horizon.wave, horizon.lookback_wave, now_ms, closure)
     if len(tide) < 2 or len(wave) < 2:
         return None
     return tide, wave
@@ -339,18 +364,22 @@ def build_positions(
     frames: dict[str, tuple[pd.DataFrame, pd.DataFrame]],
     now_ms: int,
     previous_stops: Mapping[str, float] | None = None,
+    sessions: Mapping[str, WeekendClosure] | None = None,
 ) -> list[dict[str, Any]]:
     """Elder exit verdict per open position, reusing scan frames where available.
 
     A held coin outside the watchlist (so not already refreshed) gets its candles
     fetched on demand. Coins too new to evaluate are skipped silently.
     `previous_stops` (the previous snapshot's stop memory) keeps each suggested
-    stop from moving back against its trade (Elder, p.224).
+    stop from moving back against its trade (Elder, p.224). `sessions` (dex ->
+    weekend closure) shapes the bars of a held coin fetched on demand.
     """
     memory = previous_stops or {}
     out: list[dict[str, Any]] = []
     for pos in open_positions:
-        tw = frames.get(pos.asset) or _position_frames(client, horizon, pos.asset, now_ms)
+        tw = frames.get(pos.asset) or _position_frames(
+            client, horizon, pos.asset, now_ms, (sessions or {}).get(coin_dex(pos.asset))
+        )
         if tw is None:
             continue
         tide, wave = tw
@@ -388,13 +417,16 @@ def build_horizon(
     for coin in coins:
         if on_progress is not None:
             on_progress(horizon.name, coin)
-        tide = completed_bars(client.refresh(coin, horizon.tide, horizon.lookback_tide), now_ms)
-        # Keep the raw wave frame (including the still-open bar) so we can read a
-        # live price; the strategy itself only ever sees completed bars.
-        wave_all = client.refresh(coin, horizon.wave, horizon.lookback_wave)
-        wave = completed_bars(wave_all, now_ms)
-        entry_frame = completed_bars(
-            client.refresh(coin, horizon.entry, horizon.lookback_entry), now_ms
+        # A tradfi perp's closed-market bars never reach an indicator (see
+        # screen_bars). The raw wave frame keeps the still-open bar so we can read
+        # a live price; the strategy itself only ever sees completed bars.
+        closure = cfg.sessions.get(coin_dex(coin))
+        tide, _ = screen_bars(client, coin, horizon.tide, horizon.lookback_tide, now_ms, closure)
+        wave, wave_all = screen_bars(
+            client, coin, horizon.wave, horizon.lookback_wave, now_ms, closure
+        )
+        entry_frame, _ = screen_bars(
+            client, coin, horizon.entry, horizon.lookback_entry, now_ms, closure
         )
 
         # A market without two completed bars per screen can't be evaluated
@@ -544,6 +576,7 @@ def build_snapshot(
         position_frames,
         now_ms,
         (previous or {}).get("stop_memory"),
+        cfg.sessions,
     )
     guard, risks = _risk_summary(cfg, positions)
 
@@ -623,7 +656,13 @@ def refresh_horizon(
 
     if name == cfg.scanner.positions_horizon:
         positions = build_positions(
-            client, horizon, open_positions, held_frames, now_ms, previous.get("stop_memory")
+            client,
+            horizon,
+            open_positions,
+            held_frames,
+            now_ms,
+            previous.get("stop_memory"),
+            cfg.sessions,
         )
         guard, risks = _risk_summary(cfg, positions)
         snapshot["positions"] = positions
