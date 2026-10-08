@@ -361,36 +361,40 @@ def channel(
     params: StrategyParams = DEFAULT_PARAMS,
     span: int = EMA_SLOW,
 ) -> tuple[float, float]:
-    """(upper, lower) channel around the slow EMA26 — Elder's percentage envelope
+    """(upper, lower) channel around the slow EMA26 — Elder's symmetrical channel
     (p.167). On the tide it is the fallback target when price already trades
     beyond the tide value zone; on the wave it is the chasing veto (p.168: never
     buy above the upper line, never sell short below the lower one).
 
-    Elder draws the channel parallel to the *slower* EMA and widens it until it
-    contains ~95% of recent bars. The bars left outside (1 - `containment`) are
-    split between the two edges, so each half-width is the
-    `1 - (1 - containment) / 2` quantile of the **relative** excursion of the
-    highs above / lows below the EMA (penetration / EMA at that bar) over the
-    lookback, projected onto the latest EMA.
+    Elder draws the channel parallel to the *slower* EMA with ONE coefficient k:
+    upper = EMA·(1 + k), lower = EMA·(1 − k), adjusted until it contains ~95% of
+    the past 100 bars (p.79, p.167; "between 90% and 95%", p.226). k is the
+    smallest coefficient that keeps at least `channel_containment` of the last
+    `channel_lookback_bars` bars inside — all the history there is when shorter —
+    each bar measured against its own EMA: high ≤ EMA·(1 + k) and low ≥ EMA·(1 − k).
+    The lines are then drawn around the latest EMA.
 
-    Measuring the excursion as a *ratio* (not an absolute price distance) keeps the
-    channel proportional to the current price and the lower band strictly positive
-    even for a market that has since crashed — a deliberate 24/7 adaptation that
-    fits the two sides independently rather than as one symmetric coefficient.
+    A ratio (not a price distance) keeps the channel proportional to price, and
+    the lower line positive after a crash: a low below its EMA pokes out by less
+    than 100% of it. (Only highs more than doubling their own EMA — a parabolic
+    market — could push k to 100%.)
     """
     e = ema(bars["close"], span)
-    window = slice(-params.channel_lookback_bars, None)
-    # Relative excursion of each bar's high above / low below the EMA (0 when the
-    # bar doesn't poke out). Each edge leaves half of the (1 - containment) budget
-    # outside, so the channel as a whole contains ~containment of the bars —
-    # Elder's "contains ~95% of bars" fit (p.167).
-    up = ((bars["high"] - e) / e).clip(lower=0).iloc[window]
-    down = ((e - bars["low"]) / e).clip(lower=0).iloc[window]
+    # How far each bar pokes out of its own EMA, either way, as a fraction of it
+    # (0 when the bar sits inside).
+    excursion = (
+        pd.concat([(bars["high"] - e) / e, (e - bars["low"]) / e], axis=1)
+        .max(axis=1)
+        .clip(lower=0)
+        .iloc[-params.channel_lookback_bars :]
+    )
     last = float(e.iloc[-1])
-    q = 1.0 - (1.0 - params.channel_containment) / 2.0
-    upper = last * (1.0 + (float(up.quantile(q)) if not up.empty else 0.0))
-    lower = last * (1.0 - (float(down.quantile(q)) if not down.empty else 0.0))
-    return upper, lower
+    if excursion.empty:
+        return last, last
+    # Keeping m bars inside takes the m-th smallest excursion.
+    inside = max(1, math.ceil(params.channel_containment * len(excursion) - 1e-9))
+    k = float(excursion.sort_values().iloc[inside - 1])
+    return last * (1.0 + k), last * (1.0 - k)
 
 
 def _long_levels(

@@ -21,8 +21,8 @@ class StrategyParams:
     # new multi-period extreme (accelerating move, not a pullback). ~3-4 weeks
     # of wave bars on the canonical daily wave.
     force_index_extreme_lookback_bars: int = 25
-    channel_lookback_bars: int = 26
-    # Elder fits the channel so it contains ~95% of recent bars (p.167).
+    # Elder fits the channel so it contains ~95% of the past 100 bars (p.79, p.167).
+    channel_lookback_bars: int = 100
     channel_containment: float = 0.95
     # Elder's 2:1 floor: flags sub-2:1 setups and earns full marks on the
     # Trade Apgar's reward:risk line.

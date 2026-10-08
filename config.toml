@@ -100,11 +100,12 @@ penetration_lookback_bars = 35
 # when FI(2) prints a NEW multi-period low (longs) / high (shorts) — the move is
 # accelerating, not a pullback. ~3-4 weeks of wave bars.
 force_index_extreme_lookback_bars = 25
-channel_lookback_bars = 26
-# Elder fits the channel (around the slow EMA26) so it contains ~95% of the last
-# `channel_lookback_bars` bars (p.167). The TIDE channel is the fallback profit
-# target; the WAVE channel is the chasing veto (p.168: "never buy above the upper
-# channel line or sell short below the lower channel line").
+# Elder's symmetrical channel (p.167): EMA26 x (1 +/- k), with the smallest k
+# that keeps ~95% of the past 100 bars inside (p.79; all the history there is
+# when shorter — the swing tide has 31-53 weekly bars). The TIDE channel is the
+# fallback profit target; the WAVE channel is the chasing veto (p.168: "never buy
+# above the upper channel line or sell short below the lower channel line").
+channel_lookback_bars = 100
 channel_containment = 0.95
 # Elder's 2:1 floor: sub-2:1 setups are flagged, and the Trade Apgar gives its
 # reward:risk line full marks (2) from here, 1 from 1:1, 0 below.

@@ -183,8 +183,10 @@ They never change an action — they tell the operator how much to trust it:
   block all new-entry suggestions for the rest of the month (flag clearly in the UI). The
   guard is **global**, computed once across every horizon.
 - **Targets:** profit target on the **tide** value zone (between EMA13 and EMA26) or a
-  tide **channel** (Elder's percentage envelope around the slow **EMA26**, fit to contain
-  ~95% of recent bars) when price already trades beyond value; **stop** on the **wave**.
+  tide **channel** (Elder's symmetrical channel around the slow **EMA26**: one coefficient
+  k, `EMA26·(1 ± k)`, the smallest that keeps ~95% of the past **100** bars inside, each bar
+  measured against its own EMA — p.79, p.167; all the history there is when shorter) when
+  price already trades beyond value; **stop** on the **wave**.
   Reward:risk target ≥ **2:1**; **flag** setups below it (flag, don't hide — on short
   horizons the value-zone target tightens faster than the SafeZone stop, so sub-2:1 setups
   are the norm there and the operator needs to see them).

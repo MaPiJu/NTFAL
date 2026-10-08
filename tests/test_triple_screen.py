@@ -511,16 +511,54 @@ def test_channel_lower_band_stays_positive_after_a_crash():
 
 
 def test_channel_backbone_is_slow_ema26():
-    # Elder draws the channel parallel to the SLOW EMA26, not the fast EMA13. In a
-    # clean uptrend the lows stay above the slow EMA, so the lower band collapses
-    # onto the backbone — pinning it to EMA26.
+    # Elder draws the channel parallel to the SLOW EMA26, not the fast EMA13: the
+    # symmetrical channel is centered on it.
     weekly = make_ohlcv([100.0 + 2.0 * i for i in range(40)], freq="W")
-    _upper, lower = channel(weekly)
+    upper, lower = channel(weekly)
     e13 = float(ema(weekly["close"], EMA_FAST).iloc[-1])
     e26 = float(ema(weekly["close"], EMA_SLOW).iloc[-1])
 
-    assert lower == pytest.approx(e26)
-    assert lower != pytest.approx(e13)
+    assert (upper + lower) / 2 == pytest.approx(e26)
+    assert (upper + lower) / 2 != pytest.approx(e13)
+
+
+def test_channel_is_one_symmetric_coefficient_around_the_slow_ema():
+    # Elder (p.167): "Upper Channel Line = EMA + Channel Coefficient · EMA; Lower
+    # Channel Line = EMA - Channel Coefficient · EMA" — one coefficient, adjusted
+    # "until a channel contains approximately 95 percent of all price data for
+    # the past 100 bars". Highs poke far above a flat EMA26 at 100, lows barely
+    # below it: one coefficient still sets both lines.
+    n = 100
+    highs = [102.0 + (i % 10) * 0.3 for i in range(n)]  # +2.0% .. +4.7%, 10 bars each
+    lows = [99.5] * n
+    weekly = make_ohlcv([100.0] * n, lows=lows, highs=highs, freq="W")
+
+    upper, lower = channel(weekly)
+
+    assert upper - 100.0 == pytest.approx(100.0 - lower)
+    # The smallest such coefficient: the top ten bars all poke out by 4.7%, and
+    # keeping 95 of 100 inside needs some of them, hence all of them.
+    assert upper == pytest.approx(104.7)
+
+
+def test_channel_fits_the_last_100_bars_or_all_there_is():
+    # Elder (p.79): a channel "should contain approximately 95% of all prices that
+    # occurred during the past 100 bars". 11 spikes sit in the last 100 bars but
+    # none in the last 26: more than the 5% budget, so the lines must reach them.
+    assert StrategyParams().channel_lookback_bars == 100
+    n = 130
+    highs, lows = [101.0] * n, [99.0] * n
+    for i in range(n - 100, n - 26, 7):
+        highs[i] = 110.0
+    assert sum(h == 110.0 for h in highs) == 11
+    weekly = make_ohlcv([100.0] * n, lows=lows, highs=highs, freq="W")
+
+    upper, lower = channel(weekly)
+    assert (upper, lower) == (pytest.approx(110.0), pytest.approx(90.0))
+
+    # Less history than that: every bar there is.
+    short = make_ohlcv([100.0] * 40, lows=[99.0] * 40, highs=[101.0] * 39 + [103.0], freq="W")
+    assert channel(short)[0] == pytest.approx(101.0)  # 1 bar of 40 left out
 
 
 def test_channel_widens_with_containment():
