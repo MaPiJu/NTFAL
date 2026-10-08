@@ -138,14 +138,19 @@ class HyperliquidClient:
 
         Coins may mix dexes ('BTC' is native, 'xyz:GOLD' lives on the tradfi
         dex); one `meta` request is made per dex involved. Raises
-        HyperliquidError listing any coin that is not a tradable perp.
+        HyperliquidError listing any coin that is not a tradable perp — unknown,
+        or delisted (delisted perps stay in `meta`, flagged `isDelisted`).
         """
         universes: dict[str, dict[str, dict[str, Any]]] = {}
         for dex in {coin_dex(c) for c in coins}:
             universes[dex] = self.perp_universe(dex)
-        unknown = [c for c in coins if c not in universes[coin_dex(c)]]
+        unknown = [
+            c
+            for c in coins
+            if c not in universes[coin_dex(c)] or universes[coin_dex(c)][c].get("isDelisted", False)
+        ]
         if unknown:
-            raise HyperliquidError(f"not in the Hyperliquid perp universe: {', '.join(unknown)}")
+            raise HyperliquidError(f"not a tradable Hyperliquid perp: {', '.join(unknown)}")
         return {c: int(universes[coin_dex(c)][c]["szDecimals"]) for c in coins}
 
     def tradable_perps(self, dex: str = "") -> dict[str, int]:

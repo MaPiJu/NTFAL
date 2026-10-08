@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import math
+
 import pytest
 
 from config import ConfigError, ManualPosition, load_config
+from data.hyperliquid import INTERVAL_MS
 
 BASE = """
 [scanner]
@@ -183,3 +186,18 @@ def test_shipped_config_is_valid_and_hyperliquid_only():
     assert cfg.scanner.positions_horizon == "swing"
     # Elder's 2:1 floor is the shipped default.
     assert cfg.strategy.min_reward_risk == 2.0
+
+
+def test_shipped_flat_tide_threshold_scales_with_the_tide_interval():
+    # A "flat" tide is an EMA13 slope lost in the noise, and noise grows like the
+    # square root of time: one threshold in %/bar cannot fit a weekly and an hourly
+    # tide (at 0.1%/bar the 1h tide of xyz:SP500 read "neutral" 99% of the time).
+    # Each horizon scales the swing (1w) threshold by sqrt(tide bar / 1 week).
+    cfg = load_config()
+    swing = cfg.scanner.horizon("swing")
+    base = swing.params.flat_trend_slope_pct
+    assert swing.tide == "1w"
+
+    for h in cfg.scanner.horizons:
+        expected = base * math.sqrt(INTERVAL_MS[h.tide] / INTERVAL_MS["1w"])
+        assert h.params.flat_trend_slope_pct == pytest.approx(expected, rel=0.05), h.name

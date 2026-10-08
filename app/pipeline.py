@@ -19,6 +19,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pandas as pd
 
 from config import WATCHLIST_ALL, Config, HorizonConfig
@@ -192,16 +193,17 @@ def fetch_open_positions(cfg: Config, client: MarketDataProvider) -> list[OpenPo
     """Open positions: read from Hyperliquid + declared manually.
 
     Hyperliquid positions are gathered across the native clearinghouse and
-    every HIP-3 dex the watchlist references; a failure on one dex doesn't
-    drop the others. `[[positions.manual]]` entries cover a trade the configured
-    address cannot see.
+    every HIP-3 dex the watchlist references; a failure on one dex (a bad
+    payload, an HTTP error, a timeout) doesn't drop the others.
+    `[[positions.manual]]` entries cover a trade the configured address cannot
+    see.
     """
     out: list[OpenPosition] = []
     if cfg.positions.address:
         for dex in watchlist_dexes(cfg.scanner.watchlist):
             try:
                 state = client.clearinghouse_state(cfg.positions.address, dex=dex)
-            except HyperliquidError:
+            except (HyperliquidError, httpx.HTTPError):
                 continue
             out.extend(parse_positions(state))
     for m in cfg.positions.manual:
@@ -210,9 +212,14 @@ def fetch_open_positions(cfg: Config, client: MarketDataProvider) -> list[OpenPo
 
 
 def position_open_risk(position: dict[str, Any]) -> float:
-    """Risk still open using the current Elder/SafeZone stop suggestion."""
-    per_unit = abs(float(position["entry"]) - float(position["suggested_stop"]))
-    return per_unit * float(position["size"])
+    """Risk still open using the current Elder/SafeZone stop suggestion.
+
+    Elder's 6% Rule (p.208-209): the distance from entry to the current stop,
+    and zero once the stop is at or beyond break-even (it locks in profit).
+    """
+    entry, stop = float(position["entry"]), float(position["suggested_stop"])
+    per_unit = entry - stop if position["side"] == "long" else stop - entry
+    return max(0.0, per_unit) * float(position["size"])
 
 
 def _position_frames(
@@ -304,6 +311,7 @@ def build_horizon(
             horizon=horizon.name,
             intervals=horizon.intervals,
             min_tide_bars=horizon.min_tide_bars,
+            sz_decimals=coins.get(coin),
         )
         evaluated.append(sig)
         row = asdict(sig)

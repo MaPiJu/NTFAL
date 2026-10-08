@@ -5,10 +5,18 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 
+import httpx
 from fastapi.testclient import TestClient
 
 from app.main import app
-from app.pipeline import build_snapshot, live_price_alert, load_snapshot, refresh_horizon
+from app.pipeline import (
+    build_snapshot,
+    fetch_open_positions,
+    live_price_alert,
+    load_snapshot,
+    position_open_risk,
+    refresh_horizon,
+)
 from config import (
     Config,
     HorizonConfig,
@@ -282,7 +290,7 @@ def test_open_position_gets_management_verdict(tmp_path, btc_fixtures):
     assert pos["entry"] == 50000.0
     assert pos["verdict"] in {"hold", "take_profits", "exit"}
     assert pos["reasons"]
-    assert pos["open_risk"] == abs(pos["entry"] - pos["suggested_stop"]) * pos["size"]
+    assert pos["open_risk"] == max(0.0, pos["entry"] - pos["suggested_stop"]) * pos["size"]
 
 
 def test_manual_position_merges_without_an_address(tmp_path, btc_fixtures):
@@ -335,6 +343,26 @@ def test_position_on_builder_dex_is_found(tmp_path, btc_fixtures):
     assert pos["verdict"] in {"hold", "take_profits", "exit"}
 
 
+def test_positions_survive_a_failing_dex(tmp_path):
+    # clearinghouseState is queried once per dex; an HTTP error or timeout on one
+    # dex (here the tradfi "xyz" one) must not drop the positions read on the
+    # others, nor abort the whole refresh.
+    addr = "0x" + "34" * 20
+    cfg = make_config(tmp_path, watchlist=("BTC", "xyz:GOLD"), address=addr)
+
+    class FlakyDex:
+        def clearinghouse_state(self, address: str, dex: str = "") -> dict:
+            if dex == "xyz":
+                req = httpx.Request("POST", "https://api.hyperliquid.xyz/info")
+                raise httpx.HTTPStatusError(
+                    "502 Bad Gateway", request=req, response=httpx.Response(502, request=req)
+                )
+            return make_clearinghouse_state([{"coin": "BTC", "szi": "0.5", "entryPx": "50000.0"}])
+
+    (pos,) = fetch_open_positions(cfg, FlakyDex())
+    assert (pos.asset, pos.side, pos.entry) == ("BTC", "long", 50000.0)
+
+
 def test_snapshot_reports_tripped_guard(tmp_path, chain_fixtures):
     cfg = make_config(tmp_path, horizons=(SWING, SCALP), month_realized_losses=700.0)
     client = make_client(chain_fixtures, tmp_path)
@@ -358,6 +386,41 @@ def test_no_size_is_suggested_when_the_target_is_already_passed(tmp_path, chain_
         for s in block["signals"]:
             if s["position_size"] is not None:
                 assert s["reward_risk"] > 0, s["asset"]
+
+
+def test_open_risk_is_zero_once_the_stop_locks_in_profit():
+    # Elder's 6% Rule (p.208-209): open risk is the distance from entry to the
+    # current stop, and it is ZERO once the stop sits at or beyond break-even —
+    # "nothing in stock A, because its stop is above breakeven". A stop that locks
+    # in profit must not be counted as risk, or the guard trips on winning trades.
+    def risk(side, entry, stop, size=10.0):
+        return position_open_risk(
+            {"side": side, "entry": entry, "suggested_stop": stop, "size": size}
+        )
+
+    assert risk("long", 100.0, 95.0) == 50.0  # stop below entry: real risk
+    assert risk("long", 100.0, 105.0) == 0.0  # trailing stop above entry: profit locked
+    assert risk("long", 100.0, 100.0) == 0.0  # at break-even
+    assert risk("short", 100.0, 104.0) == 40.0
+    assert risk("short", 100.0, 95.0) == 0.0  # short stop below entry: profit locked
+
+
+def test_pipeline_passes_sz_decimals_to_the_strategy(tmp_path, btc_fixtures, monkeypatch):
+    # The tick of an entry order depends on the asset's szDecimals (Hyperliquid:
+    # at most 6 - szDecimals decimals), so the pipeline must hand it over.
+    import app.pipeline as pipeline
+
+    seen: dict[str, int | None] = {}
+    real = pipeline.evaluate_asset
+
+    def spy(asset, *args, **kwargs):
+        seen[asset] = kwargs.get("sz_decimals")
+        return real(asset, *args, **kwargs)
+
+    monkeypatch.setattr(pipeline, "evaluate_asset", spy)
+    build_snapshot(make_config(tmp_path), make_client(btc_fixtures, tmp_path))
+
+    assert seen == {"BTC": 5}
 
 
 def test_guard_uses_automatic_open_position_risk(tmp_path, btc_fixtures):

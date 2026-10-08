@@ -73,6 +73,17 @@ def test_validate_watchlist_mixed_dexes(tmp_path, btc_fixtures):
         client.validate_watchlist(["xyz:DOGEZILLA"])
 
 
+def test_validate_watchlist_rejects_explicit_delisted_coin(tmp_path, btc_fixtures):
+    # Delisted perps stay in `meta` (flagged isDelisted), so "is it in the
+    # universe?" is not "is it tradable?". An explicit delisted coin must be
+    # refused like an unknown one, on the native and on a builder dex alike.
+    client = make_client(btc_fixtures, tmp_path)
+    with pytest.raises(HyperliquidError, match="xyz:RETIRED"):
+        client.validate_watchlist(["xyz:GOLD", "xyz:RETIRED"])
+    with pytest.raises(HyperliquidError, match="OLD"):
+        client.validate_watchlist(["BTC", "OLD"])
+
+
 def test_tradable_perps_builder_dex(tmp_path, btc_fixtures):
     client = make_client(btc_fixtures, tmp_path)
     perps = client.tradable_perps("xyz")

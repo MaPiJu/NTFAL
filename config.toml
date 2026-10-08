@@ -54,6 +54,10 @@ lookback_entry = 2000
 refresh_seconds = 3600    # hourly
 min_tide_bars = 60
 
+[scanner.horizons.strategy]
+# 0.1%/bar x sqrt(4h / 1w): see flat_trend_slope_pct under [strategy].
+flat_trend_slope_pct = 0.00015
+
 [[scanner.horizons]]
 name = "micro"
 label = "Minutes"
@@ -66,12 +70,23 @@ lookback_entry = 2000
 refresh_seconds = 300     # every 5 minutes
 min_tide_bars = 60
 
+[scanner.horizons.strategy]
+# 0.1%/bar x sqrt(1h / 1w): see flat_trend_slope_pct under [strategy].
+flat_trend_slope_pct = 0.00008
+
 [strategy]
 # Strategy thresholds/weights. Defaults mirror the Elder scanner's built-in
 # behavior; tune here instead of editing code. Every lookback is a count of
 # BARS on the relevant screen's timeframe, so the same numbers carry across
 # horizons. Any key here may be overridden per horizon with a
 # [scanner.horizons.strategy] sub-block.
+#
+# A tide is "flat" (neutral, no trade) when its EMA13 moves less than this
+# fraction per tide bar. Noise grows like sqrt(time), so a %/bar cutoff does not
+# carry across timeframes: each horizon scales this swing (1w) value by
+# sqrt(tide bar / 1 week) — scalp (4h) 0.00015, micro (1h) 0.00008. Measured on
+# the six xyz perps, that keeps 5-31% of tide bars neutral on every horizon
+# (0.1% on a 1h tide read xyz:SP500 as neutral 99% of the time).
 flat_trend_slope_pct = 0.001
 # "last ~4-6 weeks" of wave bars, used for the average EMA penetration.
 penetration_lookback_bars = 35
@@ -81,11 +96,11 @@ penetration_lookback_bars = 35
 force_index_extreme_lookback_bars = 25
 channel_lookback_bars = 26
 # Elder fits the channel (around the slow EMA26) so it contains ~95% of the last
-# `channel_lookback_bars` tide bars (p.183); used as the fallback profit target.
+# `channel_lookback_bars` tide bars (p.167); used as the fallback profit target.
 channel_containment = 0.95
 min_reward_risk = 2.0
 divergence_lookback = 60
-# Elder/Lovvorn (p.104): only flag a divergence when its two extremes are this
+# Elder/Lovvorn (p.88): only flag a divergence when its two extremes are this
 # many bars apart (most tradable at 20-40; the closer to 20 the better).
 divergence_min_separation = 20
 divergence_max_separation = 40
@@ -113,6 +128,9 @@ score_pullback_weight = 0.15
 # 0.25 = warn when the last few bars average under 25% of the recent median.
 low_volume_ratio = 0.25
 low_volume_bars = 6
+# "Normal" volume = median of this many wave bars. Must span well over a week of
+# wave bars (1000 x 15m ~ 10 days) so a ~49h weekend can't become the baseline.
+low_volume_baseline_bars = 1000
 
 [risk]
 # Account equity in USD (used by the 2% Iron Triangle sizing).

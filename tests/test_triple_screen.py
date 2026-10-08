@@ -71,6 +71,27 @@ def test_tick_size():
         tick_size(0)
 
 
+def test_tick_size_follows_hyperliquid_price_rules():
+    # Hyperliquid perps: <= 5 significant figures, but integer prices are always
+    # valid (so a tick never exceeds 1), and <= 6 - szDecimals decimals.
+    assert tick_size(123_456.0) == pytest.approx(1.0)  # not 10: integers allowed
+    assert tick_size(0.5, sz_decimals=2) == pytest.approx(1e-4)  # decimals cap binds
+    assert tick_size(0.5) == pytest.approx(1e-5)  # unknown szDecimals: sig figs only
+    # The six default xyz perps: 5 significant figures is the binding rule.
+    assert tick_size(4126.0, sz_decimals=4) == pytest.approx(0.1)  # xyz:GOLD
+    assert tick_size(91.81, sz_decimals=3) == pytest.approx(0.001)  # xyz:CL
+    assert tick_size(30_967.0, sz_decimals=4) == pytest.approx(1.0)  # xyz:XYZ100
+
+
+def test_entry_tick_respects_sz_decimals_cap():
+    # With szDecimals=5 a perp may quote at most 1 decimal, so the buy-stop sits
+    # 0.1 (not 0.01) above the prior high, even at a ~140 price.
+    sig = evaluate_asset("X", WEEKLY_UP, DAILY_LONG, sz_decimals=5)
+    prior_high = float(DAILY_LONG["high"].iloc[-1])
+    assert sig.action == "long"
+    assert sig.entry == pytest.approx(prior_high + 0.1)
+
+
 def test_tide_trend():
     assert tide_trend(WEEKLY_UP["close"]) == "up"
     assert tide_trend(WEEKLY_DOWN["close"]) == "down"
@@ -181,7 +202,7 @@ def test_value_zone_veto_is_directional_long_below_value():
 
 def test_divergence_requires_zero_line_crossover():
     # Two successively lower price lows with a shallower second indicator low is
-    # the divergence *shape* — but Elder (p.103) requires the indicator to cross
+    # the divergence *shape* — but Elder (p.87) requires the indicator to cross
     # back above its zero line between the two bottoms ("an absolute must").
     close = pd.Series(
         [110, 108, 106, 104, 102, 100, 102, 104, 106, 108,
@@ -201,9 +222,37 @@ def test_divergence_requires_zero_line_crossover():
     ]
 
 
+def test_divergence_needs_a_real_zero_line_cross_not_an_endpoint():
+    # Elder (p.87, p.117): the indicator must *cross* its zero line between the two
+    # extremes — down below zero at the first bottom, back above before the second.
+    # An indicator already above zero at the first price low never crossed anything,
+    # even though "some value in [first, second] is > 0" is trivially true.
+    close = pd.Series(
+        [110, 108, 106, 104, 102, 100, 102, 104, 106, 108,
+         106, 104, 102, 100, 98, 96, 98, 100, 102, 104],
+        dtype=float,
+    )  # fmt: skip
+    above = pd.Series([1.0] * 20)
+    above[5], above[15] = 0.5, 2.0  # higher second "bottom", but never below zero
+    assert _divergence_for_indicator(close, above, "TEST", min_separation=0) == []
+
+    # Mirror image for tops: never above zero, so no bearish divergence either.
+    tops = 200.0 - close  # higher high at bar 15
+    below = pd.Series([-1.0] * 20)
+    below[5], below[15] = -0.5, -2.0
+    assert _divergence_for_indicator(tops, below, "TEST", min_separation=0) == []
+
+    # A genuine bearish cross (above zero at the first top, below in between) counts.
+    crossed = below.copy()
+    crossed[5], crossed[10] = 3.0, -1.0
+    assert _divergence_for_indicator(tops, crossed, "TEST", min_separation=0) == [
+        "bearish TEST divergence"
+    ]
+
+
 def test_divergence_requires_minimum_separation():
     # Same valid bullish shape (crosses zero between the two lows), but the lows are
-    # only 10 bars apart — below Elder/Lovvorn's 20-bar floor (p.104), so it is not
+    # only 10 bars apart — below Elder/Lovvorn's 20-bar floor (p.88), so it is not
     # flagged. Lower the floor and the very same shape is flagged.
     close = pd.Series(
         [110, 108, 106, 104, 102, 100, 102, 104, 106, 108,
@@ -323,7 +372,7 @@ def test_channel_backbone_is_slow_ema26():
 
 
 def test_channel_widens_with_containment():
-    # Higher containment -> wider channel (Elder fits ~95%, p.183). Up-excursions
+    # Higher containment -> wider channel (Elder fits ~95%, p.167). Up-excursions
     # spike every 5th bar, so the 95th percentile sits well above the median.
     highs = [100.0 + (10.0 if i % 5 == 0 else 1.0) for i in range(40)]
     weekly = make_ohlcv([100.0] * 40, lows=[100.0] * 40, highs=highs, freq="W")
@@ -331,6 +380,25 @@ def test_channel_widens_with_containment():
     narrow_upper, _ = channel(weekly, StrategyParams(channel_containment=0.50))
     wide_upper, _ = channel(weekly, StrategyParams(channel_containment=0.95))
     assert wide_upper > narrow_upper
+
+
+def test_channel_contains_about_95_percent_of_bars():
+    # Elder (p.79, p.167): a well-drawn channel contains ~95% of recent prices —
+    # "between 90% and 95%" (p.226). The 5% left outside is split between BOTH
+    # edges; fitting each edge to its own 95th percentile leaves ~5% above AND ~5%
+    # below, i.e. only ~85-90% inside. Flat EMA26 at 100 with distinct excursions,
+    # so containment is a plain count over the lookback window.
+    n = 40
+    highs = [100.0 + 1.0 + (i * 7 % n) / 10 for i in range(n)]
+    lows = [100.0 - 1.0 - (i * 11 % n) / 10 for i in range(n)]
+    weekly = make_ohlcv([100.0] * n, lows=lows, highs=highs, freq="W")
+    params = StrategyParams()
+
+    upper, lower = channel(weekly, params)
+    window = weekly.iloc[-params.channel_lookback_bars :]
+    inside = ((window["high"] <= upper) & (window["low"] >= lower)).mean()
+
+    assert 0.90 <= inside < 1.0  # Elder's 90-95%, with only the extremes outside
 
 
 def test_quality_score_rewards_better_reward_risk():
@@ -490,6 +558,20 @@ def test_data_warning_on_a_near_frozen_market():
     assert any("near-closed" in w for w in warns)
 
     assert not any("near-closed" in w for w in data_warnings(WEEKLY_UP, DAILY_LONG))
+
+
+def test_data_warning_survives_a_whole_frozen_weekend():
+    # A tradfi weekend lasts ~49h: ~196 bars on a 15m wave. The "normal volume"
+    # baseline must span far more than that, or by Saturday it is itself made of
+    # weekend bars and the near-frozen flag switches off (live xyz:GOLD 15m: only
+    # 5 of 192 weekend bars flagged with a 60-bar baseline).
+    n_week, n_weekend = 1000, 150
+    closes = [100.0 + 0.01 * i for i in range(n_week + n_weekend)]
+    volumes = [1000.0] * n_week + [30.0] * n_weekend  # weekend at 3% of normal
+    frozen = make_ohlcv(closes, volumes=volumes, freq="15min")
+
+    warns = data_warnings(WEEKLY_UP, frozen)
+    assert any("near-closed" in w for w in warns)
 
 
 def test_data_warnings_do_not_change_the_action():

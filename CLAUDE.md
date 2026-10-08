@@ -29,6 +29,10 @@ decision and place orders **manually**.
 
 ## Strategy Spec (canonical — do not drift)
 
+Page references (`p.N`) are the **printed** page numbers of *The New Trading for a Living*
+(`The New Trading for a Living.pdf` at the repo root: PDF page index = printed page + 16).
+The compliance audit lives in `docs/AUDIT.md`.
+
 ### The three screens are roles, not fixed intervals
 Elder's "factor of ~5" is applied to a **role**, so one implementation serves every
 horizon. Per horizon:
@@ -110,8 +114,8 @@ Output is informational only; a human exits manually.
 Divergence warnings reuse Elder indicators only: recent price/indicator disagreement on
 MACD-Histogram or 13-EMA Force Index is surfaced in the signal reasons/dashboard, without
 introducing new indicators. A divergence counts only when the indicator **crosses its zero
-line between the two extremes** (Elder's "absolute must", p.103) — no crossover, no
-divergence — and only when the two extremes sit ~20–40 bars apart (Elder/Lovvorn, p.104).
+line between the two extremes** (Elder's "absolute must", p.87) — no crossover, no
+divergence — and only when the two extremes sit ~20–40 bars apart (Elder/Lovvorn, p.88).
 
 "Average penetration": over the last ~4–6 weeks *of wave bars*, measure how far pullbacks
 pierce below (uptrend) / above (downtrend) the fast EMA; average those penetrations; project

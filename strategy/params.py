@@ -22,11 +22,11 @@ class StrategyParams:
     # of wave bars on the canonical daily wave.
     force_index_extreme_lookback_bars: int = 25
     channel_lookback_bars: int = 26
-    # Elder fits the channel so it contains ~95% of recent bars (p.183).
+    # Elder fits the channel so it contains ~95% of recent bars (p.167).
     channel_containment: float = 0.95
     min_reward_risk: float = 2.0
     divergence_lookback: int = 60
-    # Elder/Lovvorn (p.104): the most tradable divergences span 20-40 bars.
+    # Elder/Lovvorn (p.88): the most tradable divergences span 20-40 bars.
     divergence_min_separation: int = 20
     divergence_max_separation: int = 40
     rr_excellent: float = 3.0
@@ -48,3 +48,6 @@ class StrategyParams:
     # median volume (a tradfi perp over the weekend is a frozen oracle).
     low_volume_ratio: float = 0.25
     low_volume_bars: int = 6
+    # Bars of wave volume whose median is "normal". Must span well over a week of
+    # wave bars (1000 x 15m ~ 10 days), or a ~49h weekend becomes the baseline.
+    low_volume_baseline_bars: int = 1000
