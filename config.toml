@@ -29,6 +29,9 @@ positions_horizon = "swing"
 # often the horizon is recomputed (a weekly tide doesn't move every 5 minutes).
 # `min_tide_bars`: below this much tide history the EMA26 is not converged, so
 # the tide and its Impulse are flagged unreliable rather than silently trusted.
+# `holding_hours`: a typical holding time for a trade on this chain. The current
+# hourly funding rate x this many hours = the estimated funding cost shown with
+# each signal (flagged when it exceeds half the trade's risk; never a veto).
 
 [[scanner.horizons]]
 name = "swing"
@@ -41,6 +44,7 @@ lookback_wave = 500
 lookback_entry = 1000
 refresh_seconds = 86400   # once a day
 min_tide_bars = 60
+holding_hours = 336   # 14 days
 
 [[scanner.horizons]]
 name = "scalp"
@@ -53,6 +57,7 @@ lookback_wave = 2000
 lookback_entry = 2000
 refresh_seconds = 3600    # hourly
 min_tide_bars = 60
+holding_hours = 48    # 2 days
 
 [scanner.horizons.strategy]
 # 0.1%/bar x sqrt(4h / 1w): see flat_trend_slope_pct under [strategy].
@@ -69,6 +74,7 @@ lookback_wave = 2000
 lookback_entry = 2000
 refresh_seconds = 300     # every 5 minutes
 min_tide_bars = 60
+holding_hours = 4
 
 [scanner.horizons.strategy]
 # 0.1%/bar x sqrt(1h / 1w): see flat_trend_slope_pct under [strategy].

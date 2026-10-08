@@ -132,6 +132,34 @@ function sizeWarningsHTML(s) {
   return `<br><strong class="warn">! Size:</strong> <span class="warn">${warns.join(" · ")}</span>`;
 }
 
+function pctText(x, digits = 2) {
+  return `${x >= 0 ? "+" : ""}${(x * 100).toFixed(digits)}%`;
+}
+
+function holdingLabel(hours) {
+  return hours >= 24 && hours % 24 === 0 ? `${hours / 24} d` : `${hours} h`;
+}
+
+// Current hourly funding rate (+: longs pay shorts) and, for a trade, the funding
+// it would pay over the horizon's holding time, as % of notional (+: paid).
+function fundingCell(s) {
+  if (s.funding_rate === null || s.funding_rate === undefined) return "—";
+  let html = `${pctText(s.funding_rate, 4)}/h`;
+  if (s.funding_cost !== null && s.funding_cost !== undefined) {
+    const cls = s.funding_cost > 0 ? "rr-bad" : "rr-good";
+    const flag = s.funding_warning ? " ⚠" : "";
+    html +=
+      `<br><span class="${cls}" title="${(s.funding_warning || "").replace(/"/g, "&quot;")}">` +
+      `${pctText(s.funding_cost)} / ${holdingLabel(s.funding_hours)}${flag}</span>`;
+  }
+  return html;
+}
+
+function fundingWarningHTML(s) {
+  if (!s.funding_warning) return "";
+  return `<br><strong class="warn">! Funding:</strong> <span class="warn">${s.funding_warning}</span>`;
+}
+
 function warnBadge(s) {
   const warns = s.data_warnings || [];
   if (!warns.length) return "";
@@ -198,7 +226,8 @@ function renderTable(block) {
       <td>${fmt(s.target)}</td>
       <td>${scoreCell(s)}</td>
       <td>${sizeCell(s)}</td>
-      <td class="reason">${s.reason}<br><strong>Value zone:</strong> ${(s.value_zone_status || "—").replace("_", " ")}${s.price_alert ? `<br><strong>⚠ Live price:</strong> ${s.price_alert}` : ""}${s.entry_order_plan ? `<br><strong>Order plan:</strong> ${s.entry_order_plan}` : ""}${(s.divergences || []).length ? `<br><strong>Divergences:</strong> ${s.divergences.join(", ")}` : ""}${warningsHTML(s)}${sizeWarningsHTML(s)}</td>`;
+      <td>${fundingCell(s)}</td>
+      <td class="reason">${s.reason}<br><strong>Value zone:</strong> ${(s.value_zone_status || "—").replace("_", " ")}${s.price_alert ? `<br><strong>⚠ Live price:</strong> ${s.price_alert}` : ""}${s.entry_order_plan ? `<br><strong>Order plan:</strong> ${s.entry_order_plan}` : ""}${(s.divergences || []).length ? `<br><strong>Divergences:</strong> ${s.divergences.join(", ")}` : ""}${warningsHTML(s)}${sizeWarningsHTML(s)}${fundingWarningHTML(s)}</td>`;
     tbody.appendChild(row);
   }
 }

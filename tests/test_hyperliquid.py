@@ -107,6 +107,33 @@ def test_meta_exposes_leverage_limits(tmp_path, btc_fixtures):
     assert client.tradable_perps("xyz")["xyz:GOLD"] == PerpSpec(4, 25)
 
 
+def test_funding_rates_come_from_meta_and_asset_ctxs(tmp_path, btc_fixtures):
+    # `funding` in metaAndAssetCtxs is the current HOURLY rate, as a fraction of
+    # notional (positive: longs pay shorts), one context per `meta` universe entry.
+    log: list[dict] = []
+    client = make_client(btc_fixtures, tmp_path, requests_log=log, funding={"xyz:GOLD": "-0.00031"})
+
+    rates = client.funding_rates("xyz")
+    assert rates["xyz:GOLD"] == pytest.approx(-0.00031)
+    assert rates["xyz:SP500"] == pytest.approx(0.0000125)
+    assert log[-1] == {"type": "metaAndAssetCtxs", "dex": "xyz"}
+
+    assert client.funding_rates()["BTC"] == pytest.approx(0.0000125)
+    assert log[-1] == {"type": "metaAndAssetCtxs"}  # native dex: no "dex" key
+
+
+def test_funding_rates_reject_a_misaligned_payload(tmp_path):
+    # Contexts are matched to perps by position: a payload whose two lists
+    # disagree in length would pin rates on the wrong coins.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[META, [{"funding": "0.0001"}]])
+
+    http = httpx.Client(transport=httpx.MockTransport(handler))
+    client = HyperliquidClient(http=http, cache_dir=tmp_path)
+    with pytest.raises(HyperliquidError, match="metaAndAssetCtxs"):
+        client.funding_rates()
+
+
 def test_cache_path_is_filename_safe(tmp_path, btc_fixtures):
     fixtures = dict(btc_fixtures)
     fixtures[("xyz:GOLD", "1d")] = btc_fixtures[("BTC", "1d")]

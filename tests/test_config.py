@@ -28,6 +28,7 @@ tide = "1h"
 wave = "15m"
 entry = "5m"
 refresh_seconds = 300
+holding_hours = 4
 min_tide_bars = 90
 
 [risk]
@@ -52,6 +53,8 @@ def test_horizons_are_parsed_in_order(tmp_path):
     assert micro.refresh_seconds == 300
     assert micro.min_tide_bars == 90
     assert swing.min_tide_bars == 60  # default
+    assert micro.holding_hours == 4.0
+    assert swing.holding_hours is None  # no funding-cost estimate unless configured
     assert micro.label == "micro"  # falls back to the name
     assert cfg.scanner.horizon("micro") is micro
     assert swing.intervals == {"tide": "1w", "wave": "1d", "entry": "4h"}
@@ -186,6 +189,8 @@ def test_shipped_config_is_valid_and_hyperliquid_only():
     assert cfg.scanner.positions_horizon == "swing"
     # Elder's 2:1 floor is the shipped default.
     assert cfg.strategy.min_reward_risk == 2.0
+    # Funding is estimated over a typical holding time per horizon.
+    assert [h.holding_hours for h in cfg.scanner.horizons] == [14 * 24, 2 * 24, 4]
 
 
 def test_shipped_flat_tide_threshold_scales_with_the_tide_interval():

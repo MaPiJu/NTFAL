@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
@@ -180,6 +180,58 @@ def size_warnings(size: float, entry: float, equity: float, spec: PerpSpec | Non
     return out
 
 
+def fetch_funding_rates(
+    coins: Mapping[str, PerpSpec], client: MarketDataProvider
+) -> dict[str, float]:
+    """Current hourly funding rate per watched coin — one `metaAndAssetCtxs`
+    request per dex involved.
+
+    Funding is context, never a trading input: a dex whose lookup fails (a bad
+    payload, an HTTP error, a timeout) only leaves its coins without a rate.
+    """
+    rates: dict[str, float] = {}
+    for dex in sorted({coin_dex(c) for c in coins}):
+        try:
+            by_coin = client.funding_rates(dex)
+        except (HyperliquidError, httpx.HTTPError):
+            continue
+        rates.update({c: r for c, r in by_coin.items() if c in coins})
+    return rates
+
+
+def funding_cost(action: str, rate: float | None, hours: float | None) -> float | None:
+    """Funding over `hours` as a fraction of notional: positive when the trade
+    PAYS, negative when it is paid.
+
+    Hyperliquid's rate is hourly; positive, longs pay shorts. None for a row
+    with no side to hold, an unknown rate, or no holding time configured.
+    """
+    if action not in ("long", "short") or rate is None or not hours:
+        return None
+    return rate * hours * (1.0 if action == "long" else -1.0)
+
+
+def _holding_label(hours: float) -> str:
+    return f"{hours / 24:g} d" if hours >= 24 and hours % 24 == 0 else f"{hours:g} h"
+
+
+def funding_warning(
+    cost: float | None, entry: float | None, stop: float | None, hours: float | None
+) -> str | None:
+    """Flag a funding bill above half of what the trade risks, both as a fraction
+    of notional (so the size doesn't matter). Informative: never changes the action."""
+    if cost is None or cost <= 0 or entry is None or stop is None or entry <= 0 or not hours:
+        return None
+    risk = abs(entry - stop) / entry
+    if cost <= 0.5 * risk:
+        return None
+    return (
+        f"funding over {_holding_label(hours)} ≈ {cost:.2%} of notional, more than half "
+        f"the trade's risk ({risk:.2%} from entry to stop) — it eats the edge if held "
+        f"that long"
+    )
+
+
 def expand_watchlist(watchlist: tuple[str, ...], client: MarketDataProvider) -> dict[str, PerpSpec]:
     """Resolve watchlist entries to {coin: PerpSpec} (szDecimals, max leverage…),
     sorted by name.
@@ -299,11 +351,14 @@ def build_horizon(
     now_ms: int,
     held: set[str],
     on_progress: Callable[[str, str], None] | None = None,
+    funding: Mapping[str, float] | None = None,
 ) -> tuple[dict[str, Any], dict[str, tuple[pd.DataFrame, pd.DataFrame]]]:
     """One timeframe chain over the whole watchlist.
 
     Returns the horizon block (signals + charts, before sizing and ranking) and
     the tide/wave frames of any *held* coin, so trade management can reuse them.
+    `funding` (coin -> hourly rate) adds each signal's estimated funding cost
+    over the horizon's `holding_hours`.
     """
     params = horizon.params
     signals: list[dict[str, Any]] = []
@@ -356,6 +411,14 @@ def build_horizon(
         row["price_alert"] = live_price_alert(
             sig.action, row["live_price"], sig.entry, sig.stop, sig.target
         )
+        # Funding: the current hourly rate, and what holding the trade for the
+        # horizon's typical time would cost (positive = paid). Context only.
+        rate = funding.get(coin) if funding else None
+        cost = funding_cost(sig.action, rate, horizon.holding_hours)
+        row["funding_rate"] = rate
+        row["funding_hours"] = horizon.holding_hours
+        row["funding_cost"] = cost
+        row["funding_warning"] = funding_warning(cost, sig.entry, sig.stop, horizon.holding_hours)
         signals.append(row)
 
         charts[coin] = {
@@ -432,6 +495,7 @@ def build_snapshot(
     """Full refresh of every horizon for the watchlist -> dashboard snapshot dict."""
     now_ms = int(time.time() * 1000)
     coins = expand_watchlist(cfg.scanner.watchlist, client)
+    funding = fetch_funding_rates(coins, client)
 
     # Open positions (read-only) drive the Elder trade-management section.
     try:
@@ -443,7 +507,9 @@ def build_snapshot(
     blocks: dict[str, Any] = {}
     position_frames: dict[str, tuple[pd.DataFrame, pd.DataFrame]] = {}
     for horizon in cfg.scanner.horizons:
-        block, held_frames = build_horizon(cfg, client, horizon, coins, now_ms, held, on_progress)
+        block, held_frames = build_horizon(
+            cfg, client, horizon, coins, now_ms, held, on_progress, funding
+        )
         blocks[horizon.name] = block
         if horizon.name == cfg.scanner.positions_horizon:
             position_frames = held_frames
@@ -509,6 +575,7 @@ def refresh_horizon(
     horizon = cfg.scanner.horizon(name)
     now_ms = int(time.time() * 1000)
     coins = expand_watchlist(cfg.scanner.watchlist, client)
+    funding = fetch_funding_rates(coins, client)
 
     snapshot = dict(previous)
     snapshot.setdefault("horizons", {})
@@ -520,7 +587,9 @@ def refresh_horizon(
         open_positions = []
     held = {p.asset for p in open_positions}
 
-    block, held_frames = build_horizon(cfg, client, horizon, coins, now_ms, held, on_progress)
+    block, held_frames = build_horizon(
+        cfg, client, horizon, coins, now_ms, held, on_progress, funding
+    )
 
     if name == cfg.scanner.positions_horizon:
         positions = build_positions(client, horizon, open_positions, held_frames, now_ms)

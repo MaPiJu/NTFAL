@@ -84,6 +84,11 @@ Their common names differ from the Hyperliquid tickers:
   `open_trade_risk` field is only extra risk for positions the scanner cannot see.
   A size the exchange would refuse — a notional above the perp's max leverage × equity,
   or under Hyperliquid's $10 minimum order — is flagged (`⚠` on the size), never capped.
+- **Funding:** each signal shows the perp's current hourly funding rate (public
+  `metaAndAssetCtxs`; positive = longs pay shorts) and what the trade would pay over the
+  horizon's `holding_hours` (swing 14 d, scalp 2 d, micro 4 h), as % of notional
+  (positive = paid). It is flagged when it exceeds half the trade's risk — on 2026-10-08
+  a 14-day `xyz:BRENTOIL` short paid ≈ 10.4% of notional — but it never changes an action.
 - **Journal:** each refresh can append a compact JSONL entry with the per-horizon top
   picks, signal levels/reasons, open-position verdicts, stops and open risk.
 - **SafeZone stops:** protective and trailing stops use Elder-style adverse bar noise
@@ -219,8 +224,9 @@ Edit `config.toml`:
   `"swing"`).
 - `[[scanner.horizons]]` — one block per timeframe chain: `name`, `label`, the three
   intervals (`tide`, `wave`, `entry`), how much history to keep (`lookback_*`, in bars),
-  `refresh_seconds`, and `min_tide_bars` (below which the tide is flagged as
-  not-yet-converged). Any Hyperliquid candle interval works: `1m`…`1w`.
+  `refresh_seconds`, `min_tide_bars` (below which the tide is flagged as
+  not-yet-converged) and `holding_hours` (typical holding time, for the funding-cost
+  estimate; omit it for no estimate). Any Hyperliquid candle interval works: `1m`…`1w`.
 - `[strategy]` — tune the Elder thresholds and ranking weights without editing code:
   flat tide-slope cutoff, EMA-penetration/channel/divergence lookbacks, SafeZone
   lookback/factors, minimum R:R,

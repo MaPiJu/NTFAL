@@ -12,11 +12,12 @@ decision and place orders **manually**.
 
 ## Hard constraints (never violate)
 - **No order execution, no signing, no private keys.** Use only *public, keyless,
-  read-only* endpoints on Hyperliquid's `info` endpoint: `candleSnapshot`, `meta`, and
-  `clearinghouseState` (the last is a read-only account lookup of *open positions* for
-  a **public** address, like a block explorer; it takes no key and signs nothing). The
-  codebase must contain no private key, no exchange API key, no `exchange`/`order`/
-  `signing` code path.
+  read-only* endpoints on Hyperliquid's `info` endpoint: `candleSnapshot`, `meta`,
+  `metaAndAssetCtxs` (the same universe plus each perp's current market context — read
+  for the **funding rate** only), and `clearinghouseState` (a read-only account lookup of
+  *open positions* for a **public** address, like a block explorer; it takes no key and
+  signs nothing). The codebase must contain no private key, no exchange API key, no
+  `exchange`/`order`/`signing` code path.
 - **No auto-trading loop.** Output is informational only; a human decides and executes.
 - **Don't invent indicators.** "Less is more": implement only the indicators listed in
   the Strategy Spec. Adding more indicators is a regression, not a feature. Data-quality
@@ -156,6 +157,11 @@ They never change an action — they tell the operator how much to trust it:
   perp's `maxLeverage` × equity (from `meta`, with `onlyIsolated` noted), or falls under
   Hyperliquid's $10 minimum order value, carries a `size_warnings` entry. The size stays the
   Iron Triangle's and the action never changes.
+- **Funding cost — flag, don't veto:** each signal shows the perp's current funding rate
+  (`metaAndAssetCtxs`, hourly; positive = longs pay shorts) and the funding the trade would
+  pay over the horizon's `holding_hours` (swing 14 d, scalp 2 d, micro 4 h), as % of
+  notional signed by side (positive = paid). When that cost exceeds **half the trade's risk**
+  (|entry − stop| / entry), the signal carries a `funding_warning`; the action never changes.
 - **6% Rule:** if `month_realized_losses + sum(open_trade_risk) >= 0.06 * equity_at_month_start`,
   block all new-entry suggestions for the rest of the month (flag clearly in the UI). The
   guard is **global**, computed once across every horizon.
@@ -171,8 +177,8 @@ They never change an action — they tell the operator how much to trust it:
 
 ## Architecture
 - `data/hyperliquid.py` — public `info` client (`httpx`); `candleSnapshot` per coin/interval;
-  validate watchlist against the perp `meta` universe; `clearinghouseState` open positions
-  for a public address (read-only); cache OHLCV to parquet; parse string OHLCV fields
+  validate watchlist against the perp `meta` universe; current funding rates per dex from
+  `metaAndAssetCtxs`; `clearinghouseState` open positions for a public address (read-only); cache OHLCV to parquet; parse string OHLCV fields
   to float; respect the 5000-candle limit.
 - `data/provider.py` — the `MarketDataProvider` Protocol the pipeline is typed against
   (satisfied by `HyperliquidClient`).

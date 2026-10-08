@@ -12,7 +12,10 @@ from fastapi.testclient import TestClient
 from app.main import app
 from app.pipeline import (
     build_snapshot,
+    fetch_funding_rates,
     fetch_open_positions,
+    funding_cost,
+    funding_warning,
     live_price_alert,
     load_snapshot,
     position_open_risk,
@@ -524,6 +527,60 @@ def test_unexecutable_size_is_flagged_never_capped(tmp_path, long_setup_fixtures
 
     print_signals_tables(snapshot)
     assert f"! size: {warning}" in capsys.readouterr().out
+
+
+def test_funding_cost_is_signed_by_the_side_of_the_trade():
+    # Hyperliquid's `funding` is an hourly rate: positive, longs pay shorts. The
+    # estimate is a fraction of notional, positive when the trade PAYS.
+    assert funding_cost("long", 0.0001, 10.0) == pytest.approx(0.001)
+    assert funding_cost("short", 0.0001, 10.0) == pytest.approx(-0.001)  # received
+    # Live xyz:BRENTOIL (2026-10-08): -0.031%/h, so a short pays ~10.4% in 14 days.
+    assert funding_cost("short", -0.00031, 14 * 24) == pytest.approx(0.10416)
+    assert funding_cost("stand_aside", 0.0001, 10.0) is None  # no side, no cost
+    assert funding_cost("long", None, 10.0) is None  # rate unknown
+    assert funding_cost("long", 0.0001, None) is None  # no holding time configured
+
+
+def test_funding_warning_when_the_cost_exceeds_half_the_trade_risk():
+    # Entry 100, stop 96: the trade risks 4% of its notional; half of it is 2%.
+    warning = funding_warning(0.03, 100.0, 96.0, 14 * 24)
+    assert warning is not None
+    assert "3.00%" in warning and "4.00%" in warning and "14 d" in warning
+    assert funding_warning(0.015, 100.0, 96.0, 336) is None  # under half the risk
+    assert funding_warning(-0.05, 100.0, 96.0, 336) is None  # received, not paid
+    assert funding_warning(None, 100.0, 96.0, 336) is None
+
+
+def test_signals_carry_the_funding_rate_and_its_cost(tmp_path, long_setup_fixtures, capsys):
+    # Longs pay 0.03%/h; held for the swing horizon's 14 days that is ~10% of the
+    # notional, more than half of this setup's risk. Informative: the long stands.
+    horizon = replace(SWING, holding_hours=14 * 24)
+    cfg = make_config(tmp_path, horizons=(horizon,))
+    client = make_client(long_setup_fixtures, tmp_path, funding={"BTC": "0.0003"})
+    snapshot = build_snapshot(cfg, client)
+
+    (sig,) = swing(snapshot)["signals"]
+    assert sig["action"] == "long" and sig["position_size"] is not None
+    assert sig["funding_rate"] == pytest.approx(0.0003)
+    assert sig["funding_hours"] == 336
+    assert sig["funding_cost"] == pytest.approx(0.0003 * 336)
+    assert "more than half" in sig["funding_warning"]
+
+    from run import print_signals_tables
+
+    print_signals_tables(snapshot)
+    assert f"! funding: {sig['funding_warning']}" in capsys.readouterr().out
+
+
+def test_a_failing_funding_lookup_drops_only_that_dex():
+    class FlakyFunding:
+        def funding_rates(self, dex: str = "") -> dict[str, float]:
+            if dex == "xyz":
+                raise httpx.ConnectTimeout("timed out")
+            return {"BTC": 0.0001}
+
+    specs = {"BTC": PerpSpec(5, 40), "xyz:GOLD": PerpSpec(4, 25)}
+    assert fetch_funding_rates(specs, FlakyFunding()) == {"BTC": 0.0001}
 
 
 def test_guard_uses_automatic_open_position_risk(tmp_path, btc_fixtures):

@@ -36,6 +36,10 @@ def num(x: float | None) -> str:
     return f"{x:,.6g}" if x is not None else "—"
 
 
+def pct(x: float | None, digits: int = 2) -> str:
+    return f"{x:+.{digits}%}" if x is not None else "—"
+
+
 def print_horizon_table(name: str, block: dict[str, Any]) -> None:
     """The signals table for one timeframe chain."""
     iv = block["intervals"]
@@ -61,7 +65,7 @@ def print_horizon_table(name: str, block: dict[str, Any]) -> None:
         f"{'ASSET':<14} {'REGIME':<8} {'TIDE':<7} {'IMP T/W/E':<14} {'FI(2)':>14} {'ACTION':<13} "
         f"{'CLOSE':>12} {'MARK':>12} {'DRIFT':>7} {'ENTRY':>12} {'STOP':>12} {'R:R':>7} "
         f"{'LIMIT':>12} {'LIM STOP':>12} {'LIM R:R':>7} {'TARGET':>12} "
-        f"{'SCORE':>6} {'SIZE':>10}"
+        f"{'SCORE':>6} {'SIZE':>10} {'FUND/H':>9} {'FUND EST':>9}"
     )
     print("\n" + header)
     print("-" * len(header))
@@ -90,7 +94,8 @@ def print_horizon_table(name: str, block: dict[str, Any]) -> None:
             f"{num(close):>12} {num(mark):>12} {drift:>7} "
             f"{num(s['entry']):>12} {num(s['stop']):>12} {rr:>7} "
             f"{num(s['entry_limit']):>12} {num(s.get('entry_limit_stop')):>12} {lim_rr:>7} "
-            f"{num(s['target']):>12} {score:>6} {size:>10}"
+            f"{num(s['target']):>12} {score:>6} {size:>10} "
+            f"{pct(s.get('funding_rate'), 4):>9} {pct(s.get('funding_cost')):>9}"
         )
     print()
     for s in block["signals"]:
@@ -104,6 +109,8 @@ def print_horizon_table(name: str, block: dict[str, Any]) -> None:
             print(f"    ! data quality: {w}")
         for w in s.get("size_warnings") or []:
             print(f"    ! size: {w}")
+        if s.get("funding_warning"):
+            print(f"    ! funding: {s['funding_warning']}")
     if block.get("skipped"):
         print(f"\nskipped: {', '.join(block['skipped'])}")
 
@@ -122,6 +129,10 @@ def print_signals_tables(snapshot: dict[str, Any]) -> None:
             f"⚠ 6% RULE ACTIVE: monthly losses + open risk ${guard['total_at_risk']:,.2f} "
             f">= limit ${guard['limit']:,.2f} — NO NEW ENTRIES this month."
         )
+    print(
+        "FUND/H = current hourly funding rate (+: longs pay shorts); FUND EST = funding "
+        "over the horizon's holding time, % of notional (+: this trade pays)."
+    )
     print(
         "⚠ Each horizon sizes its suggestion as a STANDALONE trade risking "
         f"{snapshot['risk_pct']:.1%}. Taking several at once multiplies your risk."

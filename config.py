@@ -37,7 +37,9 @@ class HorizonConfig:
     `refresh_seconds` is how often this horizon is worth recomputing (a weekly
     tide does not change every five minutes); `min_tide_bars` is the history
     depth below which the slow EMA26 is not converged and the tide/Impulse are
-    flagged as unreliable — surfaced, never silently trusted.
+    flagged as unreliable — surfaced, never silently trusted. `holding_hours` is
+    a typical holding time for a trade on this chain, over which the current
+    funding rate is turned into an estimated cost (None: no estimate).
     """
 
     name: str
@@ -50,6 +52,7 @@ class HorizonConfig:
     lookback_entry: int
     refresh_seconds: int
     min_tide_bars: int
+    holding_hours: float | None = None
     # Per-horizon strategy overrides merged over the global [strategy] block.
     params: StrategyParams = StrategyParams()
 
@@ -158,6 +161,7 @@ def _horizon(raw: dict[str, Any], base: StrategyParams) -> HorizonConfig:
         lookback_entry=int(raw.get("lookback_entry", 300)),
         refresh_seconds=int(raw.get("refresh_seconds", 86_400)),
         min_tide_bars=int(raw.get("min_tide_bars", 60)),
+        holding_hours=float(raw["holding_hours"]) if "holding_hours" in raw else None,
         params=_strategy_params(raw.get("strategy", {}), base),
     )
 

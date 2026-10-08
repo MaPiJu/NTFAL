@@ -37,6 +37,10 @@ XYZ_META = {
 
 META_BY_DEX = {"": META, "xyz": XYZ_META}
 
+# Hourly funding rate `metaAndAssetCtxs` serves for a perp not given a rate by
+# the test (positive: longs pay shorts).
+DEFAULT_FUNDING = "0.0000125"
+
 
 def load_fixture(name: str) -> list[dict]:
     return json.loads((FIXTURES / name).read_text())
@@ -55,8 +59,11 @@ def make_client(
     cache_dir: Path,
     requests_log: list[dict] | None = None,
     clearinghouse_states: dict[str, dict] | None = None,
+    funding: dict[str, str] | None = None,
 ) -> HyperliquidClient:
-    """Client backed by httpx.MockTransport serving recorded fixtures."""
+    """Client backed by httpx.MockTransport serving recorded fixtures.
+
+    `funding` sets the hourly rate `metaAndAssetCtxs` reports per perp."""
 
     def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content)
@@ -67,6 +74,17 @@ def make_client(
             if dex not in META_BY_DEX:
                 return httpx.Response(400, json={"error": f"unknown dex {dex}"})
             return httpx.Response(200, json=META_BY_DEX[dex])
+        if payload["type"] == "metaAndAssetCtxs":
+            dex = payload.get("dex", "")
+            if dex not in META_BY_DEX:
+                return httpx.Response(400, json={"error": f"unknown dex {dex}"})
+            meta = META_BY_DEX[dex]
+            rates = funding or {}
+            ctxs = [
+                {"funding": rates.get(e["name"], DEFAULT_FUNDING), "markPx": "1.0"}
+                for e in meta["universe"]
+            ]
+            return httpx.Response(200, json=[meta, ctxs])
         if payload["type"] == "candleSnapshot":
             req = payload["req"]
             candles = candle_fixtures.get((req["coin"], req["interval"]), [])
