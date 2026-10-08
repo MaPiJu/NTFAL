@@ -413,7 +413,9 @@ def _divergence_for_indicator(
         # Elder (p.103): the indicator MUST cross back above its zero line between
         # the two bottoms ("an absolute must"); and (p.104) the bottoms must be
         # 20-40 bars apart to be tradable. Either gate failing => no divergence.
-        crossed_zero = bool((ind.loc[pi:ri] > 0).any())
+        # A cross needs the first bottom below zero; otherwise any positive value
+        # in the window (even the first bottom itself) would pass vacuously.
+        crossed_zero = float(ind.loc[pi]) < 0 and bool((ind.loc[pi:ri] > 0).any())
         spaced = min_separation <= (ri - pi) <= max_separation
         if rc < pc and float(ind.loc[ri]) > float(ind.loc[pi]) and crossed_zero and spaced:
             out.append(f"bullish {name} divergence")
@@ -424,8 +426,8 @@ def _divergence_for_indicator(
         pi, pc = prev_high
         ri, rc = recent_high
         # Mirror image: the indicator must drop below its zero line between the
-        # two tops, and the tops must be 20-40 bars apart.
-        crossed_zero = bool((ind.loc[pi:ri] < 0).any())
+        # two tops (so the first top must be above zero), 20-40 bars apart.
+        crossed_zero = float(ind.loc[pi]) > 0 and bool((ind.loc[pi:ri] < 0).any())
         spaced = min_separation <= (ri - pi) <= max_separation
         if rc > pc and float(ind.loc[ri]) < float(ind.loc[pi]) and crossed_zero and spaced:
             out.append(f"bearish {name} divergence")

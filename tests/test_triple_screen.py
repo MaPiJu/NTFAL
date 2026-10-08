@@ -201,6 +201,34 @@ def test_divergence_requires_zero_line_crossover():
     ]
 
 
+def test_divergence_needs_a_real_zero_line_cross_not_an_endpoint():
+    # Elder (p.87, p.117): the indicator must *cross* its zero line between the two
+    # extremes — down below zero at the first bottom, back above before the second.
+    # An indicator already above zero at the first price low never crossed anything,
+    # even though "some value in [first, second] is > 0" is trivially true.
+    close = pd.Series(
+        [110, 108, 106, 104, 102, 100, 102, 104, 106, 108,
+         106, 104, 102, 100, 98, 96, 98, 100, 102, 104],
+        dtype=float,
+    )  # fmt: skip
+    above = pd.Series([1.0] * 20)
+    above[5], above[15] = 0.5, 2.0  # higher second "bottom", but never below zero
+    assert _divergence_for_indicator(close, above, "TEST", min_separation=0) == []
+
+    # Mirror image for tops: never above zero, so no bearish divergence either.
+    tops = 200.0 - close  # higher high at bar 15
+    below = pd.Series([-1.0] * 20)
+    below[5], below[15] = -0.5, -2.0
+    assert _divergence_for_indicator(tops, below, "TEST", min_separation=0) == []
+
+    # A genuine bearish cross (above zero at the first top, below in between) counts.
+    crossed = below.copy()
+    crossed[5], crossed[10] = 3.0, -1.0
+    assert _divergence_for_indicator(tops, crossed, "TEST", min_separation=0) == [
+        "bearish TEST divergence"
+    ]
+
+
 def test_divergence_requires_minimum_separation():
     # Same valid bullish shape (crosses zero between the two lows), but the lows are
     # only 10 bars apart — below Elder/Lovvorn's 20-bar floor (p.104), so it is not
