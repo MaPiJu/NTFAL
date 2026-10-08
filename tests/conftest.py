@@ -205,13 +205,15 @@ def chain_fixtures(btc_fixtures) -> dict[tuple[str, str], list[dict]]:
 @pytest.fixture
 def long_setup_fixtures() -> dict[tuple[str, str], list[dict]]:
     """A clean swing long for BTC — a weekly uptrend and a healthy daily pullback
-    (the `DAILY_LONG` shape of test_triple_screen.py) — replayed through the pipeline."""
+    (the `DAILY_LONG` shape of test_triple_screen.py) — replayed through the pipeline.
+    Daily closes are scaled by an odd factor so no level sits on the tick grid by luck."""
     daily = (
         [100.0 + i for i in range(34)]
         + [130.0, 128.0]
         + [128.0 + i for i in range(1, 13)]
         + [139.0]
     )
+    daily = [c * 1.0137 for c in daily]
     return {
         ("BTC", "1w"): synthetic_candles("1w", closes=[100.0 + 2 * i for i in range(40)]),
         ("BTC", "1d"): synthetic_candles("1d", closes=daily),

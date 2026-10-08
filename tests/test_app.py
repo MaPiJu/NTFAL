@@ -440,6 +440,21 @@ def test_two_percent_rule_sizes_on_equity_at_month_start(tmp_path, long_setup_fi
     assert ps["size"] == expected.size
 
 
+def test_size_is_worked_out_from_the_rounded_entry_and_stop(tmp_path, long_setup_fixtures):
+    # The suggested size must be the one an order at the exchange's prices gives:
+    # both the buy-stop and the stop sit on Hyperliquid's grid before sizing.
+    snapshot = build_snapshot(make_config(tmp_path), make_client(long_setup_fixtures, tmp_path))
+
+    (sig,) = swing(snapshot)["signals"]
+    assert sig["action"] == "long"
+    tick = 0.1  # BTC (szDecimals 5) quotes one price decimal
+    for level in (sig["entry"], sig["stop"]):
+        assert level / tick == pytest.approx(round(level / tick), abs=1e-6)
+    ps = sig["position_size"]
+    assert ps["risk_per_unit"] == pytest.approx(abs(sig["entry"] - sig["stop"]))
+    assert ps["size"] == position_size(10_000.0, sig["entry"], sig["stop"], 0.01, 5).size
+
+
 def test_guard_uses_automatic_open_position_risk(tmp_path, btc_fixtures):
     addr = "0x" + "ef" * 20
     cfg = make_config(tmp_path, address=addr, month_realized_losses=0.0)

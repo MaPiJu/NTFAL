@@ -145,6 +145,10 @@ They never change an action — they tell the operator how much to trust it:
   default **1%**, hard cap **2%** — Elder sets the limit once a month, from the equity on
   the first day of the month (p.204). Position size = `floor(max_risk_per_trade / abs(entry - stop))`
   ("Iron Triangle"). Never silently exceed the cap.
+- **Tick rounding:** every level (entry, limit, stop, target) sits on Hyperliquid's price
+  grid, rounded on the prudent side — buy-stop up, sell-stop down; a long's stop and buy
+  limit down, a short's stop and sell limit up; the target toward the entry. Reward:risk
+  and the Iron-Triangle size are computed from the rounded entry and stop.
 - **6% Rule:** if `month_realized_losses + sum(open_trade_risk) >= 0.06 * equity_at_month_start`,
   block all new-entry suggestions for the rest of the month (flag clearly in the UI). The
   guard is **global**, computed once across every horizon.

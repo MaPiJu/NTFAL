@@ -99,6 +99,27 @@ def tick_size(price: float, sz_decimals: int | None = None) -> float:
     return tick
 
 
+def round_to_tick(
+    price: float, direction: Literal["up", "down"], sz_decimals: int | None = None
+) -> float:
+    """`price` on Hyperliquid's price grid, rounded `direction`.
+
+    A price already on the grid (up to float noise, e.g. 4126.3 + 0.1) stays put.
+    Non-positive prices have no grid and are returned unchanged.
+    """
+    if price <= 0:
+        return price
+    tick = tick_size(price, sz_decimals)
+    steps = price / tick
+    nearest = round(steps)
+    if abs(steps - nearest) < 1e-6:
+        steps_on_grid = nearest
+    else:
+        steps_on_grid = math.ceil(steps) if direction == "up" else math.floor(steps)
+    # The tick is a power of ten: round away the float noise of the product.
+    return round(steps_on_grid * tick, max(0, round(-math.log10(tick))))
+
+
 def tide_trend(
     tide_close: pd.Series,
     span: int = EMA_FAST,
@@ -399,6 +420,33 @@ def _short_levels(
     return entry, limit, stop, target
 
 
+def _round_levels(
+    side: Literal["long", "short"],
+    entry: float,
+    limit: float | None,
+    stop: float,
+    target: float,
+    sz_decimals: int | None = None,
+) -> tuple[float, float | None, float, float]:
+    """Put a setup's levels on Hyperliquid's price grid, each on the prudent side.
+
+    The stop-entry moves further out (buy-stop up, sell-stop down), the limit to a
+    better price and the protective stop further away (long: both down; short:
+    both up), the target toward the entry — rounding never flatters the trade.
+    """
+    if side == "long":
+        entry_dir, limit_dir, stop_dir = "up", "down", "down"
+    else:
+        entry_dir, limit_dir, stop_dir = "down", "up", "up"
+    target_dir = "down" if target > entry else "up"
+    return (
+        round_to_tick(entry, entry_dir, sz_decimals),
+        round_to_tick(limit, limit_dir, sz_decimals) if limit is not None else None,
+        round_to_tick(stop, stop_dir, sz_decimals),
+        round_to_tick(target, target_dir, sz_decimals),
+    )
+
+
 def _last_pivot(values: pd.Series, *, kind: Literal["low", "high"]) -> tuple[int, float] | None:
     if values.empty or values.isna().all():
         return None
@@ -648,7 +696,8 @@ def evaluate_asset(
     `tide` and `wave` must be OHLCV frames of *completed* bars (open/high/low/
     close/volume columns, oldest first); `entry_frame` is the optional third
     screen's lower-timeframe bars. `sz_decimals` (from `meta`) caps the decimals
-    of the stop-entry price, per Hyperliquid's tick rules.
+    of every price level, per Hyperliquid's tick rules; each level is rounded to
+    that grid on the prudent side (see `_round_levels`).
     """
     labels = intervals or DEFAULT_INTERVALS
     t_imp = str(impulse_color(tide["close"]).iloc[-1])
@@ -722,14 +771,18 @@ def evaluate_asset(
 
     entry = limit = stop = target = rr = None
     entry_impulse = None
+    # Every level is put on the exchange's price grid before reward:risk (and,
+    # downstream, the size) is worked out from it.
     if candidate == "long":
         entry, limit, stop, target = _long_levels(tide, wave, params, sz_decimals)
         entry, entry_impulse = _entry_screen_levels(candidate, entry_frame, entry, sz_decimals)
+        entry, limit, stop, target = _round_levels("long", entry, limit, stop, target, sz_decimals)
         if entry > stop:
             rr = (target - entry) / (entry - stop)
     elif candidate == "short":
         entry, limit, stop, target = _short_levels(tide, wave, params, sz_decimals)
         entry, entry_impulse = _entry_screen_levels(candidate, entry_frame, entry, sz_decimals)
+        entry, limit, stop, target = _round_levels("short", entry, limit, stop, target, sz_decimals)
         if stop > entry:
             rr = (entry - target) / (stop - entry)
 
@@ -737,7 +790,11 @@ def evaluate_asset(
     # fill, since a deep pullback can clear the breakout stop.
     limit_stop = limit_rr = None
     if candidate in ("long", "short") and limit is not None and target is not None:
-        limit_stop = safezone_stop_for_limit(wave, candidate, limit, params)
+        limit_stop = round_to_tick(
+            safezone_stop_for_limit(wave, candidate, limit, params),
+            "down" if candidate == "long" else "up",
+            sz_decimals,
+        )
         if candidate == "long" and limit > limit_stop:
             limit_rr = (target - limit) / (limit - limit_stop)
         elif candidate == "short" and limit_stop > limit:

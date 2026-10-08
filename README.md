@@ -61,6 +61,9 @@ Their common names differ from the Hyperliquid tickers:
   high/low, until filled — it stays valid as long as the tide holds and no Impulse
   censors the trade (Elder: "until the weekly indicator reverses"), with no fixed expiry.
   The third screen **times** the entry; it never vetoes it (see below).
+  Every level sits on Hyperliquid's price grid, rounded on the prudent side: buy-stop
+  up / sell-stop down, a long's stop and buy limit down / a short's stop and sell limit
+  up, the target toward the entry. Reward:risk and the size come from the rounded levels.
 - **Impulse censorship (applied last):** any **red** Impulse on the **tide or wave**
   forbids longs; any **green** forbids shorts.
 - **Best-trade ranking:** every validated setup gets a 0–100 quality score blending

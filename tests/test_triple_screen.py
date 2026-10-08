@@ -13,6 +13,7 @@ from strategy.triple_screen import (
     Signal,
     _divergence_for_indicator,
     _long_levels,
+    _short_levels,
     average_adverse_noise,
     average_penetration,
     channel,
@@ -22,6 +23,7 @@ from strategy.triple_screen import (
     evaluate_asset,
     impulse_confirmation,
     projected_ema,
+    round_to_tick,
     safezone_initial_stop,
     safezone_stop_for_limit,
     select_best,
@@ -61,6 +63,21 @@ DAILY_RED = make_ohlcv(
     + [146.0, 143.0, 140.0, 137.0, 134.0],
     volumes=[1000.0] * 45 + [10000.0] + [1000.0] * 7 + [1000.0] * 5,
 )
+# A downtrend whose earlier rally pierces the daily EMA13, so the short also gets
+# an average-penetration limit entry.
+RALLY_SHORT = make_ohlcv(
+    [300.0 - 2 * i for i in range(34)]
+    + [238.0, 246.0]
+    + [246.0 - 2 * i for i in range(1, 13)]
+    + [226.0]
+)
+
+
+def _off_grid(bars: pd.DataFrame, k: float = 1.0137) -> pd.DataFrame:
+    """The same bars scaled by an odd factor, so no level lands on the tick grid by luck."""
+    bars = bars.copy()
+    bars[["open", "high", "low", "close"]] *= k
+    return bars
 
 
 def test_tick_size():
@@ -90,6 +107,60 @@ def test_entry_tick_respects_sz_decimals_cap():
     prior_high = float(DAILY_LONG["high"].iloc[-1])
     assert sig.action == "long"
     assert sig.entry == pytest.approx(prior_high + 0.1)
+
+
+def test_round_to_tick_on_the_requested_side():
+    assert round_to_tick(4126.04, "up", sz_decimals=4) == 4126.1  # xyz:GOLD, tick 0.1
+    assert round_to_tick(4126.04, "down", sz_decimals=4) == 4126.0
+    # A price already on the grid stays put, float noise or not.
+    assert round_to_tick(4126.3 + 0.1, "up", sz_decimals=4) == 4126.4
+    assert round_to_tick(4126.3 + 0.1, "down", sz_decimals=4) == 4126.4
+    # Integer prices are always valid (tick 1), and the 6 - szDecimals cap binds.
+    assert round_to_tick(123_456.4, "up") == 123_457.0
+    assert round_to_tick(123_456.4, "down") == 123_456.0
+    assert round_to_tick(0.50004, "up", sz_decimals=2) == 0.5001
+    assert round_to_tick(0.50004, "down", sz_decimals=2) == 0.5
+
+
+@pytest.mark.parametrize("side", ["long", "short"])
+def test_levels_round_to_the_tick_on_the_prudent_side(side):
+    # Hyperliquid refuses off-grid prices. Each level is rounded the way that never
+    # flatters the trade: a stop-entry further out (buy-stop up, sell-stop down), a
+    # protective stop further away (long down, short up), a limit at a better price
+    # (buy down, sell up), and the target toward the entry (reward never overstated).
+    if side == "long":
+        weekly, daily, levels = WEEKLY_UP, _off_grid(DAILY_LONG), _long_levels
+        away, better = "up", "down"
+    else:
+        weekly, daily, levels = WEEKLY_DOWN, _off_grid(RALLY_SHORT), _short_levels
+        away, better = "down", "up"
+    tick = 0.1  # szDecimals 5 leaves one price decimal at these prices
+
+    sig = evaluate_asset("X", weekly, daily, sz_decimals=5)
+    assert sig.action == side and sig.entry_limit is not None
+
+    raw_entry, raw_limit, raw_stop, raw_target = levels(weekly, daily, sz_decimals=5)
+    expected = {
+        "entry": (raw_entry, away),
+        "entry_limit": (raw_limit, better),
+        "stop": (raw_stop, better),
+        "target": (raw_target, better),  # toward the entry: below a long's, above a short's
+        "entry_limit_stop": (safezone_stop_for_limit(daily, side, sig.entry_limit), better),
+    }
+    for name, (raw, direction) in expected.items():
+        value = getattr(sig, name)
+        assert value / tick == pytest.approx(round(value / tick), abs=1e-6), name
+        assert raw / tick != pytest.approx(round(raw / tick), abs=1e-6), name  # was off-grid
+        if direction == "up":
+            assert raw < value < raw + tick, name
+        else:
+            assert raw - tick < value < raw, name
+
+    # Reward:risk is worked out from the rounded levels.
+    assert sig.reward_risk == pytest.approx(abs(sig.target - sig.entry) / abs(sig.entry - sig.stop))
+    assert sig.reward_risk_limit == pytest.approx(
+        abs(sig.target - sig.entry_limit) / abs(sig.entry_limit - sig.entry_limit_stop)
+    )
 
 
 def test_tide_trend():
