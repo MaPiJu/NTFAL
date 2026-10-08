@@ -121,9 +121,10 @@ line between the two extremes** (Elder's "absolute must", p.87) — no crossover
 divergence — and only when the two extremes sit ~20–40 bars apart (Elder/Lovvorn, p.88).
 
 "Average penetration": over the last ~4–6 weeks *of wave bars*, measure how far pullbacks
-pierce below (uptrend) / above (downtrend) the fast EMA; average those penetrations; project
-the next bar's EMA (`today_EMA + (today_EMA − yesterday_EMA)`) and offset by that average to
-set the limit.
+pierce below (uptrend) / above (downtrend) the fast EMA — **one value per pullback**, its
+deepest bar (a run of consecutive piercing bars is one pullback; Fig. 39.3, p.159–160: A–D);
+average those penetrations; project the next bar's EMA (`today_EMA + (today_EMA −
+yesterday_EMA)`) and offset by that average to set the limit.
 
 **Every lookback is a count of bars on the relevant screen's timeframe**, never a wall-clock
 duration. That is what lets one implementation serve a weekly tide and a 4h tide.

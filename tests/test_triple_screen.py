@@ -531,13 +531,36 @@ def test_select_best_returns_none_when_nothing_qualifies():
 
 def test_average_penetration_and_projection():
     lows = [100.0] * 47
-    lows[-5], lows[-3], lows[-2] = 98.0, 97.0, 99.0  # penetrations: 2, 3, 1
+    # Two pullbacks below the (flat, 100) EMA: bar -5 alone (2), then bars -3/-2
+    # (3, 1) — one pullback each, so the deepest bars average (2 + 3) / 2.
+    lows[-5], lows[-3], lows[-2] = 98.0, 97.0, 99.0
     highs = [100.0] * 47
     daily = make_ohlcv([100.0] * 47, lows=lows, highs=highs)
 
-    assert average_penetration(daily, "down") == pytest.approx(2.0)
+    assert average_penetration(daily, "down") == pytest.approx(2.5)
     assert average_penetration(daily, "up") is None  # highs never pierce the EMA
     assert projected_ema(daily["close"]) == pytest.approx(100.0)
+
+
+@pytest.mark.parametrize("side", ["down", "up"])
+def test_average_penetration_counts_one_value_per_pullback(side):
+    # Elder (Fig. 39.3, p.159-160) measures each pullback once — A, B, C, D, the
+    # depth of each dip below the fast EMA — then averages them. Averaging every
+    # pierced bar lets the shallow bars entering and leaving a dip dilute it.
+    n = 47
+    pen = [0.0] * n
+    pen[-12:-9] = [1.0, 4.0, 2.0]  # first pullback, deepest bar 4
+    pen[-5:-3] = [3.0, 6.0]  # second pullback, deepest bar 6
+    sign = -1.0 if side == "down" else 1.0
+    extremes = [100.0 + sign * p for p in pen]
+    daily = make_ohlcv(
+        [100.0] * n,  # flat close: the EMA13 stays exactly at 100
+        lows=extremes if side == "down" else [100.0] * n,
+        highs=extremes if side == "up" else [100.0] * n,
+    )
+
+    # Per bar: (1 + 4 + 2 + 3 + 6) / 5 = 3.2. Per pullback: (4 + 6) / 2 = 5.
+    assert average_penetration(daily, side) == pytest.approx(5.0)
 
 
 def test_tiny_weekly_slope_is_treated_as_flat_market():
@@ -664,7 +687,8 @@ def test_safezone_initial_stop_uses_average_adverse_noise():
 
     entry, _limit, stop, _target = _long_levels(WEEKLY_UP, daily)
 
-    assert average_penetration(daily, "down") == pytest.approx(2.0)
+    # Two pullbacks below the EMA: 2, then max(3, 1).
+    assert average_penetration(daily, "down") == pytest.approx(2.5)
     assert average_adverse_noise(daily, "long", 20) == pytest.approx(2.5)
     assert stop == pytest.approx(min(lows[-2:]) - 2.5 * 2.0)
     assert entry > stop

@@ -129,19 +129,23 @@ def average_penetration(
     span: int = EMA_FAST,
     lookback: int = DEFAULT_PARAMS.penetration_lookback_bars,
 ) -> float | None:
-    """Average distance pullbacks pierce the wave EMA13 over the last `lookback` bars.
+    """Average depth of the pullbacks through the wave EMA13 over the last `lookback` bars.
 
     side="down": how far lows dip below the EMA (for longs in an uptrend);
     side="up":   how far highs poke above the EMA (for shorts in a downtrend).
-    Bars without a penetration are ignored; returns None if there were none.
+    Elder measures each pullback once (Fig. 39.3, p.159-160: occasions A-D): every
+    run of consecutive piercing bars is one pullback, measured at its deepest bar,
+    and those depths are averaged. Returns None if nothing pierced the EMA.
     """
     e = ema(wave["close"], span)
     raw = e - wave["low"] if side == "down" else wave["high"] - e
     pen = raw.clip(lower=0).iloc[-lookback:]
-    pen = pen[pen > 0]
-    if pen.empty:
+    pierced = pen > 0
+    if not pierced.any():
         return None
-    return float(pen.mean())
+    # A new pullback starts on each piercing bar that follows a non-piercing one.
+    pullback_id = (pierced & ~pierced.shift(1, fill_value=False)).cumsum()
+    return float(pen[pierced].groupby(pullback_id[pierced]).max().mean())
 
 
 def force_index_new_extreme(
