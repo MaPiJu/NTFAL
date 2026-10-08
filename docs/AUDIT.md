@@ -14,7 +14,8 @@ Le décalage est constant : **PDF = imprimée + 16**. Pages lues (imprimées) : 
 154–172, 202–213, 215–229, 238–242.
 
 **État de départ** (avant toute modification) : `pytest` → **114 passed** ; `ruff check .` → OK ;
-`black --check .` → OK (29 fichiers).
+`black --check .` → OK (29 fichiers). **Après corrections** : **123 passed** ; ruff et black OK.
+Les références `fichier:ligne` des tableaux renvoient au commit audité `c32ab4b`.
 
 **Vérifications en direct.** Un script jetable placé **hors du dépôt** a interrogé l'endpoint public
 `info` le 2026-10-08 vers 12:00 UTC : `meta` (natif et `dex="xyz"`), `candleSnapshot` (6 coins × 6
@@ -132,19 +133,24 @@ avant et passe après) · `à trancher` (choix de design ou de calibrage : **non
 
 ## 3. Corrections effectuées (erreurs uniquement)
 
-Pour chaque correction, le test a été écrit d'abord et vérifié en **échec** sur le code d'origine,
-puis la correction minimale l'a fait passer. Les commits sont listés dans l'historique de la branche.
+Pour chaque correction, le test a été écrit d'abord et vérifié en **échec** sur le code d'origine
+(message d'échec ci-dessous), puis la correction minimale l'a fait passer, avec la suite complète,
+ruff et black au vert à chaque commit. Le pipeline complet a ensuite été relancé en direct sur le code
+corrigé, sans erreur.
 
-| Id | Écart | Correction | Test (échoue avant / passe après) |
-|---|---|---|---|
-| C1 | D1 — croisement de la ligne zéro | Exiger que l'indicateur soit du bon côté de zéro au premier extrême (négatif pour un creux, positif pour un sommet), pour que le croisement ait lieu entre les deux | `test_divergence_needs_a_real_zero_line_cross_not_an_endpoint` |
-| C2 | R5 — risque ouvert au-delà du point mort | Risque = max(0, entrée − stop) × taille pour un long ; max(0, stop − entrée) × taille pour un short | `test_open_risk_is_zero_once_the_stop_locks_in_profit` |
-| C3 | I7b — contenance du canal | Répartir le budget hors canal sur les deux bords : quantile 1 − (1 − c)/2 par côté | `test_channel_contains_about_95_percent_of_bars` |
-| C4 | H9 — avertissement week-end | Référence de volume dédiée, `low_volume_baseline_bars = 1000` barres du wave, découplée de `divergence_lookback` | `test_data_warning_survives_a_whole_frozen_weekend` |
-| C5 | H2 — coin explicite delisted | `validate_watchlist` refuse un perp `isDelisted` comme un coin inconnu | `test_validate_watchlist_rejects_explicit_delisted_coin` |
-| C6 | H10 — tick Hyperliquid | Entiers toujours admis (tick ≤ 1) ; plafond 6 − szDecimals quand `szDecimals` est connu (transmis par le pipeline) | `test_tick_size_follows_hyperliquid_price_rules`, `test_entry_tick_respects_sz_decimals_cap` |
-| C7 | H16 — isolation des échecs par dex | `fetch_open_positions` capture aussi `httpx.HTTPError` par dex | `test_positions_survive_a_failing_dex` |
-| C8 | DOC1 — pages citées | Pages imprimées partout (p.87, p.88, p.115, p.167) ; commentaires uniquement | — (aucun comportement modifié) |
+| Id | Commit | Écart | Correction | Test (échec observé avant → passe après) |
+|---|---|---|---|---|
+| C1 | `9db99dc` | D1 — croisement de la ligne zéro | L'indicateur doit être du bon côté de zéro au premier extrême (négatif pour un creux, positif pour un sommet), pour que le croisement ait lieu entre les deux | `test_divergence_needs_a_real_zero_line_cross_not_an_endpoint` (`['bullish TEST divergence'] == []`) |
+| C2 | `f9d08ac` | R5 — risque ouvert au-delà du point mort | Risque = max(0, entrée − stop) × taille pour un long ; max(0, stop − entrée) × taille pour un short | `test_open_risk_is_zero_once_the_stop_locks_in_profit` (`50.0 == 0.0`) |
+| C3 | `363406e` | I7b — contenance du canal | Le budget hors canal est réparti sur les deux bords : quantile 1 − (1 − c)/2 par côté | `test_channel_contains_about_95_percent_of_bars` (`0.9 <= 0.846`) |
+| C4 | `f56a41e` | H9 — avertissement week-end | Référence de volume dédiée, `low_volume_baseline_bars = 1000` barres du wave, découplée de `divergence_lookback` (ajoutée à `config.toml`) | `test_data_warning_survives_a_whole_frozen_weekend` (aucun avertissement) |
+| C5 | `3262ef5` | H2 — coin explicite delisted | `validate_watchlist` refuse un perp `isDelisted` comme un coin inconnu | `test_validate_watchlist_rejects_explicit_delisted_coin` (`DID NOT RAISE`) |
+| C6 | `93ec353` | H10 — tick Hyperliquid | Entiers toujours admis (tick ≤ 1) ; plafond 6 − szDecimals ; `szDecimals` transmis par le pipeline aux prix des ordres stop | `test_tick_size_follows_hyperliquid_price_rules` (`10.0 == 1.0`), `test_entry_tick_respects_sz_decimals_cap` (`TypeError`), `test_pipeline_passes_sz_decimals_to_the_strategy` (`{'BTC': None}`) |
+| C7 | `c9c629f` | H16 — isolation des échecs par dex | `fetch_open_positions` ignore aussi `httpx.HTTPError` pour le dex fautif | `test_positions_survive_a_failing_dex` (`HTTPStatusError: 502`) |
+| C8 | `7e519da` | DOC1 — pages citées | Pages imprimées partout (p.87, p.88, p.115, p.167) ; convention ajoutée à `CLAUDE.md` | — (commentaires et docs seulement, aucun test possible) |
+
+Un test existant encodait l'erreur C2 (`open_risk == abs(entry − stop) × size`) : il a été aligné sur
+la formule d'Elder.
 
 ---
 
