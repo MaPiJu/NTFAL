@@ -54,6 +54,10 @@ lookback_entry = 2000
 refresh_seconds = 3600    # hourly
 min_tide_bars = 60
 
+[scanner.horizons.strategy]
+# 0.1%/bar x sqrt(4h / 1w): see flat_trend_slope_pct under [strategy].
+flat_trend_slope_pct = 0.00015
+
 [[scanner.horizons]]
 name = "micro"
 label = "Minutes"
@@ -66,12 +70,23 @@ lookback_entry = 2000
 refresh_seconds = 300     # every 5 minutes
 min_tide_bars = 60
 
+[scanner.horizons.strategy]
+# 0.1%/bar x sqrt(1h / 1w): see flat_trend_slope_pct under [strategy].
+flat_trend_slope_pct = 0.00008
+
 [strategy]
 # Strategy thresholds/weights. Defaults mirror the Elder scanner's built-in
 # behavior; tune here instead of editing code. Every lookback is a count of
 # BARS on the relevant screen's timeframe, so the same numbers carry across
 # horizons. Any key here may be overridden per horizon with a
 # [scanner.horizons.strategy] sub-block.
+#
+# A tide is "flat" (neutral, no trade) when its EMA13 moves less than this
+# fraction per tide bar. Noise grows like sqrt(time), so a %/bar cutoff does not
+# carry across timeframes: each horizon scales this swing (1w) value by
+# sqrt(tide bar / 1 week) — scalp (4h) 0.00015, micro (1h) 0.00008. Measured on
+# the six xyz perps, that keeps 5-31% of tide bars neutral on every horizon
+# (0.1% on a 1h tide read xyz:SP500 as neutral 99% of the time).
 flat_trend_slope_pct = 0.001
 # "last ~4-6 weeks" of wave bars, used for the average EMA penetration.
 penetration_lookback_bars = 35
