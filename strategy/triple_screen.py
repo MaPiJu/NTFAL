@@ -48,6 +48,28 @@ DEFAULT_INTERVALS = {"tide": "tide", "wave": "wave", "entry": "entry"}
 
 
 @dataclass(frozen=True)
+class ApgarLine:
+    question: str  # what is graded, e.g. "tide Impulse"
+    answer: str  # what was observed, e.g. "green", "below value", "2.40"
+    score: int  # 0, 1 or 2
+
+
+@dataclass(frozen=True)
+class TradeApgar:
+    """Elder's Trade Apgar (p.238-242) for this system — "pullback to value".
+
+    Five questions scored 0/1/2; an **A-trade** totals 7 or more with no line at
+    zero (p.239: "only healthy ideas whose score is 7 or higher, and not a single
+    line rated zero"). It ranks setups the Triple Screen already validated; it
+    never creates or vetoes one.
+    """
+
+    lines: list[ApgarLine]
+    total: int
+    a_trade: bool
+
+
+@dataclass(frozen=True)
 class Signal:
     asset: str
     action: Action
@@ -62,9 +84,6 @@ class Signal:
     target: float | None
     reward_risk: float | None
     rr_ok: bool
-    tide_strength: float  # scale-free |slope| of the tide EMA13
-    pullback_quality: float  # 0-1 depth of the latest wave Force-Index pullback
-    quality_score: float | None  # composite Elder rank, None when standing aside
     market_regime: str  # trending / flat, derived from the tide EMA13 slope filter
     entry_impulse: str | None  # 3rd-screen Impulse — context for the operator, never a veto
     divergences: list[str]  # Elder MACD-Histogram / Force Index divergence warnings
@@ -74,6 +93,8 @@ class Signal:
     # which differ from the breakout entry's. None when there is no limit entry.
     entry_limit_stop: float | None = None
     reward_risk_limit: float | None = None
+    # Trade Apgar — how this setup ranks; None when standing aside.
+    apgar: TradeApgar | None = None
     # --- horizon + data-quality context ---------------------------------------
     horizon: str = ""  # which timeframe chain produced this signal
     intervals: dict[str, str] = field(default_factory=dict)  # role -> interval
@@ -340,36 +361,41 @@ def channel(
     params: StrategyParams = DEFAULT_PARAMS,
     span: int = EMA_SLOW,
 ) -> tuple[float, float]:
-    """(upper, lower) channel around the slow EMA26 — Elder's percentage envelope
+    """(upper, lower) channel around the slow EMA26 — Elder's symmetrical channel
     (p.167). On the tide it is the fallback target when price already trades
     beyond the tide value zone; on the wave it is the chasing veto (p.168: never
     buy above the upper line, never sell short below the lower one).
 
-    Elder draws the channel parallel to the *slower* EMA and widens it until it
-    contains ~95% of recent bars. The bars left outside (1 - `containment`) are
-    split between the two edges, so each half-width is the
-    `1 - (1 - containment) / 2` quantile of the **relative** excursion of the
-    highs above / lows below the EMA (penetration / EMA at that bar) over the
-    lookback, projected onto the latest EMA.
+    Elder draws the channel parallel to the *slower* EMA with ONE coefficient k:
+    upper = EMA·(1 + k), lower = EMA·(1 − k), adjusted until it contains ~95% of
+    the past 100 bars (p.79, p.167; "between 90% and 95%", p.226). k is the
+    smallest coefficient that keeps at least `channel_containment` of the last
+    `channel_lookback_bars` bars inside — all the history there is when shorter —
+    each bar measured against its own EMA: high ≤ EMA·(1 + k) and low ≥ EMA·(1 − k).
+    The lines are then drawn around the latest EMA.
 
-    Measuring the excursion as a *ratio* (not an absolute price distance) keeps the
-    channel proportional to the current price and the lower band strictly positive
-    even for a market that has since crashed — a deliberate 24/7 adaptation that
-    fits the two sides independently rather than as one symmetric coefficient.
+    A ratio (not a price distance) keeps the channel proportional to price, and
+    the lower line positive after a crash: a low below its EMA pokes out by less
+    than 100% of it. Only highs more than doubling their own EMA — a parabolic
+    market — can push k to 100% or more; the lower line is then floored at 0,
+    which is no price: callers treat it as "no lower line".
     """
     e = ema(bars["close"], span)
-    window = slice(-params.channel_lookback_bars, None)
-    # Relative excursion of each bar's high above / low below the EMA (0 when the
-    # bar doesn't poke out). Each edge leaves half of the (1 - containment) budget
-    # outside, so the channel as a whole contains ~containment of the bars —
-    # Elder's "contains ~95% of bars" fit (p.167).
-    up = ((bars["high"] - e) / e).clip(lower=0).iloc[window]
-    down = ((e - bars["low"]) / e).clip(lower=0).iloc[window]
+    # How far each bar pokes out of its own EMA, either way, as a fraction of it
+    # (0 when the bar sits inside).
+    excursion = (
+        pd.concat([(bars["high"] - e) / e, (e - bars["low"]) / e], axis=1)
+        .max(axis=1)
+        .clip(lower=0)
+        .iloc[-params.channel_lookback_bars :]
+    )
     last = float(e.iloc[-1])
-    q = 1.0 - (1.0 - params.channel_containment) / 2.0
-    upper = last * (1.0 + (float(up.quantile(q)) if not up.empty else 0.0))
-    lower = last * (1.0 - (float(down.quantile(q)) if not down.empty else 0.0))
-    return upper, lower
+    if excursion.empty:
+        return last, last
+    # Keeping m bars inside takes the m-th smallest excursion.
+    inside = max(1, math.ceil(params.channel_containment * len(excursion) - 1e-9))
+    k = float(excursion.sort_values().iloc[inside - 1])
+    return last * (1.0 + k), last * max(0.0, 1.0 - k)
 
 
 def _long_levels(
@@ -402,8 +428,9 @@ def _short_levels(
     wave: pd.DataFrame,
     params: StrategyParams = DEFAULT_PARAMS,
     sz_decimals: int | None = None,
-) -> tuple[float, float | None, float, float]:
-    """(entry, entry_limit, stop, target) for a short setup."""
+) -> tuple[float, float | None, float, float | None]:
+    """(entry, entry_limit, stop, target) for a short setup; no target when price
+    is already below value and the tide channel has no lower line."""
     prior_low = float(wave["low"].iloc[-1])
     tick = tick_size(prior_low, sz_decimals)
     entry = prior_low - tick  # sell-stop 1 tick below the prior bar's low
@@ -417,7 +444,7 @@ def _short_levels(
     e26 = float(ema(tide["close"], EMA_SLOW).iloc[-1])
     value_low = min(e13, e26)
     target = value_low if value_low < entry else channel(tide, params)[1]
-    return entry, limit, stop, target
+    return entry, limit, stop, target if target > 0 else None
 
 
 def _round_levels(
@@ -425,9 +452,9 @@ def _round_levels(
     entry: float,
     limit: float | None,
     stop: float,
-    target: float,
+    target: float | None,
     sz_decimals: int | None = None,
-) -> tuple[float, float | None, float, float]:
+) -> tuple[float, float | None, float, float | None]:
     """Put a setup's levels on Hyperliquid's price grid, each on the prudent side.
 
     The stop-entry moves further out (buy-stop up, sell-stop down), the limit to a
@@ -438,12 +465,12 @@ def _round_levels(
         entry_dir, limit_dir, stop_dir = "up", "down", "down"
     else:
         entry_dir, limit_dir, stop_dir = "down", "up", "up"
-    target_dir = "down" if target > entry else "up"
+    target_dir = "down" if target is not None and target > entry else "up"
     return (
         round_to_tick(entry, entry_dir, sz_decimals),
         round_to_tick(limit, limit_dir, sz_decimals) if limit is not None else None,
         round_to_tick(stop, stop_dir, sz_decimals),
-        round_to_tick(target, target_dir, sz_decimals),
+        round_to_tick(target, target_dir, sz_decimals) if target is not None else None,
     )
 
 
@@ -600,83 +627,83 @@ def _entry_screen_levels(
     return fallback_entry, imp
 
 
-def _clamp01(x: float) -> float:
-    return 0.0 if x < 0.0 else 1.0 if x > 1.0 else x
-
-
-def tide_slope_strength(tide_close: pd.Series, span: int = EMA_FAST) -> float:
-    """Scale-free strength of the tide: |EMA13 now - previous| / EMA13.
-
-    A ratio so a $0.05 alt and $60k BTC are comparable; 0 if the EMA is flat.
-    """
-    e = ema(tide_close, span)
-    if len(e) < 2 or e.iloc[-1] == 0:
-        return 0.0
-    return abs(float(e.iloc[-1] - e.iloc[-2])) / abs(float(e.iloc[-1]))
-
-
-def impulse_confirmation(action: Action, tide_impulse: str, wave_impulse: str) -> float:
-    """Fraction of screens whose Impulse actively confirms the trade (0, .5, 1).
-
-    Longs are confirmed by green Impulse, shorts by red, counted on tide + wave
-    then averaged. (Censorship has already removed the vetoing color, so this only
-    rewards positive agreement — a blue/neutral screen scores nothing.)
-    """
-    favorable = "green" if action == "long" else "red"
-    return ((tide_impulse == favorable) + (wave_impulse == favorable)) / 2.0
-
-
-def pullback_quality(wave: pd.DataFrame, params: StrategyParams = DEFAULT_PARAMS) -> float:
-    """How stretched the latest wave Force-Index pullback is, scaled 0-1.
-
-    |FI(2)| is measured against this asset's own recent average |FI(2)|, so the
-    depth is comparable across assets. Elder enters on a pullback to value; a
-    deeper-than-usual pullback (larger |FI|) is the better entry.
-    """
-    fi = force_index(wave["close"], wave["volume"], span=2)
-    scale = float(fi.abs().iloc[-params.fi_scale_lookback :].mean())
-    if scale <= 0:
-        return 0.0
-    return _clamp01(abs(float(fi.iloc[-1])) / scale)
-
-
-def compute_quality_score(
+def trade_apgar(
+    action: Literal["long", "short"],
+    tide_impulse: str,
+    wave_impulse: str,
+    zone_side: Literal["above", "below", "inside"],
     reward_risk: float | None,
-    impulse_agreement: float,
-    tide_strength: float,
-    pullback_depth: float,
-    params: StrategyParams = DEFAULT_PARAMS,
-) -> float:
-    """Composite 0-1 trade-quality score from Elder's "which setup?" criteria.
+    divergences: Sequence[str],
+    min_reward_risk: float = DEFAULT_PARAMS.min_reward_risk,
+) -> TradeApgar:
+    """Trade Apgar for a "pullback to value" setup — Elder's scoring (p.238-242)
+    with this system's own five questions ("each strategy demands its own Apgar").
 
-    Reward:risk dominates (the book's gatekeeper), then Impulse agreement across
-    both screens, the strength of the tide, and how deep the entry pullback is.
-    This only *ranks* setups already validated by the Triple Screen — it never
-    creates or overrides a signal.
+    For a long (mirror image for a short, red <-> green, below <-> above):
+      a. tide Impulse: green 2 — the tide's momentum is behind the trade —,
+         blue 1, red 0;
+      b. wave Impulse: blue 2 — the pullback is losing force, Elder's "blue after
+         red" —, green 1, red 0;
+      c. wave close vs the EMA13-EMA26 value zone: below 2 (a bargain), inside 1,
+         above 0;
+      d. reward:risk: >= `min_reward_risk` (2) -> 2, >= 1 -> 1, below 1 or none -> 0;
+      e. wave divergence: bullish 2, none 1, bearish (even alongside a bullish
+         one) 0.
     """
-    rr = _clamp01((reward_risk or 0.0) / params.rr_excellent)
-    tide = _clamp01(tide_strength / params.strong_tide_slope)
-    return (
-        params.score_reward_risk_weight * rr
-        + params.score_impulse_weight * impulse_agreement
-        + params.score_tide_weight * tide
-        + params.score_pullback_weight * _clamp01(pullback_depth)
+    long = action == "long"
+    with_tide = "green" if long else "red"
+    bargain, chasing = ("below", "above") if long else ("above", "below")
+    favorable, adverse = ("bullish", "bearish") if long else ("bearish", "bullish")
+
+    def impulse(color: str, two: str, one: str) -> int:
+        return 2 if color == two else 1 if color == one else 0
+
+    if reward_risk is not None and reward_risk >= min_reward_risk:
+        rr_score = 2
+    elif reward_risk is not None and reward_risk >= 1.0:
+        rr_score = 1
+    else:
+        rr_score = 0
+    kinds = {d.split(" ", 1)[0] for d in divergences}
+    if adverse in kinds:
+        div_answer, div_score = adverse, 0
+    elif favorable in kinds:
+        div_answer, div_score = favorable, 2
+    else:
+        div_answer, div_score = "none", 1
+    zone_answer = {"inside": "in value zone", "above": "above value", "below": "below value"}
+
+    lines = [
+        ApgarLine("tide Impulse", tide_impulse, impulse(tide_impulse, with_tide, "blue")),
+        ApgarLine("wave Impulse", wave_impulse, impulse(wave_impulse, "blue", with_tide)),
+        ApgarLine(
+            "wave close vs value",
+            zone_answer[zone_side],
+            2 if zone_side == bargain else 0 if zone_side == chasing else 1,
+        ),
+        ApgarLine(
+            "reward:risk",
+            f"{reward_risk:.2f}" if reward_risk is not None else "none",
+            rr_score,
+        ),
+        ApgarLine("wave divergence", div_answer, div_score),
+    ]
+    total = sum(line.score for line in lines)
+    return TradeApgar(
+        lines=lines, total=total, a_trade=total >= 7 and all(line.score for line in lines)
     )
 
 
 def select_best(signals: Sequence[Signal]) -> Signal | None:
-    """Elder's "which one do I take?": the highest-quality tradable setup that
-    clears the 2:1 reward:risk floor. Returns None if nothing qualifies."""
+    """Elder's "which one do I take?": the A-trade with the best Trade Apgar,
+    ties broken on reward:risk (then asset name, for a stable pick). Returns None
+    when no setup is an A-trade."""
     candidates = [
-        s for s in signals if s.action != "stand_aside" and s.rr_ok and s.quality_score is not None
+        s for s in signals if s.action != "stand_aside" and s.apgar is not None and s.apgar.a_trade
     ]
     if not candidates:
         return None
-    # Tie-break on reward:risk, then asset name, for a stable, explainable pick.
-    return max(
-        candidates,
-        key=lambda s: (s.quality_score, s.reward_risk or 0.0, s.asset),
-    )
+    return max(candidates, key=lambda s: (s.apgar.total, s.reward_risk or 0.0, s.asset))
 
 
 def evaluate_asset(
@@ -783,30 +810,34 @@ def evaluate_asset(
         entry, limit, stop, target = _short_levels(tide, wave, params, sz_decimals)
         entry, entry_impulse = _entry_screen_levels(candidate, entry_frame, entry, sz_decimals)
         entry, limit, stop, target = _round_levels("short", entry, limit, stop, target, sz_decimals)
-        if stop > entry:
+        if stop > entry and target is not None:
             rr = (entry - target) / (stop - entry)
 
     # Stop & reward:risk for the limit (pullback) entry — recalibrated to that
     # fill, since a deep pullback can clear the breakout stop.
+    # The stop doesn't depend on the target; only the R:R needs one.
     limit_stop = limit_rr = None
-    if candidate in ("long", "short") and limit is not None and target is not None:
+    if candidate in ("long", "short") and limit is not None:
         limit_stop = round_to_tick(
             safezone_stop_for_limit(wave, candidate, limit, params),
             "down" if candidate == "long" else "up",
             sz_decimals,
         )
-        if candidate == "long" and limit > limit_stop:
+        if target is not None and candidate == "long" and limit > limit_stop:
             limit_rr = (target - limit) / (limit - limit_stop)
-        elif candidate == "short" and limit_stop > limit:
+        elif target is not None and candidate == "short" and limit_stop > limit:
             limit_rr = (limit - target) / (limit_stop - limit)
 
-    strength = tide_slope_strength(tide["close"])
-    score = None
-    pull = 0.0
+    apgar = None
     if candidate in ("long", "short"):
-        pull = pullback_quality(wave, params)
-        score = compute_quality_score(
-            rr, impulse_confirmation(candidate, t_imp, w_imp), strength, pull, params
+        apgar = trade_apgar(
+            candidate,
+            t_imp,
+            w_imp,
+            value_zone_extension(wave),
+            rr,
+            divergences,
+            params.min_reward_risk,
         )
     order_plan = theoretical_entry_order_plan(candidate, entry, labels["wave"], labels["tide"])
 
@@ -824,9 +855,6 @@ def evaluate_asset(
         target=target,
         reward_risk=rr,
         rr_ok=rr is not None and rr >= params.min_reward_risk,
-        tide_strength=strength,
-        pullback_quality=pull,
-        quality_score=score,
         market_regime=market_regime,
         entry_impulse=entry_impulse,
         divergences=divergences,
@@ -834,6 +862,7 @@ def evaluate_asset(
         entry_order_plan=order_plan,
         entry_limit_stop=limit_stop,
         reward_risk_limit=limit_rr,
+        apgar=apgar,
         horizon=horizon,
         intervals=dict(labels),
         tide_bars=len(tide),

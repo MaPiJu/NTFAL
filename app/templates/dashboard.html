@@ -26,9 +26,12 @@
         <strong>live</strong> (exchange mark price, matches Hyperliquid now).
         <strong>Funding paid</strong> is the funding paid since the position opened
         (negative = received) — a holding cost neither PnL includes.
+        The <strong>trail stop</strong> only ever moves in the trade's direction from one
+        refresh to the next, never back.
         <strong>Verdict is informational only</strong>; you decide and place any
         order manually.
       </p>
+      <div id="positions-warn" class="card-warn hidden"></div>
       <table id="positions-table">
         <thead>
           <tr>
@@ -65,7 +68,11 @@
             <th>Action</th><th>Close</th><th>Mark (live)</th>
             <th>Entry (stop-order)</th><th>Stop</th><th>R:R</th>
             <th>Entry (limit)</th><th>Limit stop</th><th>Limit R:R</th>
-            <th>Target</th><th>Score</th><th>Size</th><th>Reason</th>
+            <th>Target</th>
+            <th title="Elder's Trade Apgar: five questions scored 0/1/2 — A-trade = 7+ with no zero">Apgar</th>
+            <th>Size</th>
+            <th title="Current hourly funding rate (+: longs pay shorts); below it, the funding this trade would pay over the horizon's holding time, % of notional (+: paid)">Funding</th>
+            <th>Reason</th>
           </tr>
         </thead>
         <tbody></tbody>

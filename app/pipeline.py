@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
@@ -31,6 +31,7 @@ from data.hyperliquid import (
     completed_bars,
 )
 from data.provider import MarketDataProvider
+from data.sessions import WeekendClosure, drop_closed_bars, weekly_from_weekdays
 from indicators import ema, force_index, impulse_color, macd_histogram
 from risk.sizing import MonthlyGuard, position_size, six_percent_guard
 from strategy.trade_management import OpenPosition, assess_position, parse_positions
@@ -180,6 +181,58 @@ def size_warnings(size: float, entry: float, equity: float, spec: PerpSpec | Non
     return out
 
 
+def fetch_funding_rates(
+    coins: Mapping[str, PerpSpec], client: MarketDataProvider
+) -> dict[str, float]:
+    """Current hourly funding rate per watched coin — one `metaAndAssetCtxs`
+    request per dex involved.
+
+    Funding is context, never a trading input: a dex whose lookup fails (a bad
+    payload, an HTTP error, a timeout) only leaves its coins without a rate.
+    """
+    rates: dict[str, float] = {}
+    for dex in sorted({coin_dex(c) for c in coins}):
+        try:
+            by_coin = client.funding_rates(dex)
+        except (HyperliquidError, httpx.HTTPError):
+            continue
+        rates.update({c: r for c, r in by_coin.items() if c in coins})
+    return rates
+
+
+def funding_cost(action: str, rate: float | None, hours: float | None) -> float | None:
+    """Funding over `hours` as a fraction of notional: positive when the trade
+    PAYS, negative when it is paid.
+
+    Hyperliquid's rate is hourly; positive, longs pay shorts. None for a row
+    with no side to hold, an unknown rate, or no holding time configured.
+    """
+    if action not in ("long", "short") or rate is None or not hours:
+        return None
+    return rate * hours * (1.0 if action == "long" else -1.0)
+
+
+def _holding_label(hours: float) -> str:
+    return f"{hours / 24:g} d" if hours >= 24 and hours % 24 == 0 else f"{hours:g} h"
+
+
+def funding_warning(
+    cost: float | None, entry: float | None, stop: float | None, hours: float | None
+) -> str | None:
+    """Flag a funding bill above half of what the trade risks, both as a fraction
+    of notional (so the size doesn't matter). Informative: never changes the action."""
+    if cost is None or cost <= 0 or entry is None or stop is None or entry <= 0 or not hours:
+        return None
+    risk = abs(entry - stop) / entry
+    if cost <= 0.5 * risk:
+        return None
+    return (
+        f"funding over {_holding_label(hours)} ≈ {cost:.2%} of notional, more than half "
+        f"the trade's risk ({risk:.2%} from entry to stop) — it eats the edge if held "
+        f"that long"
+    )
+
+
 def expand_watchlist(watchlist: tuple[str, ...], client: MarketDataProvider) -> dict[str, PerpSpec]:
     """Resolve watchlist entries to {coin: PerpSpec} (szDecimals, max leverage…),
     sorted by name.
@@ -220,23 +273,31 @@ def watchlist_dexes(watchlist: tuple[str, ...]) -> list[str]:
     return sorted(dexes)
 
 
-def fetch_open_positions(cfg: Config, client: MarketDataProvider) -> list[OpenPosition]:
+def fetch_open_positions(
+    cfg: Config, client: MarketDataProvider, failed_dexes: set[str] | None = None
+) -> list[OpenPosition]:
     """Open positions: read from Hyperliquid + declared manually.
 
     Hyperliquid positions are gathered across the native clearinghouse and
     every HIP-3 dex the watchlist references; a failure on one dex (a bad
-    payload, an HTTP error, a timeout) doesn't drop the others.
-    `[[positions.manual]]` entries cover a trade the configured address cannot
-    see.
+    payload, an HTTP error, a timeout) doesn't drop the others. Each dex whose
+    lookup failed is added to `failed_dexes`, if given: its positions are hidden
+    for this refresh, not closed. `[[positions.manual]]` entries cover a trade
+    the configured address cannot see.
     """
     out: list[OpenPosition] = []
     if cfg.positions.address:
         for dex in watchlist_dexes(cfg.scanner.watchlist):
             try:
                 state = client.clearinghouse_state(cfg.positions.address, dex=dex)
-            except (HyperliquidError, httpx.HTTPError):
+                # A position the parser can't read (a null entryPx, a missing
+                # coin) makes the whole dex unreadable, not the whole refresh.
+                positions = parse_positions(state)
+            except (HyperliquidError, httpx.HTTPError, TypeError, KeyError, ValueError):
+                if failed_dexes is not None:
+                    failed_dexes.add(dex)
                 continue
-            out.extend(parse_positions(state))
+            out.extend(positions)
     for m in cfg.positions.manual:
         out.append(OpenPosition(asset=m.asset, side=m.side, entry=m.entry, size=m.size))
     return out
@@ -246,11 +307,38 @@ def position_open_risk(position: dict[str, Any]) -> float:
     """Risk still open using the current Elder/SafeZone stop suggestion.
 
     Elder's 6% Rule (p.208-209): the distance from entry to the current stop,
-    and zero once the stop is at or beyond break-even (it locks in profit).
+    and zero once the stop is at or beyond break-even (it locks in profit). A
+    stop the close already went through bounds nothing any more: the risk is
+    what exiting at that close would lose.
     """
     entry, stop = float(position["entry"]), float(position["suggested_stop"])
+    if position.get("stop_hit"):
+        stop = float(position["close_price"])
     per_unit = entry - stop if position["side"] == "long" else stop - entry
     return max(0.0, per_unit) * float(position["size"])
+
+
+def screen_bars(
+    client: MarketDataProvider,
+    coin: str,
+    interval: str,
+    lookback: int,
+    now_ms: int,
+    closure: WeekendClosure | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """(completed bars the indicators may see, raw bars incl. the open one) for one
+    screen of one coin.
+
+    On a dex with a weekend `closure` (data/sessions.py), bars lying entirely
+    inside it are dropped, and a weekly screen is rebuilt from the Monday-Friday
+    daily bars instead of Hyperliquid's Thursday-anchored 1w candles. Without
+    one, these are simply the completed bars.
+    """
+    if closure is not None and interval == "1w":
+        raw = client.refresh(coin, "1d", lookback * 7)
+        return completed_bars(weekly_from_weekdays(raw), now_ms), raw
+    raw = client.refresh(coin, interval, lookback)
+    return drop_closed_bars(completed_bars(raw, now_ms), closure), raw
 
 
 def _position_frames(
@@ -258,13 +346,61 @@ def _position_frames(
     horizon: HorizonConfig,
     coin: str,
     now_ms: int,
+    closure: WeekendClosure | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame] | None:
     """Completed tide + wave bars for a held coin, or None if too new."""
-    tide = completed_bars(client.refresh(coin, horizon.tide, horizon.lookback_tide), now_ms)
-    wave = completed_bars(client.refresh(coin, horizon.wave, horizon.lookback_wave), now_ms)
+    tide, _ = screen_bars(client, coin, horizon.tide, horizon.lookback_tide, now_ms, closure)
+    wave, _ = screen_bars(client, coin, horizon.wave, horizon.lookback_wave, now_ms, closure)
     if len(tide) < 2 or len(wave) < 2:
         return None
     return tide, wave
+
+
+def stop_memory_key(asset: str, side: str, entry: float) -> str:
+    """One open position, for the stop memory: a new entry price is a new position."""
+    return f"{asset}|{side}|{float(entry)!r}"
+
+
+def stop_memory(
+    positions: list[dict[str, Any]],
+    previous: Mapping[str, float] | None = None,
+    held: list[OpenPosition] | None = None,
+    failed_dexes: set[str] | frozenset[str] = frozenset(),
+) -> dict[str, float]:
+    """The stop memory to store in the snapshot: the last suggested stop of every
+    position just assessed, plus the `previous` entries of positions that are
+    still open but were not assessed this run — still held (e.g. too new to
+    evaluate), or hidden because their dex's lookup failed. Anything else is
+    closed (its dex was read without it, or it is no longer declared) and is
+    forgotten, so a later position with the same key starts fresh."""
+    memory = {
+        stop_memory_key(p["asset"], p["side"], p["entry"]): p["suggested_stop"] for p in positions
+    }
+    still_held = {stop_memory_key(p.asset, p.side, p.entry) for p in held or []}
+    for key, stop in (previous or {}).items():
+        hidden = coin_dex(key.split("|", 1)[0]) in failed_dexes
+        if key not in memory and (key in still_held or hidden):
+            memory[key] = stop
+    return memory
+
+
+def hidden_positions(
+    previous: dict[str, Any] | None,
+    positions: list[dict[str, Any]],
+    failed_dexes: set[str] | frozenset[str],
+) -> list[dict[str, Any]]:
+    """Positions of the previous snapshot hidden now by a failed lookup on their
+    dex — still open, as last assessed. Their last open risk keeps counting
+    toward the 6% rule: a request timing out must not unblock new entries."""
+    if not failed_dexes or not previous:
+        return []
+    assessed = {stop_memory_key(p["asset"], p["side"], p["entry"]) for p in positions}
+    out: dict[str, dict[str, Any]] = {}
+    for p in previous.get("positions", []) + previous.get("hidden_positions", []):
+        key = stop_memory_key(p["asset"], p["side"], p["entry"])
+        if key not in assessed and key not in out and coin_dex(p["asset"]) in failed_dexes:
+            out[key] = p
+    return list(out.values())
 
 
 def build_positions(
@@ -273,19 +409,28 @@ def build_positions(
     open_positions: list[OpenPosition],
     frames: dict[str, tuple[pd.DataFrame, pd.DataFrame]],
     now_ms: int,
+    previous_stops: Mapping[str, float] | None = None,
+    sessions: Mapping[str, WeekendClosure] | None = None,
 ) -> list[dict[str, Any]]:
     """Elder exit verdict per open position, reusing scan frames where available.
 
     A held coin outside the watchlist (so not already refreshed) gets its candles
     fetched on demand. Coins too new to evaluate are skipped silently.
+    `previous_stops` (the previous snapshot's stop memory) keeps each suggested
+    stop from moving back against its trade (Elder, p.224). `sessions` (dex ->
+    weekend closure) shapes the bars of a held coin fetched on demand.
     """
+    memory = previous_stops or {}
     out: list[dict[str, Any]] = []
     for pos in open_positions:
-        tw = frames.get(pos.asset) or _position_frames(client, horizon, pos.asset, now_ms)
+        tw = frames.get(pos.asset) or _position_frames(
+            client, horizon, pos.asset, now_ms, (sessions or {}).get(coin_dex(pos.asset))
+        )
         if tw is None:
             continue
         tide, wave = tw
-        verdict = asdict(assess_position(pos, tide, wave, horizon.params))
+        previous = memory.get(stop_memory_key(pos.asset, pos.side, pos.entry))
+        verdict = asdict(assess_position(pos, tide, wave, horizon.params, previous))
         verdict["open_risk"] = position_open_risk(verdict)
         out.append(verdict)
     return out
@@ -299,11 +444,14 @@ def build_horizon(
     now_ms: int,
     held: set[str],
     on_progress: Callable[[str, str], None] | None = None,
+    funding: Mapping[str, float] | None = None,
 ) -> tuple[dict[str, Any], dict[str, tuple[pd.DataFrame, pd.DataFrame]]]:
     """One timeframe chain over the whole watchlist.
 
     Returns the horizon block (signals + charts, before sizing and ranking) and
     the tide/wave frames of any *held* coin, so trade management can reuse them.
+    `funding` (coin -> hourly rate) adds each signal's estimated funding cost
+    over the horizon's `holding_hours`.
     """
     params = horizon.params
     signals: list[dict[str, Any]] = []
@@ -315,13 +463,16 @@ def build_horizon(
     for coin in coins:
         if on_progress is not None:
             on_progress(horizon.name, coin)
-        tide = completed_bars(client.refresh(coin, horizon.tide, horizon.lookback_tide), now_ms)
-        # Keep the raw wave frame (including the still-open bar) so we can read a
-        # live price; the strategy itself only ever sees completed bars.
-        wave_all = client.refresh(coin, horizon.wave, horizon.lookback_wave)
-        wave = completed_bars(wave_all, now_ms)
-        entry_frame = completed_bars(
-            client.refresh(coin, horizon.entry, horizon.lookback_entry), now_ms
+        # A tradfi perp's closed-market bars never reach an indicator (see
+        # screen_bars). The raw wave frame keeps the still-open bar so we can read
+        # a live price; the strategy itself only ever sees completed bars.
+        closure = cfg.sessions.get(coin_dex(coin))
+        tide, _ = screen_bars(client, coin, horizon.tide, horizon.lookback_tide, now_ms, closure)
+        wave, wave_all = screen_bars(
+            client, coin, horizon.wave, horizon.lookback_wave, now_ms, closure
+        )
+        entry_frame, _ = screen_bars(
+            client, coin, horizon.entry, horizon.lookback_entry, now_ms, closure
         )
 
         # A market without two completed bars per screen can't be evaluated
@@ -356,6 +507,14 @@ def build_horizon(
         row["price_alert"] = live_price_alert(
             sig.action, row["live_price"], sig.entry, sig.stop, sig.target
         )
+        # Funding: the current hourly rate, and what holding the trade for the
+        # horizon's typical time would cost (positive = paid). Context only.
+        rate = funding.get(coin) if funding else None
+        cost = funding_cost(sig.action, rate, horizon.holding_hours)
+        row["funding_rate"] = rate
+        row["funding_hours"] = horizon.holding_hours
+        row["funding_cost"] = cost
+        row["funding_warning"] = funding_warning(cost, sig.entry, sig.stop, horizon.holding_hours)
         signals.append(row)
 
         charts[coin] = {
@@ -428,14 +587,20 @@ def build_snapshot(
     cfg: Config,
     client: MarketDataProvider,
     on_progress: Callable[[str, str], None] | None = None,
+    previous: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Full refresh of every horizon for the watchlist -> dashboard snapshot dict."""
+    """Full refresh of every horizon for the watchlist -> dashboard snapshot dict.
+
+    `previous` is the snapshot on disk, if any: its stop memory keeps the open
+    positions' suggested stops from moving back."""
     now_ms = int(time.time() * 1000)
     coins = expand_watchlist(cfg.scanner.watchlist, client)
+    funding = fetch_funding_rates(coins, client)
 
     # Open positions (read-only) drive the Elder trade-management section.
+    failed_dexes: set[str] = set()
     try:
-        open_positions = fetch_open_positions(cfg, client)
+        open_positions = fetch_open_positions(cfg, client, failed_dexes)
     except HyperliquidError:
         open_positions = []
     held = {p.asset for p in open_positions}
@@ -443,14 +608,25 @@ def build_snapshot(
     blocks: dict[str, Any] = {}
     position_frames: dict[str, tuple[pd.DataFrame, pd.DataFrame]] = {}
     for horizon in cfg.scanner.horizons:
-        block, held_frames = build_horizon(cfg, client, horizon, coins, now_ms, held, on_progress)
+        block, held_frames = build_horizon(
+            cfg, client, horizon, coins, now_ms, held, on_progress, funding
+        )
         blocks[horizon.name] = block
         if horizon.name == cfg.scanner.positions_horizon:
             position_frames = held_frames
 
     positions_horizon = cfg.scanner.horizon(cfg.scanner.positions_horizon)
-    positions = build_positions(client, positions_horizon, open_positions, position_frames, now_ms)
-    guard, risks = _risk_summary(cfg, positions)
+    positions = build_positions(
+        client,
+        positions_horizon,
+        open_positions,
+        position_frames,
+        now_ms,
+        (previous or {}).get("stop_memory"),
+        cfg.sessions,
+    )
+    hidden = hidden_positions(previous, positions, failed_dexes)
+    guard, risks = _risk_summary(cfg, positions, hidden)
 
     snapshot: dict[str, Any] = {
         "generated_at": datetime.now(tz=UTC).isoformat(timespec="seconds"),
@@ -460,6 +636,11 @@ def build_snapshot(
         "guard": asdict(guard),
         **risks,
         "positions": positions,
+        "hidden_positions": hidden,
+        "unread_dexes": sorted(failed_dexes),
+        "stop_memory": stop_memory(
+            positions, (previous or {}).get("stop_memory"), open_positions, failed_dexes
+        ),
         "positions_horizon": cfg.scanner.positions_horizon,
         "position_address": mask_address(cfg.positions.address) if cfg.positions.address else None,
         "horizons": {
@@ -472,11 +653,13 @@ def build_snapshot(
 
 
 def _risk_summary(
-    cfg: Config, positions: list[dict[str, Any]]
+    cfg: Config, positions: list[dict[str, Any]], hidden: list[dict[str, Any]] | None = None
 ) -> tuple[MonthlyGuard, dict[str, float]]:
-    """The 6% guard plus the open-risk figures it was computed from."""
+    """The 6% guard plus the open-risk figures it was computed from. `hidden`
+    positions (a failed lookup) count with their last known open risk."""
     auto = sum(position_open_risk(p) for p in positions)
-    total = cfg.risk.open_trade_risk + auto
+    carried = sum(position_open_risk(p) for p in hidden or [])
+    total = cfg.risk.open_trade_risk + auto + carried
     guard = six_percent_guard(
         cfg.risk.equity_at_month_start,
         cfg.risk.month_realized_losses,
@@ -485,6 +668,7 @@ def _risk_summary(
     return guard, {
         "manual_open_trade_risk": cfg.risk.open_trade_risk,
         "auto_open_trade_risk": auto,
+        "hidden_open_trade_risk": carried,
         "total_open_trade_risk": total,
     }
 
@@ -509,23 +693,41 @@ def refresh_horizon(
     horizon = cfg.scanner.horizon(name)
     now_ms = int(time.time() * 1000)
     coins = expand_watchlist(cfg.scanner.watchlist, client)
+    funding = fetch_funding_rates(coins, client)
 
     snapshot = dict(previous)
     snapshot.setdefault("horizons", {})
     snapshot["horizons"] = dict(snapshot["horizons"])
 
+    failed_dexes: set[str] = set()
     try:
-        open_positions = fetch_open_positions(cfg, client)
+        open_positions = fetch_open_positions(cfg, client, failed_dexes)
     except HyperliquidError:
         open_positions = []
     held = {p.asset for p in open_positions}
 
-    block, held_frames = build_horizon(cfg, client, horizon, coins, now_ms, held, on_progress)
+    block, held_frames = build_horizon(
+        cfg, client, horizon, coins, now_ms, held, on_progress, funding
+    )
 
     if name == cfg.scanner.positions_horizon:
-        positions = build_positions(client, horizon, open_positions, held_frames, now_ms)
-        guard, risks = _risk_summary(cfg, positions)
+        positions = build_positions(
+            client,
+            horizon,
+            open_positions,
+            held_frames,
+            now_ms,
+            previous.get("stop_memory"),
+            cfg.sessions,
+        )
+        hidden = hidden_positions(previous, positions, failed_dexes)
+        guard, risks = _risk_summary(cfg, positions, hidden)
         snapshot["positions"] = positions
+        snapshot["hidden_positions"] = hidden
+        snapshot["unread_dexes"] = sorted(failed_dexes)
+        snapshot["stop_memory"] = stop_memory(
+            positions, previous.get("stop_memory"), open_positions, failed_dexes
+        )
         snapshot["guard"] = asdict(guard)
         snapshot.update(risks)
         blocked = guard.blocked

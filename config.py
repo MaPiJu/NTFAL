@@ -8,13 +8,14 @@ from __future__ import annotations
 
 import os
 import tomllib
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
 
 from data.hyperliquid import INTERVAL_MS
+from data.sessions import WeekendClosure
 from strategy.params import StrategyParams
 
 DEFAULT_CONFIG_PATH = Path("config.toml")
@@ -37,7 +38,9 @@ class HorizonConfig:
     `refresh_seconds` is how often this horizon is worth recomputing (a weekly
     tide does not change every five minutes); `min_tide_bars` is the history
     depth below which the slow EMA26 is not converged and the tide/Impulse are
-    flagged as unreliable — surfaced, never silently trusted.
+    flagged as unreliable — surfaced, never silently trusted. `holding_hours` is
+    a typical holding time for a trade on this chain, over which the current
+    funding rate is turned into an estimated cost (None: no estimate).
     """
 
     name: str
@@ -50,6 +53,7 @@ class HorizonConfig:
     lookback_entry: int
     refresh_seconds: int
     min_tide_bars: int
+    holding_hours: float | None = None
     # Per-horizon strategy overrides merged over the global [strategy] block.
     params: StrategyParams = StrategyParams()
 
@@ -117,6 +121,9 @@ class Config:
     positions: PositionsConfig
     journal: JournalConfig
     cache_dir: Path
+    # dex -> weekend closure of its markets ([sessions.<dex>]); a dex without
+    # one (the native crypto perps) trades 24/7.
+    sessions: dict[str, WeekendClosure] = field(default_factory=dict)
 
 
 class ConfigError(ValueError):
@@ -158,6 +165,7 @@ def _horizon(raw: dict[str, Any], base: StrategyParams) -> HorizonConfig:
         lookback_entry=int(raw.get("lookback_entry", 300)),
         refresh_seconds=int(raw.get("refresh_seconds", 86_400)),
         min_tide_bars=int(raw.get("min_tide_bars", 60)),
+        holding_hours=float(raw["holding_hours"]) if "holding_hours" in raw else None,
         params=_strategy_params(raw.get("strategy", {}), base),
     )
 
@@ -171,6 +179,18 @@ def _horizons(raw_list: list[dict[str, Any]], base: StrategyParams) -> tuple[Hor
     if duplicates:
         raise ConfigError(f"duplicate horizon name(s): {', '.join(sorted(duplicates))}")
     return horizons
+
+
+def _sessions(raw: dict[str, Any]) -> dict[str, WeekendClosure]:
+    out: dict[str, WeekendClosure] = {}
+    for dex, table in raw.items():
+        try:
+            out[dex] = WeekendClosure.parse(
+                table["weekend_close"], table["weekend_open"], table.get("timezone", "UTC")
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ConfigError(f"[sessions.{dex}]: {exc}") from exc
+    return out
 
 
 def load_config(path: Path = DEFAULT_CONFIG_PATH) -> Config:
@@ -232,4 +252,5 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> Config:
             path=Path(j.get("path", "cache/trading_journal.jsonl")),
         ),
         cache_dir=Path(raw.get("cache", {}).get("dir", "cache")),
+        sessions=_sessions(raw.get("sessions", {})),
     )

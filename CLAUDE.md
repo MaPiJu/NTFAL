@@ -12,11 +12,12 @@ decision and place orders **manually**.
 
 ## Hard constraints (never violate)
 - **No order execution, no signing, no private keys.** Use only *public, keyless,
-  read-only* endpoints on Hyperliquid's `info` endpoint: `candleSnapshot`, `meta`, and
-  `clearinghouseState` (the last is a read-only account lookup of *open positions* for
-  a **public** address, like a block explorer; it takes no key and signs nothing). The
-  codebase must contain no private key, no exchange API key, no `exchange`/`order`/
-  `signing` code path.
+  read-only* endpoints on Hyperliquid's `info` endpoint: `candleSnapshot`, `meta`,
+  `metaAndAssetCtxs` (the same universe plus each perp's current market context — read
+  for the **funding rate** only), and `clearinghouseState` (a read-only account lookup of
+  *open positions* for a **public** address, like a block explorer; it takes no key and
+  signs nothing). The codebase must contain no private key, no exchange API key, no
+  `exchange`/`order`/`signing` code path.
 - **No auto-trading loop.** Output is informational only; a human decides and executes.
 - **Don't invent indicators.** "Less is more": implement only the indicators listed in
   the Strategy Spec. Adding more indicators is a regression, not a feature. Data-quality
@@ -95,6 +96,23 @@ system says what *not* to do — it filters the table above.
 > cancel the very setups the second screen just found. Its color is surfaced as context
 > for the operator and nothing more. This is guarded by a regression test.
 
+### Best-trade pick — Trade Apgar (p.238–242)
+Each horizon ranks its validated setups with Elder's **Trade Apgar**: five questions scored
+0/1/2, and "each strategy demands its own Apgar" (p.242). This system's ("pullback to
+value"), for a long — mirrored for a short (red ↔ green, below ↔ above, bullish ↔ bearish):
+
+| Line | 2 | 1 | 0 |
+|------|---|---|---|
+| a. tide Impulse | green | blue | red |
+| b. wave Impulse | blue | green | red |
+| c. wave close vs EMA13–EMA26 value zone | below | inside | above |
+| d. reward:risk | ≥ 2 (`min_reward_risk`) | ≥ 1 | < 1 |
+| e. wave divergence | bullish | none | bearish (even with a bullish one) |
+
+An **A-trade** totals **≥ 7 with no line at 0** (p.239). The horizon's pick is the A-trade
+with the best Apgar, ties broken on reward:risk; no A-trade, no pick. The Apgar only ranks:
+it never creates, vetoes or changes a signal. Its five lines are shown in every UI.
+
 ## Trade-management spec (open positions — exits)
 The Triple Screen decides *entries*; managing an already-open position uses Elder's own
 exit tools only — **no new indicators**. Positions are judged on the horizon named by
@@ -104,7 +122,8 @@ managed on the same chain that would have entered it. Per held position, produce
 **exit > take_profits > hold**:
 - **EXIT** if the **tide flips** against the position (the strategic premise is dead), or
   if **either** Impulse turns the *adverse* color (red for a long, green for a short —
-  momentum reversed).
+  momentum reversed), or if the wave close is **through the suggested stop** (a remembered
+  stop the price fell back through was hit; its open risk is then measured from the close).
 - **TAKE_PROFITS** if price reaches the profit target (tide value zone EMA13–EMA26, or
   the tide channel when price already trades beyond value), **or** when *neither* screen
   still shows the favorable Impulse color (both blue) **and** the trade is in profit —
@@ -112,6 +131,13 @@ managed on the same chain that would have entered it. Per held position, produce
 - **HOLD** otherwise; always surface a **SafeZone trailing-stop** suggestion (behind the
   recent wave extreme by the average adverse bar noise × a factor — **2 for longs, 3 for
   shorts** per Elder, since shorting near highs is noisier — ratcheted to ≥ break-even in profit).
+  **A suggested stop never moves back** (p.224: "move your stop only in the direction of
+  your trade"): the snapshot keeps the last suggestion per position, keyed by (asset, side,
+  entry price), in `stop_memory`; the next one is `max(previous, new)` for a long, `min` for
+  a short, and a new key (another entry price) starts fresh. A remembered stop is kept
+  while its position is still open — held, or hidden because its dex's lookup failed — and
+  dropped once it is closed (its dex was read without it, or it is no longer declared). Both `build_snapshot` and `refresh_horizon`
+  read the previous snapshot for it.
 Each position also shows the **funding paid since it opened** (`cumFunding.sinceOpen` from
 `clearinghouseState`; negative = received) — a holding cost the price PnL leaves out. It is
 context only and never changes a verdict.
@@ -139,9 +165,23 @@ They never change an action — they tell the operator how much to trust it:
   few bars a large share of it is still that seed; ~60 bars puts the seed under 1%. The
   tradfi perps on the `xyz` dex are recent listings, so this fires on the swing horizon
   today (e.g. `xyz:SP500` had 27 weekly bars at time of writing).
-- **Near-frozen market** — a tradfi perp over the weekend still prints bars, at a fraction
-  of normal volume and range. Force Index is volume-scaled, so those bars flatten every
-  indicator and an intraday signal read off them is noise.
+- **Near-frozen market** — a tradfi perp on a weekday holiday still prints bars, at a
+  fraction of normal volume and range. Force Index is volume-scaled, so those bars flatten
+  every indicator and an intraday signal read off them is noise. (Weekends are removed by
+  the session calendar below.)
+
+## Trading sessions (tradfi perps)
+The `xyz` dex's markets close for the weekend; Elder counts trading days (p.125: five a
+week). `[sessions.<dex>]` in `config.toml` gives a dex its weekend closure, in a stated
+`timezone` (IANA name, default UTC) so it follows daylight saving — `xyz`: Friday 17:00 →
+Sunday 18:00 **New York time**, trade.xyz's external-price weekend (the CME's): Fri 21:00 →
+Sun 22:00 UTC in summer, 22:00 → 23:00 UTC in winter. A dex without one trades 24/7. For such a dex, **before any
+indicator**: bars lying *entirely* inside the closure are dropped (a bar straddling the
+close or the reopening is kept), and a **1w screen is rebuilt from the Monday–Friday daily
+bars** (Hyperliquid's own 1w candles open on Thursday and carry the weekend). Weekday
+holidays are not in the calendar; the near-frozen flag covers them. This shapes the
+*inputs* only — it is not an indicator (`data/sessions.py`, applied by `screen_bars` in the
+pipeline to every screen and to held positions).
 
 ## Risk module (the two pillars)
 - **2% Rule:** `max_risk_per_trade = equity_at_month_start * risk_pct` with `risk_pct`
@@ -156,12 +196,23 @@ They never change an action — they tell the operator how much to trust it:
   perp's `maxLeverage` × equity (from `meta`, with `onlyIsolated` noted), or falls under
   Hyperliquid's $10 minimum order value, carries a `size_warnings` entry. The size stays the
   Iron Triangle's and the action never changes.
+- **Funding cost — flag, don't veto:** each signal shows the perp's current funding rate
+  (`metaAndAssetCtxs`, hourly; positive = longs pay shorts) and the funding the trade would
+  pay over the horizon's `holding_hours` (swing 14 d, scalp 2 d, micro 4 h), as % of
+  notional signed by side (positive = paid). When that cost exceeds **half the trade's risk**
+  (|entry − stop| / entry), the signal carries a `funding_warning`; the action never changes.
 - **6% Rule:** if `month_realized_losses + sum(open_trade_risk) >= 0.06 * equity_at_month_start`,
   block all new-entry suggestions for the rest of the month (flag clearly in the UI). The
-  guard is **global**, computed once across every horizon.
+  guard is **global**, computed once across every horizon. A position hidden by a failed
+  `clearinghouseState` lookup is still open: it keeps counting with its last known open
+  risk (`hidden_positions`), and the UI says which dex could not be read.
 - **Targets:** profit target on the **tide** value zone (between EMA13 and EMA26) or a
-  tide **channel** (Elder's percentage envelope around the slow **EMA26**, fit to contain
-  ~95% of recent bars) when price already trades beyond value; **stop** on the **wave**.
+  tide **channel** (Elder's symmetrical channel around the slow **EMA26**: one coefficient
+  k, `EMA26·(1 ± k)`, the smallest that keeps ~95% of the past **100** bars inside, each bar
+  measured against its own EMA — p.79, p.167; all the history there is when shorter) when
+  price already trades beyond value — a parabolic tide can push k to 100% or more, which
+  leaves no lower line (floored at 0): a short then gets **no** channel target, hence no
+  R:R and no size, rather than a negative one; **stop** on the **wave**.
   Reward:risk target ≥ **2:1**; **flag** setups below it (flag, don't hide — on short
   horizons the value-zone target tightens faster than the SafeZone stop, so sub-2:1 setups
   are the norm there and the operator needs to see them).
@@ -171,9 +222,11 @@ They never change an action — they tell the operator how much to trust it:
 
 ## Architecture
 - `data/hyperliquid.py` — public `info` client (`httpx`); `candleSnapshot` per coin/interval;
-  validate watchlist against the perp `meta` universe; `clearinghouseState` open positions
-  for a public address (read-only); cache OHLCV to parquet; parse string OHLCV fields
+  validate watchlist against the perp `meta` universe; current funding rates per dex from
+  `metaAndAssetCtxs`; `clearinghouseState` open positions for a public address (read-only); cache OHLCV to parquet; parse string OHLCV fields
   to float; respect the 5000-candle limit.
+- `data/sessions.py` — weekend closure per dex: drop closed-market bars, rebuild weekly bars
+  from Monday–Friday daily bars.
 - `data/provider.py` — the `MarketDataProvider` Protocol the pipeline is typed against
   (satisfied by `HyperliquidClient`).
 - `indicators/` — pure functions on pandas DataFrames (EMA, MACD-Hist, Force Index, Impulse color).

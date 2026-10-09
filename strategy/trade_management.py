@@ -18,7 +18,8 @@ out?" — using only Elder's own exit tools, no new indicators:
   exactly the targets the entry logic projects.
 - **Trailing stop (SafeZone).** Suggest tightening the protective stop behind the
   recent wave extreme by the average adverse noise, ratcheted to at least
-  break-even once the trade is in profit. Never widen risk.
+  break-even once the trade is in profit. Never widen risk: given the last
+  suggestion for the same position, a new one only moves in the trade's direction.
 
 Both screens come from the horizon configured as `positions_horizon` — a held
 position is strategic, so it is judged on the same chain that would have entered it.
@@ -88,12 +89,14 @@ class TradeManagement:
     tide_impulse: str
     wave_impulse: str
     in_profit: bool  # by the Elder (close) PnL — keeps the verdict on completed bars
-    target: float  # tide value-zone edge (or channel) in the trade's direction
+    target: float | None  # tide value-zone edge (or channel) in the trade's direction
     target_reached: bool
     suggested_stop: float  # SafeZone trailing stop, ratcheted to >= break-even in profit
     verdict: Verdict
     reasons: list[str]
     cum_funding: float | None = None  # funding paid since open (negative = received)
+    # The close went through the (remembered) stop: it was hit, so exit.
+    stop_hit: bool = False
 
 
 def _to_float(value: Any) -> float | None:
@@ -140,9 +143,10 @@ def parse_positions(state: Mapping[str, Any]) -> list[OpenPosition]:
 
 def _profit_target(
     pos: OpenPosition, tide: pd.DataFrame, params: StrategyParams = DEFAULT_PARAMS
-) -> float:
+) -> float | None:
     """Tide value-zone edge in the trade's direction, or the tide channel band
-    when price already trades beyond value (mirrors the entry targets)."""
+    when price already trades beyond value (mirrors the entry targets). None for
+    a short when the channel has no lower line (a parabolic tide: see channel)."""
     e13 = float(ema(tide["close"], EMA_FAST).iloc[-1])
     e26 = float(ema(tide["close"], EMA_SLOW).iloc[-1])
     if pos.side == "long":
@@ -153,7 +157,8 @@ def _profit_target(
     value_edge = min(e13, e26)
     if value_edge < pos.entry:
         return value_edge
-    return channel(tide, params)[1]
+    lower = channel(tide, params)[1]
+    return lower if lower > 0 else None
 
 
 def safezone_stop(
@@ -187,6 +192,7 @@ def assess_position(
     tide: pd.DataFrame,
     wave: pd.DataFrame,
     params: StrategyParams = DEFAULT_PARAMS,
+    previous_stop: float | None = None,
 ) -> TradeManagement:
     """Elder exit verdict for one open position from completed tide + wave bars.
 
@@ -195,6 +201,10 @@ def assess_position(
     on those *completed* bars — the "Elder" view, using the last wave close. The
     result also carries a "live" price and PnL from the exchange (mark price /
     `unrealizedPnl`) so the displayed numbers match Hyperliquid in real time.
+
+    `previous_stop` is the last stop suggested for this same position: the new
+    suggestion never moves back past it (Elder, p.224: "move your stop only in
+    the direction of your trade").
     """
     t_imp = str(impulse_color(tide["close"]).iloc[-1])
     w_imp = str(impulse_color(wave["close"]).iloc[-1])
@@ -216,8 +226,21 @@ def assess_position(
     in_profit = pnl_elder > 0
 
     target = _profit_target(pos, tide, params)
-    target_reached = close_price >= target if pos.side == "long" else close_price <= target
+    if target is None:
+        target_reached = False
+    elif pos.side == "long":
+        target_reached = close_price >= target
+    else:
+        target_reached = close_price <= target
     suggested_stop = safezone_stop(pos, wave, in_profit=in_profit, params=params)
+    if previous_stop is not None:
+        pick = max if pos.side == "long" else min
+        suggested_stop = pick(suggested_stop, previous_stop)
+    # A fresh SafeZone stop always sits on the safe side of the close; a
+    # remembered one may not any more. A close through it means it was hit.
+    stop_hit = (
+        close_price <= suggested_stop if pos.side == "long" else close_price >= suggested_stop
+    )
 
     favorable_trend: Trend = "up" if pos.side == "long" else "down"
     favorable_imp = "green" if pos.side == "long" else "red"
@@ -226,7 +249,13 @@ def assess_position(
     reasons: list[str] = []
     verdict: Verdict = "hold"
 
-    # --- EXIT: the strategic premise is dead -------------------------------
+    # --- EXIT: the stop was hit, or the strategic premise is dead -----------
+    if stop_hit:
+        verdict = "exit"
+        reasons.append(
+            f"wave close {close_price:.6g} is through the stop {suggested_stop:.6g} — the stop "
+            f"was hit; exit (never lower a stop to give the trade room)"
+        )
     if trend not in (favorable_trend, "neutral"):
         verdict = "exit"
         reasons.append(f"tide flipped to {trend} — the reason for this {pos.side} is gone; exit")
@@ -284,4 +313,5 @@ def assess_position(
         verdict=verdict,
         reasons=reasons,
         cum_funding=pos.cum_funding,
+        stop_hit=stop_hit,
     )

@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from dataclasses import replace
+from dataclasses import asdict, replace
+from datetime import UTC, datetime
 
 import httpx
 import pytest
@@ -12,12 +13,16 @@ from fastapi.testclient import TestClient
 from app.main import app
 from app.pipeline import (
     build_snapshot,
+    fetch_funding_rates,
     fetch_open_positions,
+    funding_cost,
+    funding_warning,
     live_price_alert,
     load_snapshot,
     position_open_risk,
     refresh_horizon,
     size_warnings,
+    stop_memory_key,
 )
 from config import (
     Config,
@@ -28,10 +33,12 @@ from config import (
     ScannerConfig,
 )
 from data.hyperliquid import PerpSpec
+from data.sessions import WeekendClosure
 from journal import append_journal_entry
 from risk.sizing import position_size
 from strategy.params import StrategyParams
-from tests.conftest import make_clearinghouse_state, make_client
+from strategy.triple_screen import Signal, trade_apgar
+from tests.conftest import make_clearinghouse_state, make_client, synthetic_candles
 
 SWING = HorizonConfig(
     name="swing",
@@ -67,6 +74,7 @@ def make_config(
     horizons=(SWING,),
     positions_horizon="swing",
     strategy=None,
+    sessions=None,
     **risk_overrides,
 ) -> Config:
     risk = {
@@ -87,6 +95,7 @@ def make_config(
         positions=PositionsConfig(address=address, manual=tuple(manual)),
         journal=JournalConfig(enabled=False, path=cache_dir / "journal.jsonl"),
         cache_dir=cache_dir,
+        sessions=sessions or {},
     )
 
 
@@ -132,16 +141,16 @@ def test_build_snapshot_from_fixtures(tmp_path, btc_fixtures):
     assert sig["tide_impulse"] in {"green", "red", "blue"}
     assert sig["horizon"] == "swing"
     # fields surfaced for the dashboard / ranking
-    assert "last_close" in sig and "quality_score" in sig and "is_top_pick" in sig
+    assert "last_close" in sig and "apgar" in sig and "is_top_pick" in sig
     # live price (still-open wave bar) + a stale-price/chasing alert
     assert "live_price" in sig and "price_alert" in sig
     # data-quality flags travel with the signal, and so do size flags
     assert isinstance(sig["data_warnings"], list)
     assert sig["size_warnings"] == []  # nothing sized, nothing to flag
-    # the top pick (if any) must be a tradable, R:R-passing setup
+    # the top pick (if any) must be a tradable A-trade
     if block["top_pick"] is not None:
         pick = next(s for s in block["signals"] if s["asset"] == block["top_pick"])
-        assert pick["action"] != "stand_aside" and pick["rr_ok"] and pick["is_top_pick"]
+        assert pick["action"] != "stand_aside" and pick["apgar"]["a_trade"] and pick["is_top_pick"]
 
     charts = block["charts"]["BTC"]
     for role in ("tide", "wave"):
@@ -396,6 +405,24 @@ def test_positions_survive_a_failing_dex(tmp_path):
     assert (pos.asset, pos.side, pos.entry) == ("BTC", "long", 50000.0)
 
 
+def test_a_malformed_position_payload_drops_only_its_dex(tmp_path):
+    # A maintenance page or a position the parser can't read on one dex must not
+    # abort the refresh: that dex counts as a failed lookup, the others survive.
+    addr = "0x" + "34" * 20
+    cfg = make_config(tmp_path, watchlist=("BTC", "xyz:GOLD"), address=addr)
+
+    class BrokenDex:
+        def clearinghouse_state(self, address: str, dex: str = "") -> dict:
+            if dex == "xyz":  # entryPx null: float(None) in the parser
+                return make_clearinghouse_state([{"coin": "xyz:GOLD", "szi": "1", "entryPx": None}])
+            return make_clearinghouse_state([{"coin": "BTC", "szi": "0.5", "entryPx": "50000.0"}])
+
+    failed: set[str] = set()
+    (pos,) = fetch_open_positions(cfg, BrokenDex(), failed)
+    assert pos.asset == "BTC"
+    assert failed == {"xyz"}
+
+
 def test_snapshot_reports_tripped_guard(tmp_path, chain_fixtures):
     cfg = make_config(tmp_path, horizons=(SWING, SCALP), month_realized_losses=700.0)
     client = make_client(chain_fixtures, tmp_path)
@@ -437,6 +464,24 @@ def test_open_risk_is_zero_once_the_stop_locks_in_profit():
     assert risk("short", 100.0, 104.0) == 40.0
     assert risk("short", 100.0, 95.0) == 0.0  # short stop below entry: profit locked
 
+    # A stop the close already went through no longer bounds the loss: what is at
+    # risk is what exiting at that close would cost.
+    def hit(side, entry, stop, close, size=10.0):
+        return position_open_risk(
+            {
+                "side": side,
+                "entry": entry,
+                "suggested_stop": stop,
+                "size": size,
+                "close_price": close,
+                "stop_hit": True,
+            }
+        )
+
+    assert hit("long", 165.0, 170.0, 159.0) == 60.0  # stop above entry, close below it
+    assert hit("long", 150.0, 170.0, 159.0) == 0.0  # exiting at 159 still banks a profit
+    assert hit("short", 150.0, 140.0, 159.0) == 90.0
+
 
 def test_pipeline_passes_sz_decimals_to_the_strategy(tmp_path, btc_fixtures, monkeypatch):
     # The tick of an entry order depends on the asset's szDecimals (Hyperliquid:
@@ -454,6 +499,254 @@ def test_pipeline_passes_sz_decimals_to_the_strategy(tmp_path, btc_fixtures, mon
     build_snapshot(make_config(tmp_path), make_client(btc_fixtures, tmp_path))
 
     assert seen == {"BTC": 5}
+
+
+def _held_btc(tmp_path, btc_fixtures, entry="50000.0"):
+    addr = "0x" + "ab" * 20
+    state = make_clearinghouse_state([{"coin": "BTC", "szi": "0.5", "entryPx": entry}])
+    return addr, make_client(btc_fixtures, tmp_path, clearinghouse_states={addr: state})
+
+
+def test_a_suggested_stop_never_moves_back_across_refreshes(tmp_path, btc_fixtures):
+    # Elder (p.224): "Move your stop only in the direction of your trade". The
+    # snapshot remembers the last suggestion per position (asset, side, entry);
+    # both a full refresh and a single-horizon refresh read it back.
+    addr, client = _held_btc(tmp_path, btc_fixtures)
+    cfg = make_config(tmp_path, address=addr)
+    first = build_snapshot(cfg, client)
+    (pos,) = first["positions"]
+    fresh = pos["suggested_stop"]
+    key = stop_memory_key("BTC", "long", 50000.0)
+    assert first["stop_memory"] == {key: fresh}
+
+    # A previous, tighter suggestion holds: the new one would lower the stop.
+    previous = first | {"stop_memory": {key: fresh + 1_000.0}}
+    full = build_snapshot(cfg, client, previous=previous)
+    assert full["positions"][0]["suggested_stop"] == fresh + 1_000.0
+    assert full["positions"][0]["open_risk"] == max(0.0, 50000.0 - (fresh + 1_000.0)) * 0.5
+    partial = refresh_horizon(cfg, client, "swing", previous)
+    assert partial["positions"][0]["suggested_stop"] == fresh + 1_000.0
+    assert partial["stop_memory"] == {key: fresh + 1_000.0}
+
+    # A looser previous suggestion doesn't hold the stop back.
+    looser = first | {"stop_memory": {key: fresh - 1_000.0}}
+    assert build_snapshot(cfg, client, previous=looser)["positions"][0]["suggested_stop"] == fresh
+
+
+def test_a_failed_position_lookup_keeps_the_stop_memory(tmp_path, btc_fixtures, monkeypatch):
+    # A clearinghouseState timeout hides the position for one refresh; that is not
+    # a closed position, so its remembered stop must survive — otherwise the next
+    # refresh starts fresh and the stop moves back. Once the dex is read and no
+    # longer lists the position, the memory goes.
+    addr, client = _held_btc(tmp_path, btc_fixtures)
+    cfg = make_config(tmp_path, address=addr)
+    fresh = build_snapshot(cfg, client)["positions"][0]["suggested_stop"]
+    key = stop_memory_key("BTC", "long", 50000.0)
+    remembered = {"stop_memory": {key: fresh + 1_000.0}}
+
+    real = client.clearinghouse_state
+
+    def timeout(address, dex=""):
+        raise httpx.ReadTimeout("timed out")
+
+    monkeypatch.setattr(client, "clearinghouse_state", timeout)
+    hidden = build_snapshot(cfg, client, previous=remembered)
+    assert hidden["positions"] == []
+    assert hidden["stop_memory"] == {key: fresh + 1_000.0}
+    hidden_one = refresh_horizon(cfg, client, "swing", remembered)
+    assert hidden_one["stop_memory"] == {key: fresh + 1_000.0}
+
+    monkeypatch.setattr(client, "clearinghouse_state", real)
+    back = build_snapshot(cfg, client, previous=hidden)
+    assert back["positions"][0]["suggested_stop"] == fresh + 1_000.0  # never moved back
+
+    monkeypatch.setattr(
+        client, "clearinghouse_state", lambda address, dex="": {"assetPositions": []}
+    )
+    assert build_snapshot(cfg, client, previous=back)["stop_memory"] == {}  # closed: forgotten
+
+
+def test_a_failed_lookup_keeps_the_hidden_positions_risk_in_the_6_percent_rule(
+    tmp_path, btc_fixtures, monkeypatch, capsys
+):
+    # A position hidden by a failed clearinghouseState lookup is still open: its
+    # last known open risk keeps counting, so the 6% guard can't unblock just
+    # because a request timed out — and the operator is told positions are unread.
+    addr, client = _held_btc(tmp_path, btc_fixtures, entry="80000.0")
+    cfg = make_config(tmp_path, address=addr, month_realized_losses=500.0)
+    seen = build_snapshot(cfg, client)
+    assert seen["guard"]["blocked"] and seen["auto_open_trade_risk"] > 100.0
+
+    def timeout(address, dex=""):
+        raise httpx.ReadTimeout("timed out")
+
+    monkeypatch.setattr(client, "clearinghouse_state", timeout)
+    for hidden in (
+        build_snapshot(cfg, client, previous=seen),
+        refresh_horizon(cfg, client, "swing", seen),
+    ):
+        assert hidden["positions"] == []
+        assert hidden["unread_dexes"] == [""]
+        assert [p["asset"] for p in hidden["hidden_positions"]] == ["BTC"]
+        assert hidden["guard"] == seen["guard"]  # still blocked, same total at risk
+        assert all(s["position_size"] is None for s in swing(hidden)["signals"])
+
+    # Hidden twice in a row: still counted.
+    again = build_snapshot(cfg, client, previous=build_snapshot(cfg, client, previous=seen))
+    assert again["guard"]["blocked"]
+
+    from run import print_signals_tables
+
+    print_signals_tables(again)
+    assert "could not be read" in capsys.readouterr().out
+
+
+def test_an_undeclared_manual_position_forgets_its_stop(tmp_path, btc_fixtures):
+    # No address: only manual positions, so no dex is ever looked up. Removing a
+    # declaration closes the position — its remembered stop must go, or the same
+    # trade declared again later inherits a stale stop (and an instant EXIT).
+    from config import ManualPosition
+
+    held = ManualPosition(asset="BTC", side="long", size=0.5, entry=50_000.0)
+    client = make_client(btc_fixtures, tmp_path)
+    key = stop_memory_key("BTC", "long", 50000.0)
+    with_it = build_snapshot(make_config(tmp_path, manual=(held,)), client)
+    assert key in with_it["stop_memory"]
+
+    without = make_config(tmp_path)
+    assert build_snapshot(without, client, previous=with_it)["stop_memory"] == {}
+    assert refresh_horizon(without, client, "swing", with_it)["stop_memory"] == {}
+
+
+def test_stop_memory_resets_when_the_position_changes(tmp_path, btc_fixtures):
+    # Same coin and side, another entry price: a new position, a fresh stop.
+    addr, client = _held_btc(tmp_path, btc_fixtures, entry="51000.0")
+    cfg = make_config(tmp_path, address=addr)
+    old_key = stop_memory_key("BTC", "long", 50000.0)
+    snapshot = build_snapshot(cfg, client, previous={"stop_memory": {old_key: 1e9}})
+
+    (pos,) = snapshot["positions"]
+    assert pos["suggested_stop"] < 1e9
+    assert snapshot["stop_memory"] == {
+        stop_memory_key("BTC", "long", 51000.0): pos["suggested_stop"]
+    }
+
+
+def test_cli_refresh_reads_the_previous_snapshot_on_both_paths(tmp_path, btc_fixtures, monkeypatch):
+    import run
+
+    addr, client = _held_btc(tmp_path, btc_fixtures)
+    cfg = make_config(tmp_path, address=addr)
+    monkeypatch.setattr(run, "HyperliquidClient", lambda cache_dir: client)
+    monkeypatch.setattr(client, "close", lambda: None)  # reused across refreshes
+    first = run.do_refresh(cfg)
+    key = stop_memory_key("BTC", "long", 50000.0)
+    tighter = first["stop_memory"][key] + 1_000.0
+    run.write_snapshot(cfg, first | {"stop_memory": {key: tighter}})
+
+    assert run.do_refresh(cfg)["positions"][0]["suggested_stop"] == tighter  # full
+    assert run.do_refresh(cfg, "swing")["positions"][0]["suggested_stop"] == tighter  # one
+
+
+def test_xyz_bars_skip_the_weekend_and_the_weekly_tide_is_built_from_weekdays(
+    tmp_path, btc_fixtures
+):
+    # Tradfi perps on the xyz dex: bars entirely inside the weekend close are
+    # dropped before any indicator, and the weekly tide is rebuilt from Monday-
+    # Friday daily bars instead of Hyperliquid's Thursday-anchored 1w candles —
+    # for scanned coins and for a held coin fetched on demand alike. A native
+    # perp (no session calendar) is untouched.
+    daily = synthetic_candles("1d", 300, start=2000.0, step=1.0)
+    fixtures = btc_fixtures | {("xyz:GOLD", "1d"): daily, ("xyz:SP500", "1d"): daily}
+    addr = "0x" + "56" * 20
+    held = make_clearinghouse_state([{"coin": "xyz:SP500", "szi": "1.0", "entryPx": "2100.0"}])
+    log: list[dict] = []
+    client = make_client(
+        fixtures, tmp_path, requests_log=log, clearinghouse_states={(addr, "xyz"): held}
+    )
+    closure = WeekendClosure.parse("Fri 21:00", "Sun 22:00")
+    cfg = make_config(
+        tmp_path, watchlist=("BTC", "xyz:GOLD"), address=addr, sessions={"xyz": closure}
+    )
+
+    snapshot = build_snapshot(cfg, client)
+
+    asked = {(r["req"]["coin"], r["req"]["interval"]) for r in log if r["type"] == "candleSnapshot"}
+    assert ("BTC", "1w") in asked
+    assert ("xyz:GOLD", "1w") not in asked and ("xyz:SP500", "1w") not in asked
+    charts = swing(snapshot)["charts"]
+
+    def weekdays(candles):
+        return {datetime.fromtimestamp(c["time"], UTC).weekday() for c in candles}
+
+    assert weekdays(charts["xyz:GOLD"]["tide"]["candles"]) == {0}  # Monday-anchored
+    assert 5 not in weekdays(charts["xyz:GOLD"]["wave"]["candles"])  # no Saturday
+    assert 5 in weekdays(charts["BTC"]["wave"]["candles"])  # crypto trades 24/7
+    (pos,) = snapshot["positions"]
+    assert pos["asset"] == "xyz:SP500"
+
+
+def test_watch_refreshes_never_overlap(tmp_path, monkeypatch):
+    # --watch runs one job per horizon on a thread pool, and the cadences line up
+    # (every swing refresh fires with a scalp and a micro one). Each job loads,
+    # recomputes and writes the snapshot: run concurrently, the last writer puts
+    # back the stop memory it loaded and the stop moves back. One at a time.
+    import threading
+    import time
+
+    import run
+
+    class Client:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return None
+
+    spans: list[tuple[float, float]] = []
+
+    def slow_build(cfg, client, on_progress=None, previous=None):
+        start = time.monotonic()
+        time.sleep(0.2)
+        spans.append((start, time.monotonic()))
+        return {"generated_at": "now", "horizons": {}}
+
+    monkeypatch.setattr(run, "HyperliquidClient", lambda cache_dir: Client())
+    monkeypatch.setattr(run, "build_snapshot", slow_build)
+    cfg = make_config(tmp_path)
+    jobs = [threading.Thread(target=run.do_refresh, args=(cfg,)) for _ in range(2)]
+    for job in jobs:
+        job.start()
+    for job in jobs:
+        job.join()
+
+    first, second = sorted(spans)
+    assert first[1] <= second[0]
+
+
+def test_a_failed_snapshot_write_leaves_the_previous_one_intact(tmp_path, monkeypatch):
+    # The snapshot carries the stop memory. A write cut short (a crash, Ctrl-C, a
+    # full disk) must not leave a truncated file: it would load as empty and the
+    # next refresh would forget every remembered stop.
+    from pathlib import Path
+
+    import run
+
+    cfg = make_config(tmp_path)
+    run.write_snapshot(cfg, {"generated_at": "1", "stop_memory": {"k": 1.0}, "horizons": {}})
+
+    real = Path.write_text
+
+    def cut_short(self, data, *args, **kwargs):
+        real(self, data[: len(data) // 2], *args, **kwargs)
+        raise OSError("disk full")
+
+    monkeypatch.setattr(Path, "write_text", cut_short)
+    with pytest.raises(OSError):
+        run.write_snapshot(cfg, {"generated_at": "2", "stop_memory": {"k": 2.0}, "horizons": {}})
+    monkeypatch.undo()
+
+    assert load_snapshot(run.snapshot_path(cfg))["stop_memory"] == {"k": 1.0}
 
 
 def test_two_percent_rule_sizes_on_equity_at_month_start(tmp_path, long_setup_fixtures):
@@ -524,6 +817,162 @@ def test_unexecutable_size_is_flagged_never_capped(tmp_path, long_setup_fixtures
 
     print_signals_tables(snapshot)
     assert f"! size: {warning}" in capsys.readouterr().out
+
+
+def test_funding_cost_is_signed_by_the_side_of_the_trade():
+    # Hyperliquid's `funding` is an hourly rate: positive, longs pay shorts. The
+    # estimate is a fraction of notional, positive when the trade PAYS.
+    assert funding_cost("long", 0.0001, 10.0) == pytest.approx(0.001)
+    assert funding_cost("short", 0.0001, 10.0) == pytest.approx(-0.001)  # received
+    # Live xyz:BRENTOIL (2026-10-08): -0.031%/h, so a short pays ~10.4% in 14 days.
+    assert funding_cost("short", -0.00031, 14 * 24) == pytest.approx(0.10416)
+    assert funding_cost("stand_aside", 0.0001, 10.0) is None  # no side, no cost
+    assert funding_cost("long", None, 10.0) is None  # rate unknown
+    assert funding_cost("long", 0.0001, None) is None  # no holding time configured
+
+
+def test_funding_warning_when_the_cost_exceeds_half_the_trade_risk():
+    # Entry 100, stop 96: the trade risks 4% of its notional; half of it is 2%.
+    warning = funding_warning(0.03, 100.0, 96.0, 14 * 24)
+    assert warning is not None
+    assert "3.00%" in warning and "4.00%" in warning and "14 d" in warning
+    assert funding_warning(0.015, 100.0, 96.0, 336) is None  # under half the risk
+    assert funding_warning(-0.05, 100.0, 96.0, 336) is None  # received, not paid
+    assert funding_warning(None, 100.0, 96.0, 336) is None
+
+
+def test_signals_carry_the_funding_rate_and_its_cost(tmp_path, long_setup_fixtures, capsys):
+    # Longs pay 0.03%/h; held for the swing horizon's 14 days that is ~10% of the
+    # notional, more than half of this setup's risk. Informative: the long stands.
+    horizon = replace(SWING, holding_hours=14 * 24)
+    cfg = make_config(tmp_path, horizons=(horizon,))
+    client = make_client(long_setup_fixtures, tmp_path, funding={"BTC": "0.0003"})
+    snapshot = build_snapshot(cfg, client)
+
+    (sig,) = swing(snapshot)["signals"]
+    assert sig["action"] == "long" and sig["position_size"] is not None
+    assert sig["funding_rate"] == pytest.approx(0.0003)
+    assert sig["funding_hours"] == 336
+    assert sig["funding_cost"] == pytest.approx(0.0003 * 336)
+    assert "more than half" in sig["funding_warning"]
+
+    from run import print_signals_tables
+
+    print_signals_tables(snapshot)
+    assert f"! funding: {sig['funding_warning']}" in capsys.readouterr().out
+
+
+def test_trade_apgar_reaches_the_snapshot_and_the_cli(tmp_path, long_setup_fixtures, capsys):
+    snapshot = build_snapshot(make_config(tmp_path), make_client(long_setup_fixtures, tmp_path))
+
+    (sig,) = swing(snapshot)["signals"]
+    apgar = sig["apgar"]
+    assert [line["question"] for line in apgar["lines"]] == [
+        "tide Impulse",
+        "wave Impulse",
+        "wave close vs value",
+        "reward:risk",
+        "wave divergence",
+    ]
+    assert apgar["total"] == sum(line["score"] for line in apgar["lines"])
+
+    from run import print_signals_tables
+
+    print_signals_tables(snapshot)
+    out = capsys.readouterr().out
+    detail = " · ".join(f"{x['question']} {x['answer']} {x['score']}" for x in apgar["lines"])
+    assert f"apgar {apgar['total']}/10: {detail}" in out
+
+
+def _table_row(asset: str, apgar, rr: float, top: bool = False) -> dict:
+    sig = Signal(
+        asset=asset,
+        action="long",
+        reason="r",
+        tide_trend="up",
+        tide_impulse="green",
+        wave_impulse="blue",
+        force_index_2=-1.0,
+        entry=10.0,
+        entry_limit=None,
+        stop=9.0,
+        target=13.0,
+        reward_risk=rr,
+        rr_ok=rr >= 2.0,
+        market_regime="trending",
+        entry_impulse=None,
+        divergences=[],
+        value_zone_status="in_value",
+        entry_order_plan=None,
+        apgar=apgar,
+    )
+    extra = {"position_size": None, "size_warnings": [], "last_close": 10.0, "live_price": 10.0}
+    return asdict(sig) | extra | {"price_alert": None, "is_top_pick": top}
+
+
+def _swing_block(rows: list[dict]) -> dict:
+    return {
+        "label": "Swing",
+        "intervals": {"tide": "1w", "wave": "1d", "entry": "4h"},
+        "generated_at": "2026-10-08T13:00:00+00:00",
+        "signals": rows,
+        "skipped": [],
+    }
+
+
+def test_cli_table_lists_the_pick_then_a_trades_first(capsys):
+    # "Sorted best-first": the starred pick on top, then the other A-trades, then
+    # setups the Apgar rules out — even when one of those totals more points.
+    from run import print_horizon_table
+
+    bearish = ["bearish Force Index divergence"]
+    not_a = _table_row("AAA", trade_apgar("long", "green", "blue", "below", 2.5, bearish), 2.5)
+    pick = _table_row("BBB", trade_apgar("long", "green", "green", "inside", 2.5, []), 2.5, True)
+    other_a = _table_row("CCC", trade_apgar("long", "green", "green", "inside", 2.2, []), 2.2)
+    assert not_a["apgar"]["total"] == 8 and not not_a["apgar"]["a_trade"]
+    assert pick["apgar"]["total"] == 7 and pick["apgar"]["a_trade"]
+
+    print_horizon_table("swing", _swing_block([not_a, other_a, pick]))
+
+    table = [line.split()[0] for line in capsys.readouterr().out.splitlines() if line.strip()]
+    order = [name for name in table if name in {"AAA", "BBB", "CCC"}]
+    assert order == ["BBB", "CCC", "AAA"]
+
+
+def test_cli_survives_a_block_from_before_the_apgar(capsys):
+    # A partial refresh copies the other horizons' blocks as they are; one written
+    # before the Trade Apgar has a pick row with a quality_score and no "apgar".
+    from run import print_horizon_table
+
+    old = _table_row("OLD", None, 2.5, top=True)
+    del old["apgar"]
+    old["quality_score"] = 0.8
+
+    print_horizon_table("swing", _swing_block([old]))
+
+    out = capsys.readouterr().out
+    assert "BEST SWING TRADE: OLD" in out
+
+
+def test_cli_shows_tiny_funding_rates_with_two_significant_digits():
+    from run import rate_pct
+
+    assert rate_pct(-4.872e-07) == "-0.000049%"  # xyz:SP500, 2026-10-08
+    assert rate_pct(-0.0003221) == "-0.032%"  # xyz:BRENTOIL
+    assert rate_pct(0.00000625) == "+0.00063%"
+    assert rate_pct(0.0) == "+0.00%"
+    assert rate_pct(None) == "—"
+
+
+def test_a_failing_funding_lookup_drops_only_that_dex():
+    class FlakyFunding:
+        def funding_rates(self, dex: str = "") -> dict[str, float]:
+            if dex == "xyz":
+                raise httpx.ConnectTimeout("timed out")
+            return {"BTC": 0.0001}
+
+    specs = {"BTC": PerpSpec(5, 40), "xyz:GOLD": PerpSpec(4, 25)}
+    assert fetch_funding_rates(specs, FlakyFunding()) == {"BTC": 0.0001}
 
 
 def test_guard_uses_automatic_open_position_risk(tmp_path, btc_fixtures):

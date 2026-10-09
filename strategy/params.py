@@ -21,26 +21,21 @@ class StrategyParams:
     # new multi-period extreme (accelerating move, not a pullback). ~3-4 weeks
     # of wave bars on the canonical daily wave.
     force_index_extreme_lookback_bars: int = 25
-    channel_lookback_bars: int = 26
-    # Elder fits the channel so it contains ~95% of recent bars (p.167).
+    # Elder fits the channel so it contains ~95% of the past 100 bars (p.79, p.167).
+    channel_lookback_bars: int = 100
     channel_containment: float = 0.95
+    # Elder's 2:1 floor: flags sub-2:1 setups and earns full marks on the
+    # Trade Apgar's reward:risk line.
     min_reward_risk: float = 2.0
     divergence_lookback: int = 60
     # Elder/Lovvorn (p.88): the most tradable divergences span 20-40 bars.
     divergence_min_separation: int = 20
     divergence_max_separation: int = 40
-    rr_excellent: float = 3.0
-    strong_tide_slope: float = 0.03
-    fi_scale_lookback: int = 20
     safezone_lookback_bars: int = 20
     # Elder (p.220): shorts need wider stops (>=3) than longs (>=2), since
     # shorting near the highs is noisier and downtrends move faster.
     safezone_factor_long: float = 2.0
     safezone_factor_short: float = 3.0
-    score_reward_risk_weight: float = 0.40
-    score_impulse_weight: float = 0.25
-    score_tide_weight: float = 0.20
-    score_pullback_weight: float = 0.15
     # Data-quality gate, not a trading indicator: warn when the most recent
     # `low_volume_bars` wave bars average below this fraction of the recent
     # median volume (a tradfi perp over the weekend is a frozen oracle).

@@ -77,15 +77,28 @@ function stampsOf(snapshot) {
     .join("|");
 }
 
-// Best trade first: tradable setups ranked by Elder quality score (desc),
-// then the stand-aside rest by name. Returns a sorted copy.
+// Best trade first: the pick, then the other A-trades, then the remaining
+// setups — each group by Trade Apgar, then reward:risk (desc) — then the
+// stand-aside rest by name. Returns a sorted copy.
 function rankedSignals(block) {
+  const apgar = (s) => (s.apgar ? s.apgar.total : 0);
+  const notPick = (s) => (s.is_top_pick ? 0 : 1);
+  const notA = (s) => (s.apgar && s.apgar.a_trade ? 0 : 1);
   return [...block.signals].sort((a, b) => {
     const aside = (s) => (s.action === "stand_aside" ? 1 : 0);
     if (aside(a) !== aside(b)) return aside(a) - aside(b);
     if (aside(a) === 1) return a.asset.localeCompare(b.asset);
-    return (b.quality_score ?? 0) - (a.quality_score ?? 0);
+    if (notPick(a) !== notPick(b)) return notPick(a) - notPick(b);
+    if (notA(a) !== notA(b)) return notA(a) - notA(b);
+    if (apgar(a) !== apgar(b)) return apgar(b) - apgar(a);
+    return (b.reward_risk ?? 0) - (a.reward_risk ?? 0);
   });
+}
+
+// Elder's Trade Apgar: five questions scored 0/1/2; an A-trade totals >= 7 with
+// no zero. The best A-trade of the horizon is its pick.
+function apgarLines(apgar) {
+  return apgar.lines.map((x) => `${x.question}: ${x.answer} (${x.score})`).join(" · ");
 }
 
 // Live mark (still-open bar) + how far it has drifted from the closed-bar basis
@@ -102,11 +115,11 @@ function markCell(s) {
   return `<span${cls} title="${s.price_alert || ""}">${fmt(s.live_price)}${drift}</span>`;
 }
 
-function scoreCell(s) {
-  if (s.quality_score === null || s.quality_score === undefined) return "—";
-  const pct = Math.round(s.quality_score * 100);
+function apgarCell(s) {
+  if (!s.apgar) return "—";
   const star = s.is_top_pick ? ' <span class="top-star" title="best trade">★</span>' : "";
-  return `<span class="score">${pct}</span>${star}`;
+  const grade = s.apgar.a_trade ? ' <span class="badge long" title="A-trade: 7+ and no zero">A</span>' : "";
+  return `<span class="score" title="${apgarLines(s.apgar)}">${s.apgar.total}/10</span>${grade}${star}`;
 }
 
 function warningsHTML(s) {
@@ -130,6 +143,36 @@ function sizeWarningsHTML(s) {
   const warns = s.size_warnings || [];
   if (!warns.length) return "";
   return `<br><strong class="warn">! Size:</strong> <span class="warn">${warns.join(" · ")}</span>`;
+}
+
+function pctText(x, digits = 2) {
+  return `${x >= 0 ? "+" : ""}${(x * 100).toFixed(digits)}%`;
+}
+
+function holdingLabel(hours) {
+  return hours >= 24 && hours % 24 === 0 ? `${hours / 24} d` : `${hours} h`;
+}
+
+// Current hourly funding rate (+: longs pay shorts) and, for a trade, the funding
+// it would pay over the horizon's holding time, as % of notional (+: paid).
+function fundingCell(s) {
+  if (s.funding_rate === null || s.funding_rate === undefined) return "—";
+  // Two significant digits: a rate of a few millionths an hour is not "0.0000%".
+  const rate = s.funding_rate * 100;
+  let html = `${rate >= 0 ? "+" : ""}${rate === 0 ? "0.00" : rate.toPrecision(2)}%/h`;
+  if (s.funding_cost !== null && s.funding_cost !== undefined) {
+    const cls = s.funding_cost > 0 ? "rr-bad" : "rr-good";
+    const flag = s.funding_warning ? " ⚠" : "";
+    html +=
+      `<br><span class="${cls}" title="${(s.funding_warning || "").replace(/"/g, "&quot;")}">` +
+      `${pctText(s.funding_cost)}&nbsp;/&nbsp;${holdingLabel(s.funding_hours).replace(" ", "&nbsp;")}${flag}</span>`;
+  }
+  return html;
+}
+
+function fundingWarningHTML(s) {
+  if (!s.funding_warning) return "";
+  return `<br><strong class="warn">! Funding:</strong> <span class="warn">${s.funding_warning}</span>`;
 }
 
 function warnBadge(s) {
@@ -196,9 +239,10 @@ function renderTable(block) {
       <td>${fmt(s.entry_limit_stop)}</td>
       <td>${limitRrCell}</td>
       <td>${fmt(s.target)}</td>
-      <td>${scoreCell(s)}</td>
+      <td>${apgarCell(s)}</td>
       <td>${sizeCell(s)}</td>
-      <td class="reason">${s.reason}<br><strong>Value zone:</strong> ${(s.value_zone_status || "—").replace("_", " ")}${s.price_alert ? `<br><strong>⚠ Live price:</strong> ${s.price_alert}` : ""}${s.entry_order_plan ? `<br><strong>Order plan:</strong> ${s.entry_order_plan}` : ""}${(s.divergences || []).length ? `<br><strong>Divergences:</strong> ${s.divergences.join(", ")}` : ""}${warningsHTML(s)}${sizeWarningsHTML(s)}</td>`;
+      <td>${fundingCell(s)}</td>
+      <td class="reason">${s.reason}<br><strong>Value zone:</strong> ${(s.value_zone_status || "—").replace("_", " ")}${s.price_alert ? `<br><strong>⚠ Live price:</strong> ${s.price_alert}` : ""}${s.apgar ? `<br><strong>Trade Apgar ${s.apgar.total}/10${s.apgar.a_trade ? " (A-trade)" : ""}:</strong> ${apgarLines(s.apgar)}` : ""}${s.entry_order_plan ? `<br><strong>Order plan:</strong> ${s.entry_order_plan}` : ""}${(s.divergences || []).length ? `<br><strong>Divergences:</strong> ${s.divergences.join(", ")}` : ""}${warningsHTML(s)}${sizeWarningsHTML(s)}${fundingWarningHTML(s)}</td>`;
     tbody.appendChild(row);
   }
 }
@@ -237,6 +281,20 @@ function renderPositions(snapshot) {
   sub.textContent = snapshot.position_address
     ? `${positions.length} open · ${snapshot.position_address}${managed}`
     : managed.replace(" · ", "");
+
+  // A failed lookup hides positions for one refresh; their last known open risk
+  // still counts toward the 6% rule. Say so rather than show them as closed.
+  const unread = snapshot.unread_dexes || [];
+  const warn = document.getElementById("positions-warn");
+  warn.classList.toggle("hidden", unread.length === 0);
+  if (unread.length) {
+    const where = unread.map((d) => (d ? `dex '${d}'` : "the native clearinghouse")).join(", ");
+    const hidden = snapshot.hidden_positions || [];
+    warn.textContent =
+      `⚠ Positions could not be read on ${where} this refresh: ${hidden.length} position(s) ` +
+      `from the previous refresh still count $${fmt(snapshot.hidden_open_trade_risk ?? 0, 8)} ` +
+      `of open risk toward the 6% rule.`;
+  }
 
   const tbody = document.querySelector("#positions-table tbody");
   tbody.innerHTML = "";
@@ -483,8 +541,10 @@ function renderAll() {
     pickBanner.innerHTML =
       `★ Best ${block.label || state.horizon} trade — <strong>${best.asset}</strong> ` +
       `<span class="badge ${best.action}">${best.action.replace("_", " ")}</span> · ` +
-      `score ${Math.round(best.quality_score * 100)}/100 · ` +
-      `R:R ${best.reward_risk.toFixed(2)} · entry ${fmt(best.entry)} · stop ${fmt(best.stop)} · ` +
+      // A block carried over from an older snapshot may have no Apgar yet.
+      (best.apgar ? `Trade Apgar ${best.apgar.total}/10 · ` : "") +
+      (best.reward_risk != null ? `R:R ${best.reward_risk.toFixed(2)} · ` : "") +
+      `entry ${fmt(best.entry)} · stop ${fmt(best.stop)} · ` +
       `target ${fmt(best.target)}`;
   }
 

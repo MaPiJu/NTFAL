@@ -11,17 +11,16 @@ from strategy.triple_screen import (
     EMA_FAST,
     EMA_SLOW,
     Signal,
+    TradeApgar,
     _divergence_for_indicator,
     _long_levels,
     _short_levels,
     average_adverse_noise,
     average_penetration,
     channel,
-    compute_quality_score,
     data_warnings,
     detect_divergences,
     evaluate_asset,
-    impulse_confirmation,
     projected_ema,
     round_to_tick,
     safezone_initial_stop,
@@ -29,6 +28,7 @@ from strategy.triple_screen import (
     select_best,
     tick_size,
     tide_trend,
+    trade_apgar,
     value_zone_extension,
     value_zone_status,
 )
@@ -510,17 +510,108 @@ def test_channel_lower_band_stays_positive_after_a_crash():
     assert lower < e26 <= upper
 
 
+# A new listing that pumped (one weekly high at 3.5x its EMA26) then crashed:
+# its symmetric channel coefficient passes 100%.
+PUMPED = [1.0, 1.05, 3.0, 2.6, 2.2, 1.9, 1.65, 1.45, 1.3, 1.18, 1.08, 1.0, 0.93, 0.87, 0.82]
+WEEKLY_PUMP_CRASH = make_ohlcv(
+    PUMPED,
+    lows=[c * 0.98 for c in PUMPED],
+    highs=[3.5 if i == 2 else c * 1.02 for i, c in enumerate(PUMPED)],
+    freq="W",
+)
+
+
+def test_a_channel_past_100_percent_never_gives_a_negative_target():
+    # One coefficient sets both lines, so highs more than doubling their EMA push
+    # k past 1: the lower line is then no price at all. It is floored at zero and
+    # a short gets no channel target (hence no R:R, no size, no Apgar credit)
+    # rather than a negative target and a huge fake reward:risk.
+    _upper, lower = channel(WEEKLY_PUMP_CRASH)
+    assert lower == 0.0
+
+    closes = [1.2 - 0.01 * i for i in range(40)]
+    closes += [closes[-1] + 0.03, closes[-1] + 0.01]
+    closes += [closes[-1] - 0.01 * i for i in range(1, 12)]
+    closes.append(closes[-1] + 0.01)  # a mild rally to sell
+    daily = make_ohlcv(closes, lows=[c - 0.005 for c in closes], highs=[c + 0.005 for c in closes])
+
+    sig = evaluate_asset("X", WEEKLY_PUMP_CRASH, daily)
+
+    assert sig.action == "short"
+    assert sig.target is None and sig.reward_risk is None and not sig.rr_ok
+    assert sig.apgar is not None and sig.apgar.lines[3].score == 0
+
+
+def test_a_short_without_a_target_keeps_its_limit_stop():
+    # No channel target means no reward:risk — but the sell-limit's protective
+    # stop doesn't depend on the target, and an order shown without its stop is
+    # worse than no order at all.
+    closes = [1.3]
+    for _ in range(8):  # a sawtooth downtrend: rallies that poke above the EMA13
+        closes += [closes[-1] - 0.008 * (i + 1) for i in range(4)]
+        closes.append(closes[-1] + 0.02)
+    closes += [closes[-1] - 0.008 * (i + 1) for i in range(4)]
+    closes.append(closes[-1] + 0.02)
+    daily = make_ohlcv(closes, lows=[c - 0.004 for c in closes], highs=[c + 0.004 for c in closes])
+
+    sig = evaluate_asset("X", WEEKLY_PUMP_CRASH, daily)
+
+    assert sig.action == "short" and sig.target is None and sig.entry_limit is not None
+    assert sig.entry_limit_stop == pytest.approx(
+        round_to_tick(safezone_stop_for_limit(daily, "short", sig.entry_limit), "up")
+    )
+    assert sig.reward_risk_limit is None
+
+
 def test_channel_backbone_is_slow_ema26():
-    # Elder draws the channel parallel to the SLOW EMA26, not the fast EMA13. In a
-    # clean uptrend the lows stay above the slow EMA, so the lower band collapses
-    # onto the backbone — pinning it to EMA26.
+    # Elder draws the channel parallel to the SLOW EMA26, not the fast EMA13: the
+    # symmetrical channel is centered on it.
     weekly = make_ohlcv([100.0 + 2.0 * i for i in range(40)], freq="W")
-    _upper, lower = channel(weekly)
+    upper, lower = channel(weekly)
     e13 = float(ema(weekly["close"], EMA_FAST).iloc[-1])
     e26 = float(ema(weekly["close"], EMA_SLOW).iloc[-1])
 
-    assert lower == pytest.approx(e26)
-    assert lower != pytest.approx(e13)
+    assert (upper + lower) / 2 == pytest.approx(e26)
+    assert (upper + lower) / 2 != pytest.approx(e13)
+
+
+def test_channel_is_one_symmetric_coefficient_around_the_slow_ema():
+    # Elder (p.167): "Upper Channel Line = EMA + Channel Coefficient · EMA; Lower
+    # Channel Line = EMA - Channel Coefficient · EMA" — one coefficient, adjusted
+    # "until a channel contains approximately 95 percent of all price data for
+    # the past 100 bars". Highs poke far above a flat EMA26 at 100, lows barely
+    # below it: one coefficient still sets both lines.
+    n = 100
+    highs = [102.0 + (i % 10) * 0.3 for i in range(n)]  # +2.0% .. +4.7%, 10 bars each
+    lows = [99.5] * n
+    weekly = make_ohlcv([100.0] * n, lows=lows, highs=highs, freq="W")
+
+    upper, lower = channel(weekly)
+
+    assert upper - 100.0 == pytest.approx(100.0 - lower)
+    # The smallest such coefficient: the top ten bars all poke out by 4.7%, and
+    # keeping 95 of 100 inside needs some of them, hence all of them.
+    assert upper == pytest.approx(104.7)
+
+
+def test_channel_fits_the_last_100_bars_or_all_there_is():
+    # Elder (p.79): a channel "should contain approximately 95% of all prices that
+    # occurred during the past 100 bars". 11 spikes sit in the last 100 bars but
+    # none in the last 26: more than the 5% budget, so the lines must reach them.
+    assert StrategyParams().channel_lookback_bars == 100
+    n = 130
+    highs, lows = [101.0] * n, [99.0] * n
+    for i in range(n - 100, n - 26, 7):
+        highs[i] = 110.0
+    assert sum(h == 110.0 for h in highs) == 11
+    weekly = make_ohlcv([100.0] * n, lows=lows, highs=highs, freq="W")
+
+    upper, lower = channel(weekly)
+    assert (upper, lower) == (pytest.approx(110.0), pytest.approx(90.0))
+
+    # Less history than that: every bar there is.
+    short = make_ohlcv([100.0] * 40, lows=[99.0] * 40, highs=[101.0] * 39 + [103.0], freq="W")
+    assert channel(short)[0] == pytest.approx(101.0)  # 1 bar of 40 left out
 
 
 def test_channel_widens_with_containment():
@@ -553,59 +644,118 @@ def test_channel_contains_about_95_percent_of_bars():
     assert 0.90 <= inside < 1.0  # Elder's 90-95%, with only the extremes outside
 
 
-def test_quality_score_rewards_better_reward_risk():
-    base = dict(impulse_agreement=1.0, tide_strength=0.03, pullback_depth=1.0)
-    better = compute_quality_score(reward_risk=3.0, **base)
-    worse = compute_quality_score(reward_risk=2.0, **base)
-    assert 0.0 <= worse < better <= 1.0
+def _scores(apgar: TradeApgar) -> list[int]:
+    return [line.score for line in apgar.lines]
 
 
-def test_impulse_confirmation_counts_agreeing_screens():
-    assert impulse_confirmation("long", "green", "green") == 1.0
-    assert impulse_confirmation("long", "green", "blue") == 0.5
-    assert impulse_confirmation("long", "blue", "blue") == 0.0
-    assert impulse_confirmation("short", "red", "red") == 1.0
-    assert impulse_confirmation("short", "red", "blue") == 0.5
+def test_trade_apgar_scores_a_long_pullback_to_value():
+    # Elder (p.238-242): five questions, each scored 0/1/2, and "each strategy
+    # demands its own Apgar". For this system's long: tide Impulse green 2 / blue 1
+    # / red 0; wave Impulse blue 2 / green 1 / red 0; wave close below value 2 / in
+    # the zone 1 / above 0; R:R >= 2 -> 2, 1-2 -> 1, < 1 -> 0; wave divergence
+    # bullish 2 / none 1 / bearish 0.
+    best = trade_apgar("long", "green", "blue", "below", 2.5, ["bullish Force Index divergence"])
+    assert _scores(best) == [2, 2, 2, 2, 2] and best.total == 10 and best.a_trade
+    assert [line.answer for line in best.lines] == [
+        "green",
+        "blue",
+        "below value",
+        "2.50",
+        "bullish",
+    ]
+    middling = trade_apgar("long", "blue", "green", "inside", 1.5, [])
+    assert _scores(middling) == [1, 1, 1, 1, 1] and middling.total == 5
+    worst = trade_apgar("long", "red", "red", "above", 0.8, ["bearish MACD-Histogram divergence"])
+    assert _scores(worst) == [0, 0, 0, 0, 0]
+    # R:R edges: exactly 2 earns 2, exactly 1 earns 1; no R:R at all earns 0.
+    assert _scores(trade_apgar("long", "green", "blue", "below", 2.0, []))[3] == 2
+    assert _scores(trade_apgar("long", "green", "blue", "below", 1.0, []))[3] == 1
+    assert _scores(trade_apgar("long", "green", "blue", "below", None, []))[3] == 0
 
 
-def _mk_signal(asset: str, action: str, rr: float | None, score: float | None, rr_ok: bool):
+def test_trade_apgar_mirrors_for_a_short():
+    best = trade_apgar("short", "red", "blue", "above", 3.0, ["bearish Force Index divergence"])
+    assert _scores(best) == [2, 2, 2, 2, 2]
+    assert best.lines[2].answer == "above value"
+    assert _scores(trade_apgar("short", "blue", "red", "inside", 1.0, [])) == [1, 1, 1, 1, 1]
+    worst = trade_apgar(
+        "short", "green", "green", "below", None, ["bullish MACD-Histogram divergence"]
+    )
+    assert _scores(worst) == [0, 0, 0, 0, 0]
+
+
+def test_an_a_trade_needs_seven_points_and_no_zero_line():
+    # Elder (p.239): "only healthy ideas whose score is 7 or higher, and not a
+    # single line rated zero".
+    seven = trade_apgar("long", "green", "green", "inside", 2.5, [])  # 2+1+1+2+1
+    assert seven.total == 7 and seven.a_trade
+    six = trade_apgar("long", "blue", "green", "inside", 2.5, [])  # 1+1+1+2+1
+    assert six.total == 6 and not six.a_trade
+    # 8 points, but an adverse divergence scores a zero: not an A-trade.
+    zero = trade_apgar("long", "green", "blue", "below", 2.5, ["bearish Force Index divergence"])
+    assert zero.total == 8 and not zero.a_trade
+    # A divergence both ways is still an adverse one.
+    mixed = ["bullish Force Index divergence", "bearish MACD-Histogram divergence"]
+    assert _scores(trade_apgar("long", "green", "blue", "below", 2.5, mixed))[4] == 0
+
+
+def _mk_signal(asset: str, action: str, rr: float | None, apgar: TradeApgar | None) -> Signal:
     return Signal(
         asset=asset,
         action=action,
         reason="",
         tide_trend="up",
         tide_impulse="green",
-        wave_impulse="green",
+        wave_impulse="blue",
         force_index_2=-1.0,
         entry=10.0,
         entry_limit=None,
         stop=9.0,
         target=13.0,
         reward_risk=rr,
-        rr_ok=rr_ok,
-        tide_strength=0.02,
-        pullback_quality=0.5,
-        quality_score=score,
+        rr_ok=rr is not None and rr >= 2.0,
         market_regime="trending",
         entry_impulse=None,
         divergences=[],
         value_zone_status="in_value",
         entry_order_plan=None,
+        apgar=apgar,
     )
 
 
-def test_select_best_picks_highest_quality_tradable_above_floor():
-    a = _mk_signal("A", "long", 2.5, 0.60, rr_ok=True)
-    b = _mk_signal("B", "long", 3.5, 0.90, rr_ok=True)  # best
-    c = _mk_signal("C", "stand_aside", None, None, rr_ok=False)  # not tradable
-    d = _mk_signal("D", "long", 1.5, 0.95, rr_ok=False)  # below the 2:1 floor
-    assert select_best([a, b, c, d]).asset == "B"
+def _long(asset: str, rr: float, zone: str = "below", divs: list[str] | None = None) -> Signal:
+    return _mk_signal(asset, "long", rr, trade_apgar("long", "green", "blue", zone, rr, divs or []))
 
 
-def test_select_best_returns_none_when_nothing_qualifies():
-    only_aside = _mk_signal("A", "stand_aside", None, None, rr_ok=False)
-    sub_floor = _mk_signal("B", "long", 1.2, 0.9, rr_ok=False)
-    assert select_best([only_aside, sub_floor]) is None
+def test_select_best_picks_the_highest_apgar_a_trade_tie_broken_by_reward_risk():
+    bullish = ["bullish Force Index divergence"]
+    eight = _long("A", 2.5, zone="inside")  # 2+2+1+2+1 = 8
+    ten_low_rr = _long("B", 2.2, divs=bullish)  # 10
+    ten_high_rr = _long("C", 3.0, divs=bullish)  # 10, better R:R -> the pick
+    zero_line = _long("D", 4.0, divs=["bearish Force Index divergence"])  # 8, has a zero
+    aside = _mk_signal("E", "stand_aside", None, None)
+    assert select_best([eight, ten_low_rr, ten_high_rr, zero_line, aside]).asset == "C"
+    assert select_best([eight, zero_line, aside]).asset == "A"
+    # The R:R line grades the reward: a 1.5:1 A-trade (9 points) is eligible.
+    assert select_best([_long("F", 1.5, divs=bullish)]).asset == "F"
+
+
+def test_select_best_returns_none_without_an_a_trade():
+    six = _mk_signal("A", "long", 2.5, trade_apgar("long", "blue", "green", "inside", 2.5, []))
+    zero_line = _long("B", 4.0, divs=["bearish Force Index divergence"])
+    aside = _mk_signal("C", "stand_aside", None, None)
+    assert select_best([six, zero_line, aside]) is None
+
+
+def test_signal_carries_its_trade_apgar():
+    sig = evaluate_asset("BTC", WEEKLY_UP, DAILY_LONG)
+    assert sig.action == "long"
+    assert sig.apgar is not None and len(sig.apgar.lines) == 5
+    assert sig.apgar.total == sum(_scores(sig.apgar))
+    assert sig.apgar.lines[3].score == (2 if sig.reward_risk >= 2 else 1)
+    assert (
+        evaluate_asset("BTC", WEEKLY_UP, make_ohlcv([100.0 + i for i in range(60)])).apgar is None
+    )
 
 
 def test_average_penetration_and_projection():

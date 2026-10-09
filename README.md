@@ -43,6 +43,35 @@ Their common names differ from the Hyperliquid tickers:
 | US500 — S&P 500 | `xyz:SP500` |
 | US100 — Nasdaq-100 | `xyz:XYZ100` |
 
+### Trading sessions (weekends)
+
+Hyperliquid prints these perps 24/7, but the markets behind them close for the weekend:
+from Friday 17:00 to Sunday 18:00 New York time — trade.xyz pins its external price over
+the CME's weekend, i.e. Friday 21:00 → Sunday 22:00 UTC in summer time and 22:00 → 23:00
+UTC in winter — their bars carry a fraction of the usual volume and range, and they would
+flatten every EMA. Elder counts trading days (five a week), so the
+`xyz` dex has a weekend calendar (`[sessions.xyz]` in `config.toml`):
+
+- bars lying **entirely** inside the closure are dropped before any indicator — Saturday's
+  daily bar, about 26% of 4h bars and 29% of 1h/15m/5m bars; a bar straddling the close
+  or the reopening (Friday's daily bar, the Sunday reopening hour) is kept; the window is
+  set in New York time (`timezone = "America/New_York"`), so it follows daylight saving;
+- the **weekly tide is rebuilt from the Monday–Friday daily bars** (one bar per week, open
+  Monday, close Friday): Hyperliquid's own 1w candles open on **Thursday** (epoch
+  alignment) and carry the weekend;
+- weekday holidays are not in the calendar — the near-frozen-market flag covers them;
+- on a weekend the signal is the one of the last session bar, until the reopening.
+
+Measured on a cache of the six perps taken 2026-10-08 13:07 UTC (a Thursday), same code
+and same bars with and without the calendar: 9 of the 18 current signals change a level,
+an Impulse or the R:R (e.g. `xyz:GOLD` swing wave Impulse red → blue, `xyz:SP500` swing tide
+Impulse green → blue, `xyz:CL` micro R:R 0.36 → 1.05), none changes its action. Replaying
+every wave-bar close (swing and scalp: last 200 wave bars; micro: last 800), the action
+differs at 9% / 3% / 1% of weekday decisions (swing / scalp / micro) and the tide at
+20% / 9% / 2%; on weekend decision times the action differs at 7% / 38% / 49%, since
+without the calendar the frozen weekend bars drive the signal. A dex without a
+`[sessions.<dex>]` block — the native crypto perps — is left 24/7.
+
 ## How it works
 
 - **First screen (tide):** strategic bias from the slope of the tide EMA13, with tiny
@@ -66,16 +95,21 @@ Their common names differ from the Hyperliquid tickers:
   up, the target toward the entry. Reward:risk and the size come from the rounded levels.
 - **Impulse censorship (applied last):** any **red** Impulse on the **tide or wave**
   forbids longs; any **green** forbids shorts.
-- **Best-trade ranking:** every validated setup gets a 0–100 quality score blending
-  Elder's selection criteria — reward:risk (dominant; 2:1 floor, 3:1 = full credit),
-  Impulse agreement across both screens, tide strength, and wave pullback depth.
-  The highest-scoring setup clearing the 2:1 floor is flagged as that horizon's **best
-  trade** (`★`); the table is sorted best-first. The 6% guard suppresses any pick.
+- **Best-trade ranking — Trade Apgar:** every validated setup is scored with Elder's
+  Trade Apgar (p.238–242), five questions at 0/1/2 written for this "pullback to value"
+  system (for a long; mirrored for a short): tide Impulse (green 2, blue 1, red 0), wave
+  Impulse (blue 2, green 1, red 0), wave close vs value (below 2, in the zone 1, above 0),
+  reward:risk (≥ 2 → 2, ≥ 1 → 1, below → 0), wave divergence (bullish 2, none 1,
+  bearish 0). An **A-trade** totals 7+ with no zero; the A-trade with the best Apgar
+  (ties: better R:R) is that horizon's **best trade** (`★`), and there is none without
+  an A-trade. The table is sorted best-first and shows the five lines. The 6% guard
+  suppresses any pick.
 - **Divergences:** recent bullish/bearish divergences between price and MACD-Histogram /
   13-EMA Force Index are surfaced as Elder warnings.
 - **Data-quality flags:** a signal says when its own *inputs* are weak — a tide series too
-  short for a converged EMA26, or a near-frozen market (a tradfi perp over the weekend
-  still prints bars on ~5–10% of normal volume). Flags never change an action.
+  short for a converged EMA26, or a near-frozen market (a tradfi perp on a weekday
+  holiday still prints bars on ~5–10% of normal volume; weekends are dropped by the
+  session calendar above). Flags never change an action.
 - **Risk:** 2% Rule (Iron Triangle sizing, default 1% risk per trade, hard cap 2%, on the
   equity of the first day of the month) and
   the 6% monthly guard that blocks all new entries once monthly losses + open risk reach
@@ -84,6 +118,11 @@ Their common names differ from the Hyperliquid tickers:
   `open_trade_risk` field is only extra risk for positions the scanner cannot see.
   A size the exchange would refuse — a notional above the perp's max leverage × equity,
   or under Hyperliquid's $10 minimum order — is flagged (`⚠` on the size), never capped.
+- **Funding:** each signal shows the perp's current hourly funding rate (public
+  `metaAndAssetCtxs`; positive = longs pay shorts) and what the trade would pay over the
+  horizon's `holding_hours` (swing 14 d, scalp 2 d, micro 4 h), as % of notional
+  (positive = paid). It is flagged when it exceeds half the trade's risk — on 2026-10-08
+  a 14-day `xyz:BRENTOIL` short paid ≈ 10.4% of notional — but it never changes an action.
 - **Journal:** each refresh can append a compact JSONL entry with the per-horizon top
   picks, signal levels/reasons, open-position verdicts, stops and open risk.
 - **SafeZone stops:** protective and trailing stops use Elder-style adverse bar noise
@@ -136,6 +175,10 @@ entered it. For each one, only Elder's own exit logic applies (no new indicators
   already trades beyond value, the tide channel → **take profits**.
 - **Trailing stop (SafeZone).** A suggested stop tucked behind the recent wave extreme by
   the average adverse noise, ratcheted to at least break-even once the trade is in profit.
+  It never moves back (Elder: "move your stop only in the direction of your trade"): the
+  snapshot remembers the last suggestion per position (asset, side, entry price), and the
+  next refresh can only tighten it; a new entry price starts fresh, and a position hidden
+  for a refresh by a failed lookup keeps its remembered stop.
 
 Verdict precedence is **exit > take profits > hold**. The result appears as an "Open
 positions" table at the top of the dashboard and as a panel on the held asset's card, and
@@ -192,7 +235,10 @@ uv run python run.py --serve --watch    # …and keep every horizon fresh
 `--watch` starts one `apscheduler` job per horizon at its own `refresh_seconds`
 (swing daily, scalp hourly, micro every 5 minutes). A partial refresh rewrites only that
 horizon's block of the snapshot, so the swing block keeps its own timestamp. Without
-`--serve`, `--watch` just keeps the snapshot up to date in the foreground.
+`--serve`, `--watch` just keeps the snapshot up to date in the foreground. The watch jobs
+run one at a time and the snapshot is written atomically; still, run **one refreshing
+process at a time** (not a one-off `run.py` alongside a running `--watch`): each refresh
+rewrites the whole snapshot, including the remembered stops of open positions.
 
 The dashboard shows **one tab per horizon** (remembered across reloads), each with its
 chain (`4h / 1h / 15m`) and how long ago it was refreshed. Per tab: the signals table
@@ -219,13 +265,13 @@ Edit `config.toml`:
   `"swing"`).
 - `[[scanner.horizons]]` — one block per timeframe chain: `name`, `label`, the three
   intervals (`tide`, `wave`, `entry`), how much history to keep (`lookback_*`, in bars),
-  `refresh_seconds`, and `min_tide_bars` (below which the tide is flagged as
-  not-yet-converged). Any Hyperliquid candle interval works: `1m`…`1w`.
-- `[strategy]` — tune the Elder thresholds and ranking weights without editing code:
+  `refresh_seconds`, `min_tide_bars` (below which the tide is flagged as
+  not-yet-converged) and `holding_hours` (typical holding time, for the funding-cost
+  estimate; omit it for no estimate). Any Hyperliquid candle interval works: `1m`…`1w`.
+- `[strategy]` — tune the Elder thresholds without editing code:
   flat tide-slope cutoff, EMA-penetration/channel/divergence lookbacks, SafeZone
-  lookback/factors, minimum R:R,
-  "excellent" R:R, tide-strength scale, Force Index pullback scale, score weights, and
-  the low-volume data-quality thresholds. **Every lookback is a count of bars** on the
+  lookback/factors, minimum R:R (also the Apgar's full-marks R:R), and the low-volume
+  data-quality thresholds. **Every lookback is a count of bars** on the
   relevant screen, so the same numbers carry across horizons. Any key can be overridden
   for one horizon with a `[scanner.horizons.strategy]` sub-block.
 - `risk.equity` — current account equity (shown in the header, and the margin behind

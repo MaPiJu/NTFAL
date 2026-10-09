@@ -1,9 +1,11 @@
 """Read-only client for Hyperliquid's public `info` endpoint.
 
 Hard constraint (see CLAUDE.md): this module — and the whole project — only
-POSTs *public* info requests: `meta`, `candleSnapshot`, and `clearinghouseState`
-(open positions for a public address — a read-only account lookup, like a block
-explorer). There is no wallet, no private key, no signing, no order path anywhere.
+POSTs *public* info requests: `meta`, `metaAndAssetCtxs` (the same universe plus
+each perp's current market context — read here for the funding rate),
+`candleSnapshot`, and `clearinghouseState` (open positions for a public address —
+a read-only account lookup, like a block explorer). There is no wallet, no
+private key, no signing, no order path anywhere.
 """
 
 from __future__ import annotations
@@ -186,6 +188,34 @@ class HyperliquidClient:
             if not entry.get("isDelisted", False)
         }
 
+    def funding_rates(self, dex: str = "") -> dict[str, float]:
+        """Current funding rate of every perp of a dex, from `metaAndAssetCtxs`.
+
+        Each rate is HOURLY, as a fraction of the position's notional: positive,
+        longs pay shorts; negative, shorts pay longs. The response pairs the
+        `meta` universe with one context per perp, matched by position.
+        """
+        payload: dict[str, Any] = {"type": "metaAndAssetCtxs"}
+        if dex:
+            payload["dex"] = dex
+        data: Any = None
+        try:
+            # A non-JSON body (a maintenance page served with a 200) is a
+            # ValueError like any other malformed payload.
+            data = self._info(payload)
+            meta, ctxs = data
+            universe = meta["universe"]
+            return {
+                entry["name"]: float(ctx["funding"])
+                for entry, ctx in zip(universe, ctxs, strict=True)
+                if ctx.get("funding") is not None
+            }
+        except (TypeError, KeyError, ValueError, AttributeError) as exc:
+            # zip(strict=True) raises ValueError when the two lists differ in length.
+            raise HyperliquidError(
+                f"unexpected metaAndAssetCtxs payload: {json.dumps(data)[:200]}"
+            ) from exc
+
     # -- account (read-only) ------------------------------------------------
 
     def clearinghouse_state(self, address: str, dex: str = "") -> dict[str, Any]:
@@ -204,7 +234,10 @@ class HyperliquidClient:
         payload: dict[str, Any] = {"type": "clearinghouseState", "user": address}
         if dex:
             payload["dex"] = dex
-        state = self._info(payload)
+        try:
+            state = self._info(payload)
+        except ValueError as exc:  # a non-JSON body (a maintenance page with a 200)
+            raise HyperliquidError(f"unexpected clearinghouseState payload for {address}") from exc
         if not isinstance(state, dict):
             raise HyperliquidError(f"unexpected clearinghouseState payload for {address}")
         return state

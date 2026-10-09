@@ -197,6 +197,60 @@ def test_pnl_sign_by_side():
     assert short.return_pct_elder == pytest.approx(1.0 - 159.0 / 120.0)
 
 
+@pytest.mark.parametrize("side", ["long", "short"])
+def test_suggested_stop_never_moves_against_the_trade(side):
+    # Elder (p.224): "Move your stop only in the direction of your trade". Given
+    # the last suggestion, a new one may tighten (long: up, short: down) but never
+    # give the trade "more room".
+    daily = make_ohlcv([100.0 + i for i in range(60)])
+    weekly = WEEKLY_UP if side == "long" else WEEKLY_DOWN
+    pos = OpenPosition("BTC", side, entry=150.0, size=1.0)
+    fresh = assess_position(pos, weekly, daily).suggested_stop
+    tighter = fresh + 3.0 if side == "long" else fresh - 3.0
+    looser = fresh - 3.0 if side == "long" else fresh + 3.0
+
+    held = assess_position(pos, weekly, daily, previous_stop=tighter)
+    assert held.suggested_stop == tighter  # the new level would move it back
+    assert any(f"{tighter:.6g}" in r for r in held.reasons) or held.verdict != "hold"
+    assert assess_position(pos, weekly, daily, previous_stop=looser).suggested_stop == fresh
+
+
+@pytest.mark.parametrize("side", ["long", "short"])
+def test_a_remembered_stop_the_close_went_through_was_hit(side):
+    # The remembered stop is kept (it never moves back), but once the close is
+    # through it the stop was hit: exit — never "hold and trail" to a level on the
+    # wrong side of the market.
+    daily = make_ohlcv([100.0 + i for i in range(60)])  # close 159
+    weekly = WEEKLY_UP if side == "long" else WEEKLY_DOWN
+    entry, crossed = (165.0, 162.0) if side == "long" else (150.0, 156.0)
+    pos = OpenPosition("BTC", side, entry=entry, size=2.0)
+
+    tm = assess_position(pos, weekly, daily, previous_stop=crossed)
+
+    assert tm.suggested_stop == crossed
+    assert tm.stop_hit
+    assert tm.verdict == "exit"
+    assert any("stop was hit" in r for r in tm.reasons)
+    assert not assess_position(pos, weekly, daily).stop_hit  # a fresh stop is never crossed
+
+
+def test_a_held_short_has_no_target_when_the_channel_has_no_lower_line():
+    # Same pump-then-crash tide: its lower channel line is floored at zero, which
+    # is no target for a short held below value.
+    pumped = [1.0, 1.05, 3.0, 2.6, 2.2, 1.9, 1.65, 1.45, 1.3, 1.18, 1.08, 1.0, 0.93, 0.87, 0.82]
+    weekly = make_ohlcv(
+        pumped,
+        lows=[c * 0.98 for c in pumped],
+        highs=[3.5 if i == 2 else c * 1.02 for i, c in enumerate(pumped)],
+        freq="W",
+    )
+    daily = make_ohlcv([1.2 - 0.01 * i for i in range(60)])
+
+    tm = assess_position(OpenPosition("X", "short", entry=0.80, size=1.0), weekly, daily)
+
+    assert tm.target is None and not tm.target_reached
+
+
 def test_safezone_stop_ratchets_to_breakeven_in_profit():
     daily = make_ohlcv([100.0 + i for i in range(60)])  # recent lows ~156
     # Entry just under the current price but ABOVE the SafeZone level, so the

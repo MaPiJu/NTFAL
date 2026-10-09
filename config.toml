@@ -29,6 +29,9 @@ positions_horizon = "swing"
 # often the horizon is recomputed (a weekly tide doesn't move every 5 minutes).
 # `min_tide_bars`: below this much tide history the EMA26 is not converged, so
 # the tide and its Impulse are flagged unreliable rather than silently trusted.
+# `holding_hours`: a typical holding time for a trade on this chain. The current
+# hourly funding rate x this many hours = the estimated funding cost shown with
+# each signal (flagged when it exceeds half the trade's risk; never a veto).
 
 [[scanner.horizons]]
 name = "swing"
@@ -41,6 +44,7 @@ lookback_wave = 500
 lookback_entry = 1000
 refresh_seconds = 86400   # once a day
 min_tide_bars = 60
+holding_hours = 336   # 14 days
 
 [[scanner.horizons]]
 name = "scalp"
@@ -53,6 +57,7 @@ lookback_wave = 2000
 lookback_entry = 2000
 refresh_seconds = 3600    # hourly
 min_tide_bars = 60
+holding_hours = 48    # 2 days
 
 [scanner.horizons.strategy]
 # 0.1%/bar x sqrt(4h / 1w): see flat_trend_slope_pct under [strategy].
@@ -69,13 +74,14 @@ lookback_wave = 2000
 lookback_entry = 2000
 refresh_seconds = 300     # every 5 minutes
 min_tide_bars = 60
+holding_hours = 4
 
 [scanner.horizons.strategy]
 # 0.1%/bar x sqrt(1h / 1w): see flat_trend_slope_pct under [strategy].
 flat_trend_slope_pct = 0.00008
 
 [strategy]
-# Strategy thresholds/weights. Defaults mirror the Elder scanner's built-in
+# Strategy thresholds. Defaults mirror the Elder scanner's built-in
 # behavior; tune here instead of editing code. Every lookback is a count of
 # BARS on the relevant screen's timeframe, so the same numbers carry across
 # horizons. Any key here may be overridden per horizon with a
@@ -94,31 +100,27 @@ penetration_lookback_bars = 35
 # when FI(2) prints a NEW multi-period low (longs) / high (shorts) — the move is
 # accelerating, not a pullback. ~3-4 weeks of wave bars.
 force_index_extreme_lookback_bars = 25
-channel_lookback_bars = 26
-# Elder fits the channel (around the slow EMA26) so it contains ~95% of the last
-# `channel_lookback_bars` bars (p.167). The TIDE channel is the fallback profit
-# target; the WAVE channel is the chasing veto (p.168: "never buy above the upper
-# channel line or sell short below the lower channel line").
+# Elder's symmetrical channel (p.167): EMA26 x (1 +/- k), with the smallest k
+# that keeps ~95% of the past 100 bars inside (p.79; all the history there is
+# when shorter — the swing tide has 31-53 weekly bars). The TIDE channel is the
+# fallback profit target; the WAVE channel is the chasing veto (p.168: "never buy
+# above the upper channel line or sell short below the lower channel line").
+channel_lookback_bars = 100
 channel_containment = 0.95
+# Elder's 2:1 floor: sub-2:1 setups are flagged, and the Trade Apgar gives its
+# reward:risk line full marks (2) from here, 1 from 1:1, 0 below.
 min_reward_risk = 2.0
 divergence_lookback = 60
 # Elder/Lovvorn (p.88): only flag a divergence when its two extremes are this
 # many bars apart (most tradable at 20-40; the closer to 20 the better).
 divergence_min_separation = 20
 divergence_max_separation = 40
-rr_excellent = 3.0
-strong_tide_slope = 0.03
-fi_scale_lookback = 20
 # Elder SafeZone-style stops: average adverse noise over the lookback of wave
 # bars, multiplied by the factor, behind the recent wave extreme. Shorts use a
 # wider factor than longs (Elder p.220: >=3 vs >=2 — shorting near highs is noisier).
 safezone_lookback_bars = 20
 safezone_factor_long = 2.0
 safezone_factor_short = 3.0
-score_reward_risk_weight = 0.40
-score_impulse_weight = 0.25
-score_tide_weight = 0.20
-score_pullback_weight = 0.15
 # Flag a horizon's signal when the recent wave bars carry far less volume than
 # usual — a tradfi perp over the weekend is a near-frozen oracle, not a market.
 # 0.25 = warn when the last few bars average under 25% of the recent median.
@@ -127,6 +129,21 @@ low_volume_bars = 6
 # "Normal" volume = median of this many wave bars. Must span well over a week of
 # wave bars (1000 x 15m ~ 10 days) so a ~49h weekend can't become the baseline.
 low_volume_baseline_bars = 1000
+
+[sessions.xyz]
+# The tradfi perps' underlying markets (gold, oil, indices…) close for the
+# weekend, while Hyperliquid keeps printing near-frozen bars. Bars that sit
+# entirely inside this window are dropped before any indicator, and a 1w screen
+# is rebuilt from the Monday-Friday daily bars (Hyperliquid's own weekly candles
+# open on Thursday and carry the weekend). Weekday holidays are left to the
+# near-frozen data warning. A dex without a [sessions.<dex>] block trades 24/7.
+# trade.xyz pins its external price from Friday 17:00 to Sunday 18:00 New York
+# time (the CME's weekend). Stated in New York time, the window follows daylight
+# saving: Fri 21:00 -> Sun 22:00 UTC in summer, Fri 22:00 -> Sun 23:00 UTC in
+# winter. `timezone` is an IANA name; without it the times are UTC.
+timezone = "America/New_York"
+weekend_close = "Fri 17:00"
+weekend_open = "Sun 18:00"
 
 [risk]
 # Current account equity in USD (shown in the dashboard header).

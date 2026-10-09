@@ -17,7 +17,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
+import os
 import sys
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -31,9 +34,38 @@ from config import Config, load_config
 from data.hyperliquid import HyperliquidClient
 from journal import append_journal_entry
 
+# --watch runs one job per horizon on a thread pool, and their cadences line up
+# (every swing refresh fires with a scalp and a micro one). A refresh loads,
+# recomputes and rewrites the whole snapshot, so two at once would let the last
+# writer put back what it loaded — the stop memory included. One at a time.
+_REFRESH_LOCK = threading.Lock()
+
 
 def num(x: float | None) -> str:
     return f"{x:,.6g}" if x is not None else "—"
+
+
+def pct(x: float | None, digits: int = 2) -> str:
+    return f"{x:+.{digits}%}" if x is not None else "—"
+
+
+def rate_pct(x: float | None) -> str:
+    """An hourly funding rate in %, to two significant digits: rates of a few
+    millionths an hour must not print as +0.0000%."""
+    if x is None:
+        return "—"
+    pct_value = x * 100
+    if pct_value == 0:
+        return "+0.00%"
+    decimals = max(2, 1 - math.floor(math.log10(abs(pct_value))))
+    return f"{pct_value:+.{decimals}f}%"
+
+
+def apgar_detail(apgar: dict[str, Any]) -> str:
+    """The Trade Apgar's five lines: question, observed answer, score."""
+    lines = " · ".join(f"{x['question']} {x['answer']} {x['score']}" for x in apgar["lines"])
+    verdict = "A-trade" if apgar["a_trade"] else "not an A-trade (needs >= 7 and no zero)"
+    return f"apgar {apgar['total']}/10: {lines} — {verdict}"
 
 
 def print_horizon_table(name: str, block: dict[str, Any]) -> None:
@@ -45,23 +77,41 @@ def print_horizon_table(name: str, block: dict[str, Any]) -> None:
 
     best = next((s for s in block["signals"] if s.get("is_top_pick")), None)
     if best is not None:
+        # A block a partial refresh carried over from an older snapshot may have
+        # no Apgar yet: print what is there.
+        apgar = best.get("apgar")
+        rr = best.get("reward_risk")
+        details = [
+            f"Apgar {apgar['total']}/10" if apgar else None,
+            f"R:R {rr:.2f}" if rr is not None else None,
+            f"entry {num(best['entry'])}, stop {num(best['stop'])}, target {num(best['target'])}",
+        ]
         print(
             f"★ BEST {name.upper()} TRADE: {best['asset']} {best['action']} "
-            f"(score {best['quality_score'] * 100:.0f}/100, R:R {best['reward_risk']:.2f}, "
-            f"entry {best['entry']:,.6g}, stop {best['stop']:,.6g}, target {best['target']:,.6g})"
+            f"({', '.join(d for d in details if d)})"
         )
 
-    # Best trade first: tradable setups by Elder score (desc), then the rest by name.
-    def sort_key(s: dict[str, Any]) -> tuple[int, float, str]:
+    # Best trade first: the pick, then the other A-trades, then the remaining
+    # setups — each group by Trade Apgar, then R:R (desc) — then the stand-aside
+    # rest by name.
+    def sort_key(s: dict[str, Any]) -> tuple[int, int, int, int, float, str]:
         aside = s["action"] == "stand_aside"
-        return (1 if aside else 0, -(s["quality_score"] or 0.0), s["asset"])
+        apgar = s.get("apgar") or {}
+        return (
+            1 if aside else 0,
+            0 if s.get("is_top_pick") else 1,
+            0 if apgar.get("a_trade") else 1,
+            -apgar.get("total", 0),
+            -(s["reward_risk"] or 0.0),
+            s["asset"],
+        )
 
     # 14-wide asset column: tradfi names like "xyz:BRENTOIL" are longer than tickers.
     header = (
         f"{'ASSET':<14} {'REGIME':<8} {'TIDE':<7} {'IMP T/W/E':<14} {'FI(2)':>14} {'ACTION':<13} "
         f"{'CLOSE':>12} {'MARK':>12} {'DRIFT':>7} {'ENTRY':>12} {'STOP':>12} {'R:R':>7} "
         f"{'LIMIT':>12} {'LIM STOP':>12} {'LIM R:R':>7} {'TARGET':>12} "
-        f"{'SCORE':>6} {'SIZE':>10}"
+        f"{'APGAR':>6} {'SIZE':>10} {'FUND/H':>11} {'FUND EST':>9}"
     )
     print("\n" + header)
     print("-" * len(header))
@@ -73,7 +123,8 @@ def print_horizon_table(name: str, block: dict[str, Any]) -> None:
         size = num(s["position_size"]["size"]) if s["position_size"] else "—"
         if s.get("size_warnings"):
             size += "⚠"
-        score = f"{s['quality_score'] * 100:.0f}" if s.get("quality_score") is not None else "—"
+        apgar = s.get("apgar")
+        score = f"{apgar['total']}{' A' if apgar['a_trade'] else ''}" if apgar else "—"
         action = (
             s["action"]
             + (" ⚠" if s.get("price_alert") else "")
@@ -90,7 +141,8 @@ def print_horizon_table(name: str, block: dict[str, Any]) -> None:
             f"{num(close):>12} {num(mark):>12} {drift:>7} "
             f"{num(s['entry']):>12} {num(s['stop']):>12} {rr:>7} "
             f"{num(s['entry_limit']):>12} {num(s.get('entry_limit_stop')):>12} {lim_rr:>7} "
-            f"{num(s['target']):>12} {score:>6} {size:>10}"
+            f"{num(s['target']):>12} {score:>6} {size:>10} "
+            f"{rate_pct(s.get('funding_rate')):>11} {pct(s.get('funding_cost')):>9}"
         )
     print()
     for s in block["signals"]:
@@ -100,10 +152,14 @@ def print_horizon_table(name: str, block: dict[str, Any]) -> None:
         order = f" · order: {s['entry_order_plan']}" if s.get("entry_order_plan") else ""
         alert = f" · ⚠ {s['price_alert']}" if s.get("price_alert") else ""
         print(f"  {s['asset']}: {s['reason']} · value zone: {vz}{order}{alert}{suffix}")
+        if s.get("apgar"):
+            print(f"    {apgar_detail(s['apgar'])}")
         for w in s.get("data_warnings") or []:
             print(f"    ! data quality: {w}")
         for w in s.get("size_warnings") or []:
             print(f"    ! size: {w}")
+        if s.get("funding_warning"):
+            print(f"    ! funding: {s['funding_warning']}")
     if block.get("skipped"):
         print(f"\nskipped: {', '.join(block['skipped'])}")
 
@@ -117,11 +173,24 @@ def print_signals_tables(snapshot: dict[str, Any]) -> None:
         f"month-start equity ${month_start:,.2f} "
         f"· open risk ${snapshot.get('total_open_trade_risk', 0.0):,.2f}"
     )
+    unread = snapshot.get("unread_dexes") or []
+    if unread:
+        where = ", ".join(f"dex '{d}'" if d else "the native clearinghouse" for d in unread)
+        hidden = snapshot.get("hidden_positions") or []
+        print(
+            f"⚠ Positions could not be read on {where} this refresh: {len(hidden)} position(s) "
+            f"from the previous refresh still count "
+            f"${snapshot.get('hidden_open_trade_risk', 0.0):,.2f} of open risk toward the 6% rule."
+        )
     if guard["blocked"]:
         print(
             f"⚠ 6% RULE ACTIVE: monthly losses + open risk ${guard['total_at_risk']:,.2f} "
             f">= limit ${guard['limit']:,.2f} — NO NEW ENTRIES this month."
         )
+    print(
+        "FUND/H = current hourly funding rate (+: longs pay shorts); FUND EST = funding "
+        "over the horizon's holding time, % of notional (+: this trade pays)."
+    )
     print(
         "⚠ Each horizon sizes its suggestion as a STANDALONE trade risking "
         f"{snapshot['risk_pct']:.1%}. Taking several at once multiplies your risk."
@@ -186,7 +255,12 @@ def snapshot_path(cfg: Config) -> Path:
 def write_snapshot(cfg: Config, snapshot: dict[str, Any]) -> Path:
     cfg.cache_dir.mkdir(parents=True, exist_ok=True)
     out = snapshot_path(cfg)
-    out.write_text(json.dumps(snapshot))
+    # Write aside, then swap in: a write cut short (or read halfway by the
+    # dashboard) never leaves a truncated snapshot, which would load as empty
+    # and lose the stop memory.
+    tmp = out.with_name(out.name + ".tmp")
+    tmp.write_text(json.dumps(snapshot))
+    os.replace(tmp, out)
     if cfg.journal.enabled:
         append_journal_entry(snapshot, cfg.journal.path)
     return out
@@ -198,18 +272,19 @@ def _progress(horizon: str, coin: str) -> None:
 
 def do_refresh(cfg: Config, horizon: str | None = None) -> dict[str, Any]:
     """Refresh every horizon, or just one and merge it into the stored snapshot."""
-    with HyperliquidClient(cache_dir=cfg.cache_dir) as client:
-        if horizon is None:
-            snapshot = build_snapshot(cfg, client, on_progress=_progress)
-        else:
-            previous = load_snapshot(snapshot_path(cfg))
-            if not previous.get("horizons"):
+    with _REFRESH_LOCK:
+        # Both paths read the previous snapshot: besides the horizons a partial
+        # refresh merges into, it holds the stop memory (a suggested stop never
+        # moves back).
+        previous = load_snapshot(snapshot_path(cfg))
+        with HyperliquidClient(cache_dir=cfg.cache_dir) as client:
+            if horizon is None or not previous.get("horizons"):
                 # Nothing to merge into yet — a partial refresh would leave the
                 # other horizons missing from the dashboard, so do a full one.
-                snapshot = build_snapshot(cfg, client, on_progress=_progress)
+                snapshot = build_snapshot(cfg, client, on_progress=_progress, previous=previous)
             else:
                 snapshot = refresh_horizon(cfg, client, horizon, previous, on_progress=_progress)
-    out = write_snapshot(cfg, snapshot)
+        out = write_snapshot(cfg, snapshot)
     picks = {n: b.get("top_pick") for n, b in snapshot.get("horizons", {}).items()}
     picked = ", ".join(f"{n}={p}" for n, p in picks.items() if p) or "no qualifying setup"
     print(f"snapshot written to {out} · best: {picked}")
