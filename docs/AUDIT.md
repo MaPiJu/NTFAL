@@ -18,7 +18,8 @@ Le décalage est constant : **PDF = imprimée + 16**. Pages lues (imprimées) : 
 **Lot 2** (Q2, Q3, Q4, Q7, Q9, Q10, Q11 phase 1, Q13 — voir §3 bis) : de 124 à **141 passed** ;
 ruff et black OK à chaque commit. **Lot 3** (Q5, Q6, Q8, Q11 phase 2, Q12 — voir §3 ter) : de 141 à
 **166 passed**, puis **183 passed** après les correctifs de sa revue adversariale (§3 ter, fin) ;
-ruff et black OK à chaque commit.
+ruff et black OK à chaque commit. **Lot 4** (suites de la revue du lot 3 — voir §3 quater) : de 183
+à **192 passed** ; ruff et black OK à chaque commit.
 Les références `fichier:ligne` des tableaux renvoient au commit audité `c32ab4b`.
 
 **Vérifications en direct.** Un script jetable placé **hors du dépôt** a interrogé l'endpoint public
@@ -42,6 +43,13 @@ le format (`[meta, contextes]` alignés, `funding` horaire) et les taux : `xyz:B
 avant/après de Q12 et à la mesure du veto « chasing » après Q6. L'opérateur a autorisé
 `metaAndAssetCtxs` : le code utilise désormais `meta`, `metaAndAssetCtxs`, `candleSnapshot` et
 `clearinghouseState`, tous publics, sans clé, en lecture seule.
+
+**Vérifications en direct, lot 4** (2026-10-09, même méthode : scripts jetables hors du dépôt,
+`meta` et `candleSnapshot` publics). Sur les barres en direct des 6 perps, après le calendrier de
+séance : `build_snapshot` complet, horloge figée un samedi, un dimanche avant et après la
+réouverture et un mercredi (alerte « marché fermé ») ; rejeu de chaque clôture de barre du wave
+pour le veto « chasing » compté sur les setups, les divergences avant/après, et le stop suiveur
+des positions avant/après (anciennes versions du code relues depuis git).
 
 **Verdicts.** `conforme` · `écart justifié` (adaptation défendable, documentée) · `erreur` (le code
 ne fait pas ce que le livre, la spec ou sa propre docstring disent — corrigée, avec un test qui échoue
@@ -92,7 +100,8 @@ avant et passe après) · `à trancher` (choix de design ou de calibrage : **non
 | D1 | L'indicateur doit **traverser** sa ligne zéro entre les deux extrêmes | p.87 (PDF 103) : « breaking of the centerline between two indicator bottoms is an absolute must… has to cross above that line before skidding to its second bottom » ; p.117 (PDF 133), FI(13) : « must make a new peak, then fall below its zero line, and then rise above that line again » | `triple_screen.py:416`, `:428` | **erreur** | Le test est inclusif des extrémités : si l'indicateur est déjà du « mauvais » côté au premier extrême (ex. MACD-H > 0 au premier creux de prix), la condition est vraie sans aucun croisement ⇒ fausse divergence affichée. → **C1** |
 | D2 | Extrêmes espacés de 20 à 40 barres | p.88 (PDF 104), Lovvorn | `triple_screen.py:417`, `:429` ; `params.py:29-30` | conforme | Mesuré entre pivots de prix (approximation acceptable). |
 | D3 | Divergences MACD-H et FI(13) = avertissements uniquement | p.86–88 (PDF 102–104), p.113 (PDF 129), p.117 (PDF 133) | `triple_screen.py:435-454` | conforme | — |
-| D4 | Meilleurs signaux quand le 2e extrême ≤ moitié du 1er | p.89 (PDF 105) | — | non implémenté | Raffinement facultatif, pas un écart. |
+| D4 | Meilleurs signaux quand le 2e extrême ≤ moitié du 1er | p.89 (PDF 105) | — | non implémenté | Raffinement facultatif, pas un écart. **Lot 4 : laissé tel quel** — chez Elder c'est une remarque sur la qualité du signal (« the best signals come from divergences in which the second top or bottom is no more than half the height or the depth of the first »), pas une condition de validité ; les divergences ne changent jamais l'action. |
+| D5 | Les extrêmes comparés sont ceux de l'indicateur : le creux de chaque déclin sous zéro (sommet de chaque rallye au-dessus) | p.86 (PDF 102) : « a more shallow bottom than during its previous decline » ; p.87 (PDF 103), Fig. 23.3 (creux A et C de MACD-H) | `triple_screen.py:484-537` au commit `405376d` | **erreur** (relevée par la revue du lot 3) | L'indicateur était lu sur les barres des deux creux du **prix** ; MACD-H touche souvent son creux avant le prix. D'où des divergences affichées alors que le second creux de l'indicateur est plus profond (libellé faux), et des divergences réelles manquées. → **lot 4** (`c75521b`), §3 quater. |
 
 ### 1.4 Gestion du risque
 
@@ -115,7 +124,7 @@ avant et passe après) · `à trancher` (choix de design ou de calibrage : **non
 | X2 | Ne jamais rester contre la couleur : long + rouge sur un des deux timeframes ⇒ sortir ; short + vert ⇒ couvrir | p.166 (PDF 182) | `trade_management.py:225-231` | conforme | — |
 | X3 | Prendre ses profits à l'objectif (zone de valeur / canal) | p.162, p.171, p.216–218 | `trade_management.py:133-148`, `:235-240` | conforme | — |
 | X4 | Perte de la couleur favorable | p.164 (PDF 180) : un momentum trader sort dès qu'**un** timeframe passe au bleu ; p.166 (PDF 182) : « a swing trader may stay in a trade, even if one of the timeframes turns blue » | `trade_management.py:241-250` (les **deux** sans couleur favorable **et** en profit) | écart justifié | Version « swing » (positions_horizon = swing) ; la condition « en profit » est un ajout prudent. |
-| X5 | Trailing stop SafeZone, ramené au point mort en profit | p.77 (PDF 93) : « move it to the break-even point as soon as prices close higher » ; p.115 (PDF 131) « as early as possible » ; p.223 (PDF 239) : à un niveau de profit planifié | `trade_management.py:151-174` | conforme | Conforme à p.77/p.115 ; p.223 propose une variante plus patiente. |
+| X5 | Trailing stop SafeZone, ramené au point mort en profit | p.77 (PDF 93) : « move it to the break-even point as soon as prices close higher » ; p.115 (PDF 131) « as early as possible » ; p.223 (PDF 239) : à un niveau de profit planifié | `trade_management.py:151-174` | conforme | Conforme à p.77/p.115 ; p.223 propose une variante plus patiente. Lot 4 : stop et cible des positions sur la grille de prix (`405376d`, §3 quater). |
 | X6 | Ne bouger le stop que dans le sens du trade | p.224 (PDF 240) | `trade_management.py:151-174` (calcul sans mémoire) | **à trancher** | D'un rafraîchissement à l'autre, la suggestion peut baisser (long) : Elder l'interdit. → **Q8, appliqué** (`194ce7d`) : le stop suggéré ne recule jamais (mémoire par position dans le snapshot). |
 
 ### 1.6 Documentation
@@ -147,6 +156,7 @@ avant et passe après) · `à trancher` (choix de design ou de calibrage : **non
 | H15 | Positions lues par dex | `clearinghouseState` `dex=xyz` renvoie `xyz:GOLD`, `xyz:JPY` (préfixés, `szi` en chaîne) ; l'appel natif ne les contient pas | `pipeline.py:178-209` ; `trade_management.py:102-130` | conforme | — |
 | H16 | Un échec sur un dex ne fait pas perdre les autres | Docstring : « a failure on one dex doesn't drop the others » | `pipeline.py:200-206` (ne capture que `HyperliquidError`) | **erreur** | Une erreur HTTP ou un timeout `httpx` sur un dex fait échouer **tout** le rafraîchissement (`build_snapshot` ne capture que `HyperliquidError`). → **C7** |
 | H17 | Barres gelées du week-end dans des séries 24/7 | Les perps tradfi impriment des barres le week-end (volume et amplitude ≈ 10 %) | — | **à trancher** | EMA13 en 1d ≈ 9 séances + 4 barres gelées ; Elder raisonne en séances (p.125 : 5 jours/semaine). → **Q12, appliqué** (`a9d4001`) : barres entièrement comprises dans la fermeture du week-end retirées avant tout indicateur. |
+| H18 | Un signal du week-end le dit | Depuis Q12, le week-end, le signal est celui de la dernière barre de séance ; l'avertissement « marché quasi gelé » ne se déclenche plus (revue du lot 3 : 0 sur 252 signaux rejoués sur 7 week-ends). Les perps `xyz` s'échangent pourtant sur Hyperliquid le week-end, sur le prix interne de trade.xyz : un ordre, même posé le vendredi, peut s'exécuter avant la réouverture | `app/pipeline.py` (aucun signal ne datait sa barre) | **à trancher** (important, non critique) — tranché : corriger | → **lot 4** (`efa71ea`) : avertissement « marché fermé » + heure de la barre au tableau et au CLI, §3 quater. |
 
 ---
 
@@ -231,6 +241,19 @@ wave au-delà du canal, par côté (au-dessus / au-dessous), canal du lot 2 → 
 5,3 %/1,4 %). Sur 1d, un seul coefficient doit couvrir le côté le plus agité (k médian ≈ 10–17 % pour
 l'or, l'argent et le pétrole sur 187–249 barres) : le veto ne joue presque plus sur swing.
 
+> **Correction (lot 4).** Ces parts portent sur **toutes les barres**, or le veto ne s'applique qu'aux
+> **setups** (tide orienté, FI(2) du bon côté de zéro sans nouvel extrême, aucune censure Impulse) :
+> c'est le mauvais critère. Compté sur les setups (rejeu en direct du 2026-10-09, toutes les barres
+> 1d disponibles, 1 500 dernières barres 1h et 15m par actif), le veto du canal Q6 écarte **0 setup
+> sur 203** en 1d, **2 sur 1 718** en 1h et **6 sur 1 598** en 15m (la revue du lot 3 trouvait 0/202,
+> 7/3 565 et 13/4 232 sur le cache ; le canal du lot 2 donnait aussi 0 en 1d). La raison est la
+> condition FI(2) < 0 d'Elder (p.158) : un repli qui la remplit ne clôture presque jamais au-delà du
+> canal. Le veto suit le livre (p.79, p.167–168) : ce n'est **pas un défaut**, et Q6 n'y change
+> rien. La perte réelle date du **lot 2** : le seuil de 3 % au-delà de la zone de valeur écartait
+> **42 setups swing sur 203 (21 %)**, qui passent désormais ; tous ont 0 à la ligne c de l'Apgar
+> (clôture au-dessus de la valeur pour un long, au-dessous pour un short), donc aucun n'est un
+> A-trade ni le choix ★. Sur 1h et 15m, le seuil de 3 % n'écartait aucun setup.
+
 **Écart mesuré par Q12** (même code et mêmes barres, avec et sans calendrier, horloge figée) :
 - barres retirées : samedi en 1d (−14 %), ≈ 26 % des barres 4h, ≈ 29 % des barres 1h / 15m / 5m ;
   tide swing reconstruit du lundi au vendredi (29–51 barres hebdo, contre 30–52 bougies 1w jeudi→mercredi) ;
@@ -249,8 +272,10 @@ l'or, l'argent et le pétrole sur 187–249 barres) : le veto ne joue presque pl
 
 Avant la PR, le diff du lot 3 a été relu en cinq axes (sessions, mémoire du stop, Apgar, canal +
 funding, documentation), chaque constat soumis à un vérificateur chargé de le **réfuter** ; puis les
-correctifs eux-mêmes ont été relus de la même façon. 12 défauts ont été confirmés (reproduits), 5
-constats réfutés. Chaque défaut est corrigé par un commit dédié, avec un test vu en échec avant :
+correctifs eux-mêmes ont été relus de la même façon. 13 défauts ont été confirmés (reproduits), 5
+constats réfutés. Chaque défaut est corrigé par un commit dédié, avec un test vu en échec avant
+(texte corrigé au lot 4 : il disait « 12 », le tableau en a toujours compté 13, comme la description
+de la PR #19 ; le commit `867cfed` n'ajoute qu'un test et n'est pas compté) :
 
 | Commit | Défaut confirmé | Correctif | Test (échec avant) |
 |---|---|---|---|
@@ -279,6 +304,56 @@ Constats réfutés (non corrigés) : la barre 1d du dimanche, gardée car elle c
 mais positive (conforme au canal du livre) ; l'absence de phrase explicative pour un short sans cible
 (l'Apgar affiche « reward:risk none 0 ») ; deux constats documentaires.
 
+## 3 quater. Lot 4 — suites de la revue du lot 3
+
+Après la fusion du lot 3, cinq points restés ouverts ont été réexaminés : pour chacun, un analyste a
+lu le code et le livre et mesuré sur le cache, puis un second a cherché à réfuter son verdict ; aucun
+verdict n'a été renversé. Aucun n'est critique. Même protocole que les lots précédents (test vu en
+**échec** d'avant, un commit par point, suite + ruff + black au vert) ; les mesures ci-dessous ont
+été refaites en direct sur le code du lot (§0).
+
+| Point | Verdict de la revue | Commit | Changement | Test (échec observé avant → passe après) |
+|---|---|---|---|---|
+| Signal du vendredi réaffiché tout le week-end (H18) | important, pas critique : corriger | `efa71ea` | `closure_at()` (`data/sessions.py`) : la fermeture en cours, s'il y en a une ; un rafraîchissement fait dedans ajoute un avertissement de qualité des données « market closed » (bornes en UTC et dans le fuseau configuré, barre d'où vient le signal, ordres déjà posés compris) ; chaque signal porte `last_bar_time` (ouverture de sa barre du wave, UTC), affiché sous la clôture au dashboard et en colonne `BAR (UTC)` au CLI ; l'action ne change jamais | `test_the_closure_in_progress_is_reported_with_its_bounds`, `test_a_closure_describes_itself_in_its_own_time_zone` (`ImportError: closure_at`), `test_a_weekend_signal_says_the_market_is_closed_and_dates_its_bar` (`KeyError: 'last_bar_time'`) |
+| Stop suiveur (et cible) des positions hors de la grille de prix (X5, Q9) | mineur | `405376d` | `assess_position(sz_decimals=…)` : stop arrondi **en s'éloignant du prix** (long ↓, short ↑) **après** le cliquet — `stop_hit` et le risque ouvert (règle des 6 %) lisent le stop arrondi ; cible arrondie vers l'entrée ; le pipeline passe les `szDecimals` (lus dans `meta` à la demande pour une position hors watchlist) | `test_held_position_stop_and_target_sit_on_the_price_grid`, `test_the_stop_is_rounded_after_the_ratchet` (`TypeError: … 'sz_decimals'` ; `4812.604 == 4812.6`), `test_pipeline_passes_sz_decimals_to_trade_management` (`{'BTC': None, 'ETH': None} == {'BTC': 5, 'ETH': 4}`) |
+| D4 (qualité des divergences) | mineur : laisser | — | aucun (voir D4) | — |
+| Défaut voisin de D4 : l'indicateur lu aux creux du prix (D5) | mineur, libellé faux : corriger | `c75521b` | `_indicator_extremes()` : creux de l'indicateur = plus bas de son déclin sous zéro contenant le 1er creux du prix ; second creux = plus bas de tout ce qui suit ce déclin jusqu'à la fin du déclin contenant le 2nd creux du prix (ou jusqu'à ce creux, si l'indicateur n'est pas sous zéro) ; le croisement de zéro doit tomber entre les deux. Miroir pour les sommets. C1 (sous zéro au 1er creux) et l'écart de 20–40 barres entre creux du prix inchangés | `test_divergence_compares_the_indicator_s_own_bottoms_not_its_value_at_the_price_lows` (`['bullish TEST divergence'] == []`) |
+| Veto « chasing » presque inactif sur 1d (Q2, Q6) | pas un défaut : corriger l'AUDIT | ce commit | mesure refaite sur les setups au lieu de toutes les barres (§3 ter, §4 Q2, §5) | — |
+| Fenêtre du week-end en heure de New York (Q12) | correcte : confirmer | — | conservée. La documentation de trade.xyz fixe la séance des six marchés « from Sunday 6PM ET to Friday 5PM ET » (citée par la revue) ; une fenêtre UTC fixe serait fausse d'une heure en hiver, à chaque bout. **Réserve** : les actions, le forex ou le JP225 du dex `xyz` ont d'autres horaires ; élargir la watchlist à eux demanderait une fenêtre par actif | — |
+
+**Mesures en direct (2026-10-09).**
+- *Alerte « marché fermé ».* `build_snapshot` complet (6 perps × 3 horizons), horloge figée : samedi
+  2026-10-03 12:00 UTC et dimanche 21:30 UTC → **18 signaux sur 18** portent l'alerte, chacun lu sur
+  la dernière barre de séance du vendredi (1d du vendredi, 1h de 20:00, 15m de 20:45 UTC) ; dimanche
+  22:30 UTC (réouverture à 22:00) et mercredi 12:00 → **0 sur 18**. Les actions sont les mêmes
+  samedi et dimanche, comme il se doit.
+- *Stop suiveur.* Rejeu sur l'horizon `swing` : une position longue et une courte ouvertes tous les
+  5 barres sur les 200 dernières barres 1d, suivies 30 barres en enchaînant la mémoire du stop, soit
+  **12 070 cas** : l'ancien stop était hors grille dans 4 696 cas (39 % ; ici l'entrée est une
+  clôture, donc sur la grille, et un stop au point mort aussi — la revue mesurait 83 %), l'ancienne
+  cible dans 11 947 (99 %) ; écart maximal 0,94 tick ; `stop_hit` ne change jamais ; **5 verdicts**
+  passent de *hold* à *take profits*, tous par la cible arrondie vers l'entrée, atteinte moins d'un
+  tick plus tôt (le sens prudent).
+- *Divergences.* Rejeu de chaque clôture de barre du wave (swing : 200 dernières ; scalp, micro :
+  600), MACD-H et FI(13) : sur 366 / 966 / 994 divergences signalées avant (swing / scalp / micro),
+  **45 / 217 / 108** (12 % / 22 % / 11 %) disparaissent — leur second extrême propre n'est pas moins
+  profond que le premier — et **23 / 317 / 295** apparaissent : des divergences réelles que la
+  lecture aux barres du prix manquait (MACD-H touche son creux avant le prix ; ex. `xyz:GOLD` 1h :
+  creux propres −10,1 puis −3,9 sous un plus bas du prix, lus −0,93 puis −3,9 aux barres du prix).
+  Sur les setups (191 / 690 / 692), la ligne e de l'Apgar change 6 / 58 / 48 fois, dans les deux sens ;
+  le statut A-trade change 1 / 4 / 0 fois (swing : 1 perdu ; scalp : 1 perdu, 3 gagnés). L'effet
+  n'est donc plus seulement prudent : il suit le livre dans les deux sens.
+
+**Points notés, non traités.**
+- Après la réouverture, tant qu'aucune barre du wave n'a clôturé depuis, le signal reste celui du
+  vendredi sans l'alerte (swing jusqu'au lundi 00:00 UTC, scalp jusqu'à la fin de l'heure de
+  réouverture, micro 15 minutes) ; la colonne de l'heure de barre le montre.
+- Un stop au point mort sur une entrée moyenne hors grille (plusieurs exécutions) est arrondi sous
+  l'entrée de moins d'un tick : le risque ouvert compté reste inférieur à 1 tick × taille.
+- Elder ne donne le signal d'achat qu'au **retournement** de MACD-H depuis son second creux (p.87 :
+  « gives a buy signal when it ticks up from the second bottom ») ; la détection, avant comme après
+  le lot 4, signale la forme de la divergence sans exiger ce retournement.
+
 ---
 
 ## 4. Points à trancher — recommandations et décisions (toutes appliquées depuis le lot 3)
@@ -286,37 +361,45 @@ mais positive (conforme au canal du livre) ; l'absence de phrase explicative pou
 | Id | Sujet | Constat | Recommandation |
 |---|---|---|---|
 | Q1 | `flat_trend_slope_pct` par horizon (T4) | Médiane de \|pente EMA13\| par barre : 1w 0,25–0,62 % ; 1d 0,12–0,58 % ; 4h 0,04–0,18 % ; 1h 0,015–0,07 %. Avec 0,1 %, le tide 1h est « neutre » 89–99 % du temps (GOLD/SP500). | **Appliqué (lot 1, `fb21597`).** Le bruit croît comme √temps : chaque horizon prend la valeur swing × √(barre du tide / 1 semaine) — scalp `0.00015`, micro `0.00008`, swing inchangé (`0.001`), via `[scanner.horizons.strategy]`. Part neutre sur les 6 perps : 6–22 % (4h), 8–31 % (1h), contre 0–20 % sur swing. Un test verrouille la règle sur le `config.toml` livré. |
-| Q2 | `value_zone_max_distance_pct` par horizon (T8) | 3 % n'est jamais atteint sur 1h/15m ⇒ le veto « chasing » ne sert que sur swing. | **Appliqué (lot 2, `f89a1a6`), avec Q13.** Long refusé si la clôture du wave est au-dessus de la ligne haute du canal du **wave**, short si elle est sous la ligne basse (`channel()` réutilisé sur le frame wave). `value_zone_max_distance_pct` supprimé (`params.py`, `config.toml`) ; `value_zone_status` reste affiché (« extended » = au-delà du canal du wave), sans veto. Mesure en direct (mission) : avec 3 %, le veto ne touche jamais les barres 1h/15m et touche 0,7 à 31,5 % des barres 1d selon l'actif ; avec le canal, 2 à 4 % partout. Recompte du 2026-10-08, par côté (clôture au-dessus / au-dessous), ≤ 5000 barres : 3 % → 0 % (15m), 0–1,2 % (1h), 0–28,8 % (1d) ; canal → 1,7–3,4 % (1h, 15m), 0,8–5,1 % (1d, 204–360 barres seulement). |
+| Q2 | `value_zone_max_distance_pct` par horizon (T8) | 3 % n'est jamais atteint sur 1h/15m ⇒ le veto « chasing » ne sert que sur swing. | **Appliqué (lot 2, `f89a1a6`), avec Q13.** Long refusé si la clôture du wave est au-dessus de la ligne haute du canal du **wave**, short si elle est sous la ligne basse (`channel()` réutilisé sur le frame wave). `value_zone_max_distance_pct` supprimé (`params.py`, `config.toml`) ; `value_zone_status` reste affiché (« extended » = au-delà du canal du wave), sans veto. Mesure en direct (mission) : avec 3 %, le veto ne touche jamais les barres 1h/15m et touche 0,7 à 31,5 % des barres 1d selon l'actif ; avec le canal, 2 à 4 % partout. Recompte du 2026-10-08, par côté (clôture au-dessus / au-dessous), ≤ 5000 barres : 3 % → 0 % (15m), 0–1,2 % (1h), 0–28,8 % (1d) ; canal → 1,7–3,4 % (1h, 15m), 0,8–5,1 % (1d, 204–360 barres seulement). **Correction (lot 4)** : ces parts portent sur toutes les barres, pas sur les setups, seuls soumis au veto. Sur les setups (rejeu en direct du 2026-10-09) : canal → 0/203 (1d), 2/1 718 (1h), 6/1 598 (15m) ; 3 % → 42/203 (1d), 0 ailleurs. Le passage au canal a retiré un filtre réel sur swing (21 % des setups, tous à 0 sur la ligne c de l'Apgar, donc jamais A-trade ni ★) et n'en a pas ajouté sur scalp/micro ; voir §3 ter. |
 | Q3 | Pénétration moyenne par barre ou par repli (T10) | Elder : une valeur par repli (Fig. 39.3) ; code : chaque barre. | **Appliqué (lot 2, `44616b2`).** Chaque série contiguë de barres qui percent l'EMA13 (au-dessus pour `side="up"`) est un repli, mesuré à sa barre la plus profonde ; la limite utilise la moyenne de ces maxima. Mesure en direct (mission) : limite 1,1 à 2,8 fois plus profonde (GOLD 1d : 2,0 % → 3,5 % sous l'EMA projetée). Recompte (côté achat, 6 perps × 1d/1h/15m) : ×1,07 à ×2,84 ; GOLD 1d 1,99 % → 3,49 %. |
 | Q4 | Cycle de vie de l'ordre stop (T11) | Expiration après 2 barres : absente du livre (le « roll » est, lui, conforme). | **Appliqué (lot 2, `66aeca6`).** `entry_order_expire_bars` supprimé (`params.py`, `config.toml`). Le plan d'ordre : buy-stop abaissé (sell-stop relevé) à chaque barre du wave au plus haut + 1 tick (plus bas − 1 tick), valide jusqu'à exécution tant que le tide tient et qu'aucune Impulse ne censure le trade (p.161 : « until stopped in or until the weekly indicator reverses »). |
 | Q5 | Score de classement vs Trade Apgar (T14) | Pondération maison, Impulse vert récompensé ; l'Apgar récompense le bleu après rouge. | Remplacer par un Apgar « pullback to value » (Impulse tide, Impulse wave, prix vs valeur, R:R, profondeur du repli ; 0/1/2 chacun, ≥ 7 et aucun zéro pour être « A-trade ») ; **Appliqué (lot 3, `8298f7e`)**, barème de l'opérateur : tide Impulse vert 2 / bleu 1 / rouge 0 ; wave Impulse bleu 2 / vert 1 / rouge 0 ; clôture du wave sous la valeur 2 / dedans 1 / au-dessus 0 ; R:R ≥ 2 → 2, 1–2 → 1, < 1 → 0 ; divergence du wave favorable 2 / aucune 1 / défavorable 0 (miroir pour un short). A-trade = ≥ 7 sans zéro ; choix = meilleur Apgar parmi les A-trades, départage par R:R, aucun sinon. Écart à la Fig. 58.1 sur la ligne hebdo, voir §3 ter. |
-| Q6 | Canal : 100 barres et coefficient symétrique (I7c) | Avec 100 barres + quantile par côté corrigé : 90,5–95,1 % (1w), 94 % (4h/1h). Swing n'a que 31–53 barres hebdo. | `channel_lookback_bars = 100` (valeur du livre ; utilise tout l'historique disponible si plus court) ; **Appliqué (lot 3, `c0b17fe`)** : coefficient symétrique unique (p.167), plus petit k contenant ≥ 95 % des 100 dernières barres (p.79), chaque barre contre son EMA26 ; tout l'historique s'il est plus court. Effet sur le veto « chasing » : voir §3 ter (quasi nul sur 1d). |
+| Q6 | Canal : 100 barres et coefficient symétrique (I7c) | Avec 100 barres + quantile par côté corrigé : 90,5–95,1 % (1w), 94 % (4h/1h). Swing n'a que 31–53 barres hebdo. | `channel_lookback_bars = 100` (valeur du livre ; utilise tout l'historique disponible si plus court) ; **Appliqué (lot 3, `c0b17fe`)** : coefficient symétrique unique (p.167), plus petit k contenant ≥ 95 % des 100 dernières barres (p.79), chaque barre contre son EMA26 ; tout l'historique s'il est plus court. Effet sur le veto « chasing » : aucun sur les setups 1d, avant comme après Q6 (§3 ter, correction du lot 4). |
 | Q7 | Base de la règle des 2 % (R3) | Elder fige la limite sur l'équité du 1er du mois. | **Appliqué (lot 2, `6a25870`).** `_finalize_block` dimensionne sur `equity_at_month_start` (p.204 : « Measure your account equity on the first day of each month ») ; l'en-tête du dashboard et du CLI indique cette base. |
 | Q8 | Stop qui recule (X6) | La suggestion est recalculée à chaque passage, sans mémoire. | Afficher « ne jamais baisser un stop existant » à côté de la suggestion ; **Appliqué (lot 3, `194ce7d`)**, avec un petit état persistant : `stop_memory` du snapshot (clé actif, sens, entrée) ; suggestion = max(ancien, nouveau) pour un long, min pour un short, remise à zéro si la clé change ; `build_snapshot` et `refresh_horizon` relisent le snapshot précédent. L'outil ignore toujours le stop réellement posé (ordres non lus). |
-| Q9 | Arrondi des niveaux au tick (H11) | Stop, limite et objectif non arrondis. | **Appliqué (lot 2, `5541621`).** `round_to_tick(price, direction, sz_decimals)` sur `tick_size()` : buy-stop ↑, sell-stop ↓, stop long ↓, stop short ↑, limite d'achat ↓, limite de vente ↑, objectif vers l'entrée ; le stop de la limite suit le stop. R:R et taille (Iron Triangle) sont calculés sur l'entrée et le stop arrondis. Hors périmètre : le trailing stop des positions ouvertes (`trade_management`) n'est pas arrondi. |
+| Q9 | Arrondi des niveaux au tick (H11) | Stop, limite et objectif non arrondis. | **Appliqué (lot 2, `5541621`).** `round_to_tick(price, direction, sz_decimals)` sur `tick_size()` : buy-stop ↑, sell-stop ↓, stop long ↓, stop short ↑, limite d'achat ↓, limite de vente ↑, objectif vers l'entrée ; le stop de la limite suit le stop. R:R et taille (Iron Triangle) sont calculés sur l'entrée et le stop arrondis. Hors périmètre : le trailing stop des positions ouvertes (`trade_management`) n'est pas arrondi — **fait au lot 4** (`405376d`) : stop arrondi en s'éloignant du prix après le cliquet, cible vers l'entrée. |
 | Q10 | Levier max et notionnel minimum (H12, H13) | Non contrôlés. | **Appliqué (lot 2, `2f48417`).** `validate_watchlist` et `tradable_perps` renvoient un `PerpSpec` (`sz_decimals`, `max_leverage`, `only_isolated`) ; pipeline et Protocol suivent. Avertissement `size_warnings` quand taille × entrée > maxLeverage × équité courante (marge isolée mentionnée) ou < 10 USD, affiché au dashboard (⚠ sur la taille + raison) et au CLI (`! size:`) ; ni l'action ni la taille ne changent. Exemple en direct (mission) : un short SP500 sur micro demandait 10,4 × l'équité (max 50×). |
 | Q11 | Funding (H14) | Non traité. | **Phase 1 appliquée (lot 2, `115dd04`).** `parse_positions` lit `cumFunding.sinceOpen` (`cum_funding`), affiché comme « funding payé » au dashboard, au CLI et dans le journal. Signe vérifié en direct sur 6 positions `xyz` publiques : opposé à la somme des `userFunding.usdc` (négatif = payé) ⇒ positif = payé, négatif = reçu. **Phase 2 appliquée (lot 3, `6911a1f`)** : l'opérateur autorise `metaAndAssetCtxs` (liste de `CLAUDE.md` amendée) ; taux horaire (positif = les longs paient) et coût estimé sur `holding_hours` (swing 14 j, scalp 2 j, micro 4 h), en % du notionnel signé selon le sens ; avertissement au-delà de la moitié du risque du trade, sans effet sur l'action. Mesure en direct : BRENTOIL −0,031 %/h ⇒ ≈ 10,4 % pour un short de 14 j ; CL ≈ 3,8 %. |
-| Q12 | Séances vs 24/7 pour les perps tradfi (H5, H17) | Barres gelées du week-end dans les EMA ; barres hebdo jeudi→mercredi. | Au minimum, documenter les deux faits dans le README ; **Appliqué (lot 3, `a9d4001`)**, option lourde : filtre calendaire par dex (`[sessions.xyz]` : ven. 17:00 → dim. 18:00 heure de New York, soit ven. 21:00 → dim. 22:00 UTC en été — `62ed8df`) avant tout indicateur, tide hebdo reconstruit du lundi au vendredi ; jours fériés laissés à l'avertissement « marché quasi gelé ». Écart avant/après mesuré au §3 ter, documenté dans le README. |
+| Q12 | Séances vs 24/7 pour les perps tradfi (H5, H17) | Barres gelées du week-end dans les EMA ; barres hebdo jeudi→mercredi. | Au minimum, documenter les deux faits dans le README ; **Appliqué (lot 3, `a9d4001`)**, option lourde : filtre calendaire par dex (`[sessions.xyz]` : ven. 17:00 → dim. 18:00 heure de New York, soit ven. 21:00 → dim. 22:00 UTC en été — `62ed8df`) avant tout indicateur, tide hebdo reconstruit du lundi au vendredi ; jours fériés laissés à l'avertissement « marché quasi gelé ». Écart avant/après mesuré au §3 ter, documenté dans le README. **Lot 4** : fenêtre de New York confirmée ; avertissement « marché fermé » et heure de la barre de chaque signal (`efa71ea`, §3 quater). |
 | Q13 | Règle d'Elder « jamais acheter au-dessus du canal supérieur ni vendre sous l'inférieur » | p.168 (PDF 184). Non implémentée ; le veto de la zone de valeur la couvre en partie. | **Appliqué avec Q2 (lot 2, `f89a1a6`)** : c'est désormais le veto « chasing », sur le canal du wave. |
 
 ---
 
 ## 5. Bilan
 
-- **Points vérifiés** : 60 (Triple Screen 14, indicateurs 10, divergences 4, risque 8, sorties 6,
-  documentation 1, Hyperliquid 17).
+- **Points vérifiés** : 62 (Triple Screen 14, indicateurs 10, divergences 5, risque 8, sorties 6,
+  documentation 1, Hyperliquid 18) — D5 et H18 ajoutés au lot 4.
 - **Conformes ou écarts justifiés** : 42, dont 3 conformes sur le principe mais à recalibrer (T4, T8,
   T10).
-- **Erreurs** : 8, toutes corrigées (C1–C8), dont une latente pour la watchlist par défaut (C6) et une
-  purement documentaire (C8).
-- **À trancher** : 9 points sans verdict, 1 raffinement facultatif non implémenté (D4) ; au total
-  13 questions (Q1–Q13). Q1 est appliquée (lot 1) : scalp et micro produisent de nouveau des setups.
+- **Erreurs** : 9, toutes corrigées (C1–C8, puis D5 au lot 4), dont une latente pour la watchlist par
+  défaut (C6) et une purement documentaire (C8).
+- **À trancher** : 10 points sans verdict (dont H18, ajouté au lot 4), 1 raffinement facultatif non
+  implémenté (D4) ; au total 13 questions (Q1–Q13). Q1 est appliquée (lot 1) : scalp et micro
+  produisent de nouveau des setups.
 - **Lot 2** : Q2 et Q13 (`f89a1a6`), Q3 (`44616b2`), Q4 (`66aeca6`), Q7 (`6a25870`), Q9 (`5541621`),
   Q10 (`2f48417`) et Q11 phase 1 (`115dd04`) sont appliquées (§3 bis).
 - **Lot 3** : Q11 phase 2 (`6911a1f`, `46085fe`), Q5 (`8298f7e`), Q6 (`c0b17fe`), Q8 (`194ce7d`) et Q12
-  (`a9d4001`) sont appliquées (§3 ter) ; la revue adversariale du lot 3 a confirmé 12 défauts, tous
-  corrigés (§3 ter, fin). Les 13 questions sont tranchées. Restent ouverts : D4
-  (raffinement facultatif des divergences), l'arrondi au tick du trailing stop des positions ouvertes
-  (hors du périmètre de Q9), et deux effets à surveiller — le veto « chasing » quasi inactif sur 1d
-  avec le canal symétrique, et, le week-end, un signal tradfi qui reprend celui de la dernière barre de
-  séance sans avertissement dédié.
+  (`a9d4001`) sont appliquées (§3 ter) ; la revue adversariale du lot 3 a confirmé 13 défauts, tous
+  corrigés (§3 ter, fin). Les 13 questions sont tranchées.
+- **Lot 4** (§3 quater) : alerte « marché fermé » et heure de la barre de chaque signal (`efa71ea`,
+  H18) ; stop suiveur et cible des positions sur la grille de prix (`405376d`) ; divergences lues sur
+  les extrêmes propres de l'indicateur (`c75521b`, D5) ; fenêtre du week-end en heure de New York
+  confirmée. Le veto « chasing » quasi inactif sur 1d n'est **pas un défaut** : mesuré sur les setups
+  et non sur toutes les barres, il ne s'appliquait déjà presque jamais, la condition FI(2) < 0
+  écartant ces clôtures ; la vraie perte date du lot 2 : le retrait du seuil de 3 %, qui écartait
+  21 % des setups swing — désormais affichés, mais tous exclus des A-trades par la ligne c de
+  l'Apgar. Restent ouverts : D4, laissé tel quel
+  par décision, et les trois points notés au §3 quater (signal du vendredi juste après la
+  réouverture, stop au point mort sur une entrée moyenne hors grille, retournement de MACD-H non
+  exigé).
