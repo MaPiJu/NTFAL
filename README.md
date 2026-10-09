@@ -133,7 +133,10 @@ without the calendar the frozen weekend bars drive the signal. A dex without a
   picks, signal levels/reasons, open-position verdicts, stops and open risk.
 - **SafeZone stops:** protective and trailing stops use Elder-style adverse bar noise
   (average downside low undercuts for longs / upside high breakouts for shorts), not
-  simple volatility; profitable trades are ratcheted to at least break-even.
+  simple volatility; profitable trades are ratcheted to at least break-even. A held
+  position's trailing stop sits on the price grid like every other level, rounded away
+  from the price after the ratchet, and its target toward the entry: Hyperliquid refuses
+  any other price ("Price must be divisible by tick size").
 - **Trade management (open positions):** for trades you already hold, Elder's exit tools
   give a verdict — **hold**, **take profits**, or **exit** (see below).
 

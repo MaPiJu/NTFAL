@@ -501,6 +501,37 @@ def test_pipeline_passes_sz_decimals_to_the_strategy(tmp_path, btc_fixtures, mon
     assert seen == {"BTC": 5}
 
 
+def test_pipeline_passes_sz_decimals_to_trade_management(tmp_path, btc_fixtures, monkeypatch):
+    # A held position's trailing stop and target are rounded to the tick, which
+    # depends on szDecimals: the pipeline hands it over, for a watched coin and for
+    # a held coin outside the watchlist alike (looked up in `meta` on demand).
+    import app.pipeline as pipeline
+
+    seen: dict[str, int | None] = {}
+    real = pipeline.assess_position
+
+    def spy(pos, *args, **kwargs):
+        seen[pos.asset] = kwargs.get("sz_decimals")
+        return real(pos, *args, **kwargs)
+
+    monkeypatch.setattr(pipeline, "assess_position", spy)
+    fixtures = btc_fixtures | {
+        ("ETH", "1w"): btc_fixtures[("BTC", "1w")],
+        ("ETH", "1d"): btc_fixtures[("BTC", "1d")],
+    }
+    addr = "0x" + "ef" * 20
+    state = make_clearinghouse_state(
+        [
+            {"coin": "BTC", "szi": "0.5", "entryPx": "50000.0"},
+            {"coin": "ETH", "szi": "-1.0", "entryPx": "4000.0"},
+        ]
+    )
+    client = make_client(fixtures, tmp_path, clearinghouse_states={addr: state})
+    build_snapshot(make_config(tmp_path, address=addr), client)
+
+    assert seen == {"BTC": 5, "ETH": 4}
+
+
 def _held_btc(tmp_path, btc_fixtures, entry="50000.0"):
     addr = "0x" + "ab" * 20
     state = make_clearinghouse_state([{"coin": "BTC", "szi": "0.5", "entryPx": entry}])

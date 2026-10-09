@@ -21,6 +21,9 @@ out?" — using only Elder's own exit tools, no new indicators:
   break-even once the trade is in profit. Never widen risk: given the last
   suggestion for the same position, a new one only moves in the trade's direction.
 
+The stop and the target sit on Hyperliquid's price grid, which refuses any other
+price: the stop rounded away from the price, the target toward the entry.
+
 Both screens come from the horizon configured as `positions_horizon` — a held
 position is strategic, so it is judged on the same chain that would have entered it.
 
@@ -45,6 +48,7 @@ from strategy.triple_screen import (
     Trend,
     average_adverse_noise,
     channel,
+    round_to_tick,
     tick_size,
     tide_trend,
 )
@@ -193,6 +197,7 @@ def assess_position(
     wave: pd.DataFrame,
     params: StrategyParams = DEFAULT_PARAMS,
     previous_stop: float | None = None,
+    sz_decimals: int | None = None,
 ) -> TradeManagement:
     """Elder exit verdict for one open position from completed tide + wave bars.
 
@@ -205,6 +210,11 @@ def assess_position(
     `previous_stop` is the last stop suggested for this same position: the new
     suggestion never moves back past it (Elder, p.224: "move your stop only in
     the direction of your trade").
+
+    The stop and the target are put on the price grid (`sz_decimals` from `meta`
+    caps the decimals): the stop away from the price, *after* the ratchet, so a
+    remembered stop off the grid lands on it too and `stop_hit` and the open risk
+    read the stop an order could actually carry; the target toward the entry.
     """
     t_imp = str(impulse_color(tide["close"]).iloc[-1])
     w_imp = str(impulse_color(wave["close"]).iloc[-1])
@@ -226,6 +236,8 @@ def assess_position(
     in_profit = pnl_elder > 0
 
     target = _profit_target(pos, tide, params)
+    if target is not None:
+        target = round_to_tick(target, "down" if target > pos.entry else "up", sz_decimals)
     if target is None:
         target_reached = False
     elif pos.side == "long":
@@ -236,6 +248,9 @@ def assess_position(
     if previous_stop is not None:
         pick = max if pos.side == "long" else min
         suggested_stop = pick(suggested_stop, previous_stop)
+    suggested_stop = round_to_tick(
+        suggested_stop, "down" if pos.side == "long" else "up", sz_decimals
+    )
     # A fresh SafeZone stop always sits on the safe side of the close; a
     # remembered one may not any more. A close through it means it was hit.
     stop_hit = (

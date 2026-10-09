@@ -431,6 +431,20 @@ def hidden_positions(
     return list(out.values())
 
 
+def _held_spec(
+    client: MarketDataProvider, asset: str, specs: Mapping[str, PerpSpec]
+) -> PerpSpec | None:
+    """A held coin's PerpSpec: from the watchlist's, or looked up in `meta` for a
+    coin outside it. None when the lookup fails: the tick then follows the 5
+    significant figures alone."""
+    if asset in specs:
+        return specs[asset]
+    try:
+        return client.validate_watchlist([asset]).get(asset)
+    except (HyperliquidError, httpx.HTTPError):
+        return None
+
+
 def build_positions(
     client: MarketDataProvider,
     horizon: HorizonConfig,
@@ -439,14 +453,17 @@ def build_positions(
     now_ms: int,
     previous_stops: Mapping[str, float] | None = None,
     sessions: Mapping[str, WeekendClosure] | None = None,
+    specs: Mapping[str, PerpSpec] | None = None,
 ) -> list[dict[str, Any]]:
     """Elder exit verdict per open position, reusing scan frames where available.
 
     A held coin outside the watchlist (so not already refreshed) gets its candles
-    fetched on demand. Coins too new to evaluate are skipped silently.
-    `previous_stops` (the previous snapshot's stop memory) keeps each suggested
-    stop from moving back against its trade (Elder, p.224). `sessions` (dex ->
-    weekend closure) shapes the bars of a held coin fetched on demand.
+    — and its `meta` spec — fetched on demand. Coins too new to evaluate are
+    skipped silently. `previous_stops` (the previous snapshot's stop memory) keeps
+    each suggested stop from moving back against its trade (Elder, p.224).
+    `sessions` (dex -> weekend closure) shapes the bars of a held coin fetched on
+    demand. `specs` (the watchlist's) give the szDecimals that cap the decimals of
+    the stop and target on the price grid.
     """
     memory = previous_stops or {}
     out: list[dict[str, Any]] = []
@@ -458,7 +475,16 @@ def build_positions(
             continue
         tide, wave = tw
         previous = memory.get(stop_memory_key(pos.asset, pos.side, pos.entry))
-        verdict = asdict(assess_position(pos, tide, wave, horizon.params, previous))
+        spec = _held_spec(client, pos.asset, specs or {})
+        assessed = assess_position(
+            pos,
+            tide,
+            wave,
+            horizon.params,
+            previous,
+            sz_decimals=spec.sz_decimals if spec is not None else None,
+        )
+        verdict = asdict(assessed)
         verdict["open_risk"] = position_open_risk(verdict)
         out.append(verdict)
     return out
@@ -659,6 +685,7 @@ def build_snapshot(
         now_ms,
         (previous or {}).get("stop_memory"),
         cfg.sessions,
+        coins,
     )
     hidden = hidden_positions(previous, positions, failed_dexes)
     guard, risks = _risk_summary(cfg, positions, hidden)
@@ -754,6 +781,7 @@ def refresh_horizon(
             now_ms,
             previous.get("stop_memory"),
             cfg.sessions,
+            coins,
         )
         hidden = hidden_positions(previous, positions, failed_dexes)
         guard, risks = _risk_summary(cfg, positions, hidden)

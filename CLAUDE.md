@@ -137,7 +137,9 @@ managed on the same chain that would have entered it. Per held position, produce
   a short, and a new key (another entry price) starts fresh. A remembered stop is kept
   while its position is still open — held, or hidden because its dex's lookup failed — and
   dropped once it is closed (its dex was read without it, or it is no longer declared). Both `build_snapshot` and `refresh_horizon`
-  read the previous snapshot for it.
+  read the previous snapshot for it. The stop then goes on the price grid **away from the
+  price** (a long's down, a short's up) — *after* the ratchet, so `stop_hit` and the open
+  risk read the stop an order can carry — and the target **toward the entry**.
 Each position also shows the **funding paid since it opened** (`cumFunding.sinceOpen` from
 `clearinghouseState`; negative = received) — a holding cost the price PnL leaves out. It is
 context only and never changes a verdict.
@@ -200,7 +202,8 @@ pipeline to every screen and to held positions).
 - **Tick rounding:** every level (entry, limit, stop, target) sits on Hyperliquid's price
   grid, rounded on the prudent side — buy-stop up, sell-stop down; a long's stop and buy
   limit down, a short's stop and sell limit up; the target toward the entry. Reward:risk
-  and the Iron-Triangle size are computed from the rounded entry and stop.
+  and the Iron-Triangle size are computed from the rounded entry and stop. An open
+  position's trailing stop and target follow the same grid (see trade management).
 - **Exchange limits — flag, don't cap:** a size whose notional (size × entry) exceeds the
   perp's `maxLeverage` × equity (from `meta`, with `onlyIsolated` noted), or falls under
   Hyperliquid's $10 minimum order value, carries a `size_warnings` entry. The size stays the
