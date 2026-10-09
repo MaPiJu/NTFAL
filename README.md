@@ -109,7 +109,10 @@ without the calendar the frozen weekend bars drive the signal. A dex without a
   an A-trade. The table is sorted best-first and shows the five lines. The 6% guard
   suppresses any pick.
 - **Divergences:** recent bullish/bearish divergences between price and MACD-Histogram /
-  13-EMA Force Index are surfaced as Elder warnings.
+  13-EMA Force Index are surfaced as Elder warnings: a new price low (high) while the
+  indicator's own bottom (top) — the extreme of its decline below zero (rally above
+  it) — is shallower than the previous one, with a zero-line cross in between and the
+  two price extremes 20–40 bars apart.
 - **Data-quality flags:** a signal says when its own *inputs* are weak — a tide series too
   short for a converged EMA26, a near-frozen market (a tradfi perp on a weekday
   holiday still prints bars on ~5–10% of normal volume; weekends are dropped by the

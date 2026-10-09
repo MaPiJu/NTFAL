@@ -147,9 +147,12 @@ Output is informational only; a human exits manually.
 
 Divergence warnings reuse Elder indicators only: recent price/indicator disagreement on
 MACD-Histogram or 13-EMA Force Index is surfaced in the signal reasons/dashboard, without
-introducing new indicators. A divergence counts only when the indicator **crosses its zero
-line between the two extremes** (Elder's "absolute must", p.87) — no crossover, no
-divergence — and only when the two extremes sit ~20–40 bars apart (Elder/Lovvorn, p.88).
+introducing new indicators. The indicator's extremes are **its own** (p.86: "a more
+shallow bottom than during its previous decline"): the lowest point of each decline below
+zero (mirror: the highest of each rally above it), not its value on the bars of the price
+extremes. A divergence counts only when the indicator **crosses its zero line between its
+two extremes** (Elder's "absolute must", p.87) — no crossover, no divergence — and only
+when the two price extremes sit ~20–40 bars apart (Elder/Lovvorn, p.88).
 
 "Average penetration": over the last ~4–6 weeks *of wave bars*, measure how far pullbacks
 pierce below (uptrend) / above (downtrend) the fast EMA — **one value per pullback**, its
