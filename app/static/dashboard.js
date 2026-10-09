@@ -101,6 +101,28 @@ function apgarLines(apgar) {
   return apgar.lines.map((x) => `${x.question}: ${x.answer} (${x.score})`).join(" · ");
 }
 
+// Open time (UTC) of the last completed wave bar — the bar the signal is read
+// off. On a closed tradfi market it can be days older than the refresh.
+const WEEKDAY = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+function barTime(iso) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  const p = (n) => String(n).padStart(2, "0");
+  return (
+    `${WEEKDAY[d.getUTCDay()]} ${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())} ` +
+    `${p(d.getUTCHours())}:${p(d.getUTCMinutes())} UTC`
+  );
+}
+
+function closeCell(s, waveLabel) {
+  if (!s.last_bar_time) return fmt(s.last_close);
+  return (
+    `${fmt(s.last_close)}<br><span class="bar-time" title="open time of the ${waveLabel} bar ` +
+    `this signal is read off">${waveLabel} · ${barTime(s.last_bar_time)}</span>`
+  );
+}
+
 // Live mark (still-open bar) + how far it has drifted from the closed-bar basis
 // the signal was computed on. A drifted/alerting row is flagged so the operator
 // does not act on a stale signal.
@@ -210,6 +232,7 @@ function renderTabs() {
 // --- Signals table --------------------------------------------------------
 
 function renderTable(block) {
+  const waveLabel = (block.intervals || {}).wave || "wave";
   const tbody = document.querySelector("#signals-table tbody");
   tbody.innerHTML = "";
   for (const s of rankedSignals(block)) {
@@ -230,7 +253,7 @@ function renderTable(block) {
       <td>${impulseDot(s.tide_impulse)} / ${impulseDot(s.wave_impulse)} / ${impulseDot(s.entry_impulse)}</td>
       <td>${fmt(s.force_index_2, 4)}</td>
       <td><span class="badge ${s.action}">${s.action.replace("_", " ")}${s.price_alert ? " ⚠" : ""}</span></td>
-      <td>${fmt(s.last_close)}</td>
+      <td>${closeCell(s, waveLabel)}</td>
       <td>${markCell(s)}</td>
       <td>${fmt(s.entry)}</td>
       <td>${fmt(s.stop)}</td>

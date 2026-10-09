@@ -169,6 +169,15 @@ They never change an action — they tell the operator how much to trust it:
   fraction of normal volume and range. Force Index is volume-scaled, so those bars flatten
   every indicator and an intraday signal read off them is noise. (Weekends are removed by
   the session calendar below.)
+- **Market closed** — a refresh made inside a dex's weekend closure (below) reads its
+  signal off the last session bar, while the perp keeps trading on Hyperliquid (trade.xyz's
+  internal price): any order, one already placed included, can fill before the reopening,
+  in a thin book or the hectic reopening hour. The flag gives the closure's bounds and the
+  bar's time.
+
+Every signal also carries `last_bar_time`, the open time (UTC) of the wave bar it is read
+off, shown next to its close in the dashboard table and in the CLI: a refresh can be
+minutes old while its bar is days old.
 
 ## Trading sessions (tradfi perps)
 The `xyz` dex's markets close for the weekend; Elder counts trading days (p.125: five a

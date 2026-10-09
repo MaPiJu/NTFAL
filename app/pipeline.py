@@ -31,7 +31,7 @@ from data.hyperliquid import (
     completed_bars,
 )
 from data.provider import MarketDataProvider
-from data.sessions import WeekendClosure, drop_closed_bars, weekly_from_weekdays
+from data.sessions import WeekendClosure, closure_at, drop_closed_bars, weekly_from_weekdays
 from indicators import ema, force_index, impulse_color, macd_histogram
 from risk.sizing import MonthlyGuard, position_size, six_percent_guard
 from strategy.trade_management import OpenPosition, assess_position, parse_positions
@@ -179,6 +179,34 @@ def size_warnings(size: float, entry: float, equity: float, spec: PerpSpec | Non
             f"${MIN_ORDER_VALUE_USD:.0f} minimum order value — not placeable"
         )
     return out
+
+
+def _utc(ms: int) -> str:
+    return datetime.fromtimestamp(ms / 1000, tz=UTC).strftime("%a %Y-%m-%d %H:%M UTC")
+
+
+def market_closed_warning(
+    now_ms: int, closure: WeekendClosure | None, wave_label: str, last_bar_ms: int
+) -> str | None:
+    """Data-quality flag for a refresh made while the dex's market is closed for
+    the weekend — never an action change.
+
+    The calendar drops the closed-market bars, so the signal is the one of the
+    last session bar until the reopening. The perp itself keeps trading on
+    Hyperliquid (trade.xyz's internal price) the whole time: a stop or limit
+    order, one placed before the close included, can fill before the reopening,
+    in a thin book or in the hectic reopening hour.
+    """
+    window = closure_at(now_ms, closure)
+    if window is None or closure is None:
+        return None
+    close, reopen = window
+    return (
+        f"market closed since {_utc(close)}, reopens {_utc(reopen)} ({closure.label()}): "
+        f"this signal is the last session bar's, the {wave_label} bar of {_utc(last_bar_ms)}. "
+        f"The perp keeps trading on Hyperliquid meanwhile, so any order, one already placed "
+        f"included, can fill before the reopening, in a thin book or the hectic reopening hour"
+    )
 
 
 def fetch_funding_rates(
@@ -500,6 +528,13 @@ def build_horizon(
         row["position_size"] = None
         row["size_warnings"] = []
         row["last_close"] = float(wave["close"].iloc[-1])
+        # The bar the signal is read off (its open time): on a closed market it
+        # can be days old while the refresh is minutes old.
+        last_bar_ms = int(wave["t"].iloc[-1])
+        row["last_bar_time"] = datetime.fromtimestamp(last_bar_ms / 1000, tz=UTC).isoformat()
+        closed = market_closed_warning(now_ms, closure, horizon.wave, last_bar_ms)
+        if closed is not None:
+            row["data_warnings"] = row["data_warnings"] + [closed]
         # Live price = the still-open wave bar's close (falls back to the last
         # completed close when there is no open bar). Lets the operator see how
         # far price has drifted from the basis the signal was computed on.

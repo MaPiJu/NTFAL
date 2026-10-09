@@ -60,7 +60,11 @@ flatten every EMA. Elder counts trading days (five a week), so the
   Monday, close Friday): Hyperliquid's own 1w candles open on **Thursday** (epoch
   alignment) and carry the weekend;
 - weekday holidays are not in the calendar — the near-frozen-market flag covers them;
-- on a weekend the signal is the one of the last session bar, until the reopening.
+- on a weekend the signal is the one of the last session bar, until the reopening, and
+  it says so: a **market closed** data-quality flag gives the closure and the bar's time,
+  since the perp keeps trading on Hyperliquid (trade.xyz's internal price) and an order,
+  one placed on Friday included, can fill before the reopening — in a thin book, or in
+  the reopening hour, the most hectic of the week.
 
 Measured on a cache of the six perps taken 2026-10-08 13:07 UTC (a Thursday), same code
 and same bars with and without the calendar: 9 of the 18 current signals change a level,
@@ -107,9 +111,11 @@ without the calendar the frozen weekend bars drive the signal. A dex without a
 - **Divergences:** recent bullish/bearish divergences between price and MACD-Histogram /
   13-EMA Force Index are surfaced as Elder warnings.
 - **Data-quality flags:** a signal says when its own *inputs* are weak — a tide series too
-  short for a converged EMA26, or a near-frozen market (a tradfi perp on a weekday
+  short for a converged EMA26, a near-frozen market (a tradfi perp on a weekday
   holiday still prints bars on ~5–10% of normal volume; weekends are dropped by the
-  session calendar above). Flags never change an action.
+  session calendar above), or a market closed for the weekend (the signal is the last
+  session bar's). Flags never change an action. Each signal is dated: the table and the
+  CLI show the open time (UTC) of the wave bar it is read off, next to its close.
 - **Risk:** 2% Rule (Iron Triangle sizing, default 1% risk per trade, hard cap 2%, on the
   equity of the first day of the month) and
   the 6% monthly guard that blocks all new entries once monthly losses + open risk reach

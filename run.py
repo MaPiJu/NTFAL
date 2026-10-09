@@ -21,6 +21,7 @@ import math
 import os
 import sys
 import threading
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -59,6 +60,13 @@ def rate_pct(x: float | None) -> str:
         return "+0.00%"
     decimals = max(2, 1 - math.floor(math.log10(abs(pct_value))))
     return f"{pct_value:+.{decimals}f}%"
+
+
+def bar_time(iso: str | None) -> str:
+    """A bar's open time, UTC, short: "Fri 10-02 20:00"."""
+    if not iso:
+        return "—"
+    return datetime.fromisoformat(iso).astimezone(UTC).strftime("%a %m-%d %H:%M")
 
 
 def apgar_detail(apgar: dict[str, Any]) -> str:
@@ -109,7 +117,8 @@ def print_horizon_table(name: str, block: dict[str, Any]) -> None:
     # 14-wide asset column: tradfi names like "xyz:BRENTOIL" are longer than tickers.
     header = (
         f"{'ASSET':<14} {'REGIME':<8} {'TIDE':<7} {'IMP T/W/E':<14} {'FI(2)':>14} {'ACTION':<13} "
-        f"{'CLOSE':>12} {'MARK':>12} {'DRIFT':>7} {'ENTRY':>12} {'STOP':>12} {'R:R':>7} "
+        f"{'CLOSE':>12} {'BAR (UTC)':<15} {'MARK':>12} {'DRIFT':>7} {'ENTRY':>12} "
+        f"{'STOP':>12} {'R:R':>7} "
         f"{'LIMIT':>12} {'LIM STOP':>12} {'LIM R:R':>7} {'TARGET':>12} "
         f"{'APGAR':>6} {'SIZE':>10} {'FUND/H':>11} {'FUND EST':>9}"
     )
@@ -138,7 +147,7 @@ def print_horizon_table(name: str, block: dict[str, Any]) -> None:
             f"{s['asset']:<14} {s.get('market_regime', '—'):<8} {s['tide_trend']:<7} "
             f"{impulses:<14} "
             f"{s['force_index_2']:>14,.4g} {action:<13} "
-            f"{num(close):>12} {num(mark):>12} {drift:>7} "
+            f"{num(close):>12} {bar_time(s.get('last_bar_time')):<15} {num(mark):>12} {drift:>7} "
             f"{num(s['entry']):>12} {num(s['stop']):>12} {rr:>7} "
             f"{num(s['entry_limit']):>12} {num(s.get('entry_limit_stop')):>12} {lim_rr:>7} "
             f"{num(s['target']):>12} {score:>6} {size:>10} "
@@ -187,6 +196,10 @@ def print_signals_tables(snapshot: dict[str, Any]) -> None:
             f"⚠ 6% RULE ACTIVE: monthly losses + open risk ${guard['total_at_risk']:,.2f} "
             f">= limit ${guard['limit']:,.2f} — NO NEW ENTRIES this month."
         )
+    print(
+        "BAR = open time (UTC) of the last completed wave bar, the one the signal is read off; "
+        "CLOSE is its close."
+    )
     print(
         "FUND/H = current hourly funding rate (+: longs pay shorts); FUND EST = funding "
         "over the horizon's holding time, % of notional (+: this trade pays)."
