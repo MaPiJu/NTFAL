@@ -394,6 +394,37 @@ def test_divergence_needs_a_real_zero_line_cross_not_an_endpoint():
     ]
 
 
+def test_divergence_compares_the_indicator_s_own_bottoms_not_its_value_at_the_price_lows():
+    # Elder (p.86): prices fall to a new low while the indicator traces "a more
+    # shallow bottom than during its previous decline" — the indicator's own
+    # bottoms, the lowest point of each decline below zero, which need not fall on
+    # the bars of the price lows. Price lows: 100 at bar 5, 95 at bar 25 (20 apart).
+    close = pd.Series(
+        [110.0 - 2 * i for i in range(6)]
+        + [100.0 + 2 * i for i in range(1, 11)]
+        + [120.0 - 2.5 * i for i in range(1, 11)]
+        + [95.0 + 2 * i for i in range(1, 5)]
+    )
+    first_decline = [-1, -2, -4, -5, -4.5, -4, -3, -2, -1.5, -1]  # bottom -5; -4 at bar 5
+    rally = [0.5, 1, 2, 2, 1.5, 1, 0.5, 0.3, 0.2, 0.1]  # back above zero in between
+    # -3 at the second price low looks shallower than -4, but the decline's own
+    # bottom, -6 two bars earlier, is deeper than -5: no divergence.
+    deeper = [-1, -3, -5, -6, -4, -3, -2, -1, -0.5, -0.2]
+    # -4.5 at the second price low looks deeper than -4, but it is the decline's
+    # bottom, and shallower than -5: a divergence.
+    shallower = [-1, -2, -3, -4, -4.5, -4.5, -3, -2, -1, -0.5]
+
+    def ind(second):
+        return pd.Series(first_decline + rally + second, dtype=float)
+
+    assert _divergence_for_indicator(close, ind(deeper), "TEST") == []
+    assert _divergence_for_indicator(close, ind(shallower), "TEST") == ["bullish TEST divergence"]
+    # Mirror image for tops and the indicator's own peaks.
+    tops = 200.0 - close
+    assert _divergence_for_indicator(tops, -ind(deeper), "TEST") == []
+    assert _divergence_for_indicator(tops, -ind(shallower), "TEST") == ["bearish TEST divergence"]
+
+
 def test_divergence_requires_minimum_separation():
     # Same valid bullish shape (crosses zero between the two lows), but the lows are
     # only 10 bars apart — below Elder/Lovvorn's 20-bar floor (p.88), so it is not

@@ -8,7 +8,7 @@ import pandas as pd
 import pytest
 
 from data.hyperliquid import completed_bars, parse_candles
-from data.sessions import WeekendClosure, drop_closed_bars, weekly_from_weekdays
+from data.sessions import WeekendClosure, closure_at, drop_closed_bars, weekly_from_weekdays
 from strategy.triple_screen import data_warnings
 from tests.conftest import make_ohlcv, synthetic_candles
 
@@ -85,6 +85,31 @@ def test_a_new_york_closure_follows_daylight_saving():
     # Sun 22:00 UTC (EDT) — 48 hourly bars.
     spring = bars("1h", "2026-03-02T00:00", 168)
     assert len(spring) - len(drop_closed_bars(spring, NEW_YORK_WEEKEND)) == 48
+
+
+def test_the_closure_in_progress_is_reported_with_its_bounds():
+    # Saturday noon in summer: inside the New York closure, Fri 21:00 -> Sun 22:00 UTC.
+    assert closure_at(ms("2026-10-03T12:00"), NEW_YORK_WEEKEND) == (
+        ms("2026-10-02T21:00"),
+        ms("2026-10-04T22:00"),
+    )
+    # In winter the same closure sits an hour later in UTC.
+    assert closure_at(ms("2026-11-07T12:00"), NEW_YORK_WEEKEND) == (
+        ms("2026-11-06T22:00"),
+        ms("2026-11-08T23:00"),
+    )
+    # Closed from the close itself; open again from the reopening.
+    assert closure_at(ms("2026-10-02T20:59"), NEW_YORK_WEEKEND) is None
+    assert closure_at(ms("2026-10-02T21:00"), NEW_YORK_WEEKEND) is not None
+    assert closure_at(ms("2026-10-04T21:59"), NEW_YORK_WEEKEND) is not None
+    assert closure_at(ms("2026-10-04T22:00"), NEW_YORK_WEEKEND) is None
+    assert closure_at(ms("2026-10-07T12:00"), NEW_YORK_WEEKEND) is None  # a Wednesday
+    assert closure_at(ms("2026-10-03T12:00"), None) is None  # a 24/7 dex
+
+
+def test_a_closure_describes_itself_in_its_own_time_zone():
+    assert NEW_YORK_WEEKEND.label() == "Fri 17:00 → Sun 18:00 America/New_York"
+    assert XYZ_WEEKEND.label() == "Fri 21:00 → Sun 22:00 UTC"
 
 
 def test_closure_rejects_an_unknown_timezone():

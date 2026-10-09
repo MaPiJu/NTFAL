@@ -60,7 +60,11 @@ flatten every EMA. Elder counts trading days (five a week), so the
   Monday, close Friday): Hyperliquid's own 1w candles open on **Thursday** (epoch
   alignment) and carry the weekend;
 - weekday holidays are not in the calendar — the near-frozen-market flag covers them;
-- on a weekend the signal is the one of the last session bar, until the reopening.
+- on a weekend the signal is the one of the last session bar, until the reopening, and
+  it says so: a **market closed** data-quality flag gives the closure and the bar's time,
+  since the perp keeps trading on Hyperliquid (trade.xyz's internal price) and an order,
+  one placed on Friday included, can fill before the reopening — in a thin book, or in
+  the reopening hour, the most hectic of the week.
 
 Measured on a cache of the six perps taken 2026-10-08 13:07 UTC (a Thursday), same code
 and same bars with and without the calendar: 9 of the 18 current signals change a level,
@@ -105,11 +109,16 @@ without the calendar the frozen weekend bars drive the signal. A dex without a
   an A-trade. The table is sorted best-first and shows the five lines. The 6% guard
   suppresses any pick.
 - **Divergences:** recent bullish/bearish divergences between price and MACD-Histogram /
-  13-EMA Force Index are surfaced as Elder warnings.
+  13-EMA Force Index are surfaced as Elder warnings: a new price low (high) while the
+  indicator's own bottom (top) — the extreme of its decline below zero (rally above
+  it) — is shallower than the previous one, with a zero-line cross in between and the
+  two price extremes 20–40 bars apart.
 - **Data-quality flags:** a signal says when its own *inputs* are weak — a tide series too
-  short for a converged EMA26, or a near-frozen market (a tradfi perp on a weekday
+  short for a converged EMA26, a near-frozen market (a tradfi perp on a weekday
   holiday still prints bars on ~5–10% of normal volume; weekends are dropped by the
-  session calendar above). Flags never change an action.
+  session calendar above), or a market closed for the weekend (the signal is the last
+  session bar's). Flags never change an action. Each signal is dated: the table and the
+  CLI show the open time (UTC) of the wave bar it is read off, next to its close.
 - **Risk:** 2% Rule (Iron Triangle sizing, default 1% risk per trade, hard cap 2%, on the
   equity of the first day of the month) and
   the 6% monthly guard that blocks all new entries once monthly losses + open risk reach
@@ -127,7 +136,10 @@ without the calendar the frozen weekend bars drive the signal. A dex without a
   picks, signal levels/reasons, open-position verdicts, stops and open risk.
 - **SafeZone stops:** protective and trailing stops use Elder-style adverse bar noise
   (average downside low undercuts for longs / upside high breakouts for shorts), not
-  simple volatility; profitable trades are ratcheted to at least break-even.
+  simple volatility; profitable trades are ratcheted to at least break-even. A held
+  position's trailing stop sits on the price grid like every other level, rounded away
+  from the price after the ratchet, and its target toward the entry: Hyperliquid refuses
+  any other price ("Price must be divisible by tick size").
 - **Trade management (open positions):** for trades you already hold, Elder's exit tools
   give a verdict — **hold**, **take profits**, or **exit** (see below).
 

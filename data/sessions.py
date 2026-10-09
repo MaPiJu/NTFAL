@@ -9,8 +9,10 @@ bars are rebuilt from the Monday-Friday daily bars — Hyperliquid's own 1w
 candles open on Thursday (epoch alignment) and carry the weekend.
 
 Weekday holidays are not in the calendar; the near-frozen-market data warning
-covers them. All arithmetic is on the integer `t` / `T` columns (open time and
-inclusive close time, ms UTC), independent of pandas' datetime resolution.
+covers them. While a dex is closed, `closure_at` says so: its perps keep trading
+on Hyperliquid, so a signal read off the last session bar gets a data warning.
+All arithmetic is on the integer `t` / `T` columns (open time and inclusive
+close time, ms UTC), independent of pandas' datetime resolution.
 """
 
 from __future__ import annotations
@@ -56,6 +58,16 @@ class WeekendClosure:
             raise ValueError(f"unknown time zone {timezone!r} (use an IANA name)") from exc
         return cls(close_minute=start, open_minute=end, timezone=timezone)
 
+    def label(self) -> str:
+        """The closure as configured, e.g. "Fri 17:00 → Sun 18:00 America/New_York"."""
+        close, reopen = _weekday_time(self.close_minute), _weekday_time(self.open_minute)
+        return f"{close} → {reopen} {self.timezone}"
+
+
+def _weekday_time(minute: int) -> str:
+    day, rest = divmod(minute, 1440)
+    return f"{WEEKDAYS[day].capitalize()} {rest // 60:02d}:{rest % 60:02d}"
+
 
 def _minute_of_week(text: str) -> int:
     try:
@@ -83,6 +95,17 @@ def drop_closed_bars(bars: pd.DataFrame, closure: WeekendClosure | None) -> pd.D
     starts_closed = bars["t"].to_numpy() >= close_ms
     ends_closed = bars["T"].to_numpy() + 1 <= open_ms
     return bars[~(starts_closed & ends_closed)]
+
+
+def closure_at(now_ms: int, closure: WeekendClosure | None) -> tuple[int, int] | None:
+    """(close, reopening) in UTC ms of the weekend closure `now_ms` falls in, or
+    None while the market is in session (or the dex trades 24/7). The close
+    itself is closed; the reopening is in session again."""
+    if closure is None:
+        return None
+    close, reopen = _closure_bounds(pd.Series([now_ms]), closure)
+    start, end = int(close[0]), int(reopen[0])
+    return (start, end) if start <= now_ms < end else None
 
 
 def _closure_bounds(t_ms: pd.Series, closure: WeekendClosure) -> tuple:

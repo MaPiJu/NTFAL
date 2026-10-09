@@ -501,6 +501,37 @@ def test_pipeline_passes_sz_decimals_to_the_strategy(tmp_path, btc_fixtures, mon
     assert seen == {"BTC": 5}
 
 
+def test_pipeline_passes_sz_decimals_to_trade_management(tmp_path, btc_fixtures, monkeypatch):
+    # A held position's trailing stop and target are rounded to the tick, which
+    # depends on szDecimals: the pipeline hands it over, for a watched coin and for
+    # a held coin outside the watchlist alike (looked up in `meta` on demand).
+    import app.pipeline as pipeline
+
+    seen: dict[str, int | None] = {}
+    real = pipeline.assess_position
+
+    def spy(pos, *args, **kwargs):
+        seen[pos.asset] = kwargs.get("sz_decimals")
+        return real(pos, *args, **kwargs)
+
+    monkeypatch.setattr(pipeline, "assess_position", spy)
+    fixtures = btc_fixtures | {
+        ("ETH", "1w"): btc_fixtures[("BTC", "1w")],
+        ("ETH", "1d"): btc_fixtures[("BTC", "1d")],
+    }
+    addr = "0x" + "ef" * 20
+    state = make_clearinghouse_state(
+        [
+            {"coin": "BTC", "szi": "0.5", "entryPx": "50000.0"},
+            {"coin": "ETH", "szi": "-1.0", "entryPx": "4000.0"},
+        ]
+    )
+    client = make_client(fixtures, tmp_path, clearinghouse_states={addr: state})
+    build_snapshot(make_config(tmp_path, address=addr), client)
+
+    assert seen == {"BTC": 5, "ETH": 4}
+
+
 def _held_btc(tmp_path, btc_fixtures, entry="50000.0"):
     addr = "0x" + "ab" * 20
     state = make_clearinghouse_state([{"coin": "BTC", "szi": "0.5", "entryPx": entry}])
@@ -684,6 +715,63 @@ def test_xyz_bars_skip_the_weekend_and_the_weekly_tide_is_built_from_weekdays(
     assert 5 in weekdays(charts["BTC"]["wave"]["candles"])  # crypto trades 24/7
     (pos,) = snapshot["positions"]
     assert pos["asset"] == "xyz:SP500"
+
+
+def test_a_weekend_signal_says_the_market_is_closed_and_dates_its_bar(
+    tmp_path, monkeypatch, capsys
+):
+    # Saturday 2026-10-03 12:00 UTC: the xyz markets closed on Friday at 17:00 New
+    # York time (21:00 UTC). The signal is the one of the last session bar, yet the
+    # perp keeps trading on Hyperliquid, so an order (one already placed included)
+    # can fill before the reopening. A data warning says so on every horizon, and
+    # the bar each signal comes from is dated in the snapshot and in the CLI. A
+    # weekday refresh carries no such warning.
+    import time
+
+    import run
+
+    closure = WeekendClosure.parse("Fri 17:00", "Sun 18:00", "America/New_York")
+
+    def snapshot_at(now_iso: str) -> dict:
+        now = int(datetime.fromisoformat(now_iso).replace(tzinfo=UTC).timestamp() * 1000)
+        monkeypatch.setattr(time, "time", lambda: now / 1000)
+        bar_ms = {"1d": 86_400_000, "4h": 14_400_000, "1h": 3_600_000, "15m": 900_000}
+        fixtures = {
+            # The last bar served is the one still open at `now`.
+            ("xyz:GOLD", iv): synthetic_candles(
+                iv, n, start=4000.0, step=0.7, end_ms=now // bar_ms[iv] * bar_ms[iv]
+            )
+            for iv, n in (("1d", 300), ("4h", 300), ("1h", 400), ("15m", 400))
+        }
+        cache = tmp_path / now_iso.replace(":", "")
+        cfg = make_config(
+            cache, watchlist=("xyz:GOLD",), horizons=(SWING, SCALP), sessions={"xyz": closure}
+        )
+        return build_snapshot(cfg, make_client(fixtures, cache))
+
+    saturday = snapshot_at("2026-10-03T12:00")
+    for name, last_bar in (
+        ("swing", "2026-10-02T00:00:00+00:00"),  # Friday's daily bar
+        ("scalp", "2026-10-02T20:00:00+00:00"),  # Friday's last session hour
+    ):
+        (row,) = saturday["horizons"][name]["signals"]
+        assert row["last_bar_time"] == last_bar
+        (closed,) = [w for w in row["data_warnings"] if w.startswith("market closed")]
+        assert "Fri 2026-10-02 21:00 UTC" in closed and "Sun 2026-10-04 22:00 UTC" in closed
+        assert "Fri 17:00 → Sun 18:00 America/New_York" in closed
+        assert "already placed" in closed
+
+    run.print_signals_tables(saturday)
+    out = capsys.readouterr().out
+    assert "Fri 10-02 00:00" in out and "Fri 10-02 20:00" in out
+    assert "! data quality: market closed" in out
+
+    wednesday = snapshot_at("2026-10-07T12:00")
+    (row,) = wednesday["horizons"]["scalp"]["signals"]
+    assert row["last_bar_time"] == "2026-10-07T11:00:00+00:00"
+    for block in wednesday["horizons"].values():
+        (row,) = block["signals"]
+        assert not any(w.startswith("market closed") for w in row["data_warnings"])
 
 
 def test_watch_refreshes_never_overlap(tmp_path, monkeypatch):

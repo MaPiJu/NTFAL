@@ -481,6 +481,48 @@ def _last_pivot(values: pd.Series, *, kind: Literal["low", "high"]) -> tuple[int
     return idx, float(values.loc[idx])
 
 
+def _run_end(sign: pd.Series, i: int) -> int:
+    """Last position of the run of True values in `sign` that contains `i`."""
+    while i + 1 < len(sign) and sign.iloc[i + 1]:
+        i += 1
+    return i
+
+
+def _indicator_extremes(
+    indicator: pd.Series, first: int, second: int, *, kind: Literal["low", "high"]
+) -> tuple[float, float, bool] | None:
+    """The indicator's own extremes for two price extremes (positions `first` <
+    `second`), and whether it crossed its zero line between them.
+
+    Elder's bottom is the lowest point of a decline *below zero* (mirror: the top
+    of a rally above it), which need not fall on the price extreme's bar. The first
+    is taken over the below-zero run holding the first price low; the second over
+    everything from the end of that run to the end of the decline holding the
+    second price low — or to the second price low itself, if the indicator is not
+    below zero there. None when the indicator is not below zero at the first price
+    low: there is no first decline to cross out of (p.87).
+    """
+    beyond = indicator < 0 if kind == "low" else indicator > 0
+    if not beyond.iloc[first]:
+        return None
+    start = first
+    while start > 0 and beyond.iloc[start - 1]:
+        start -= 1
+    end = _run_end(beyond, first)
+    if second <= end:  # the same decline: nothing crossed in between
+        return None
+    stop = _run_end(beyond, second) if beyond.iloc[second] else second
+    first_leg = indicator.iloc[start : end + 1]
+    second_leg = indicator.iloc[end + 1 : stop + 1]
+    if kind == "low":
+        at = int(second_leg.to_numpy().argmin())
+        crossed = bool((second_leg.iloc[: at + 1] > 0).any())
+        return float(first_leg.min()), float(second_leg.iloc[at]), crossed
+    at = int(second_leg.to_numpy().argmax())
+    crossed = bool((second_leg.iloc[: at + 1] < 0).any())
+    return float(first_leg.max()), float(second_leg.iloc[at]), crossed
+
+
 def _divergence_for_indicator(
     close: pd.Series,
     indicator: pd.Series,
@@ -491,12 +533,14 @@ def _divergence_for_indicator(
 ) -> list[str]:
     """Detect simple Elder-style price/indicator divergences on recent swings.
 
-    Bullish: latest price low undercuts a prior low while the indicator makes a
-    higher low. Bearish: latest price high exceeds a prior high while the
-    indicator makes a lower high. Two Elder validity gates apply: the indicator
-    must cross its zero line between the two extremes (p.87), and the extremes
-    must sit `min_separation`-`max_separation` bars apart (p.88). Intentionally
-    conservative and warning-only; it never creates trades by itself.
+    Bullish: the latest price low undercuts a prior low while the indicator's own
+    bottom is shallower than during its previous decline (p.86). Bearish: the
+    latest price high exceeds a prior high while the indicator's own top is lower.
+    The indicator's extremes are its own (see `_indicator_extremes`), not its
+    values on the price extremes' bars. Two Elder validity gates apply: the
+    indicator must cross its zero line between its two extremes (p.87), and the
+    price extremes must sit `min_separation`-`max_separation` bars apart (p.88).
+    Intentionally conservative and warning-only; it never creates trades by itself.
     """
     df = pd.DataFrame({"close": close, "indicator": indicator}).dropna().tail(lookback)
     if len(df) < 10:
@@ -514,26 +558,28 @@ def _divergence_for_indicator(
         pi, pc = prev_low
         ri, rc = recent_low
         # Elder (p.87): the indicator MUST cross back above its zero line between
-        # the two bottoms ("an absolute must"); and (p.88) the bottoms must be
+        # its two bottoms ("an absolute must"); and (p.88) the bottoms must be
         # 20-40 bars apart to be tradable. Either gate failing => no divergence.
-        # A cross needs the first bottom below zero; otherwise any positive value
-        # in the window (even the first bottom itself) would pass vacuously.
-        crossed_zero = float(ind.loc[pi]) < 0 and bool((ind.loc[pi:ri] > 0).any())
+        bottoms = _indicator_extremes(ind, pi, ri, kind="low")
         spaced = min_separation <= (ri - pi) <= max_separation
-        if rc < pc and float(ind.loc[ri]) > float(ind.loc[pi]) and crossed_zero and spaced:
-            out.append(f"bullish {name} divergence")
+        if bottoms is not None and rc < pc and spaced:
+            first, second, crossed = bottoms
+            if crossed and second > first:
+                out.append(f"bullish {name} divergence")
 
     prev_high = _last_pivot(prev["close"], kind="high")
     recent_high = _last_pivot(recent["close"], kind="high")
     if prev_high and recent_high:
         pi, pc = prev_high
         ri, rc = recent_high
-        # Mirror image: the indicator must drop below its zero line between the
+        # Mirror image: the indicator must drop below its zero line between its
         # two tops (so the first top must be above zero), 20-40 bars apart.
-        crossed_zero = float(ind.loc[pi]) > 0 and bool((ind.loc[pi:ri] < 0).any())
+        tops = _indicator_extremes(ind, pi, ri, kind="high")
         spaced = min_separation <= (ri - pi) <= max_separation
-        if rc > pc and float(ind.loc[ri]) < float(ind.loc[pi]) and crossed_zero and spaced:
-            out.append(f"bearish {name} divergence")
+        if tops is not None and rc > pc and spaced:
+            first, second, crossed = tops
+            if crossed and second < first:
+                out.append(f"bearish {name} divergence")
     return out
 
 

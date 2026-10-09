@@ -137,7 +137,9 @@ managed on the same chain that would have entered it. Per held position, produce
   a short, and a new key (another entry price) starts fresh. A remembered stop is kept
   while its position is still open — held, or hidden because its dex's lookup failed — and
   dropped once it is closed (its dex was read without it, or it is no longer declared). Both `build_snapshot` and `refresh_horizon`
-  read the previous snapshot for it.
+  read the previous snapshot for it. The stop then goes on the price grid **away from the
+  price** (a long's down, a short's up) — *after* the ratchet, so `stop_hit` and the open
+  risk read the stop an order can carry — and the target **toward the entry**.
 Each position also shows the **funding paid since it opened** (`cumFunding.sinceOpen` from
 `clearinghouseState`; negative = received) — a holding cost the price PnL leaves out. It is
 context only and never changes a verdict.
@@ -145,9 +147,12 @@ Output is informational only; a human exits manually.
 
 Divergence warnings reuse Elder indicators only: recent price/indicator disagreement on
 MACD-Histogram or 13-EMA Force Index is surfaced in the signal reasons/dashboard, without
-introducing new indicators. A divergence counts only when the indicator **crosses its zero
-line between the two extremes** (Elder's "absolute must", p.87) — no crossover, no
-divergence — and only when the two extremes sit ~20–40 bars apart (Elder/Lovvorn, p.88).
+introducing new indicators. The indicator's extremes are **its own** (p.86: "a more
+shallow bottom than during its previous decline"): the lowest point of each decline below
+zero (mirror: the highest of each rally above it), not its value on the bars of the price
+extremes. A divergence counts only when the indicator **crosses its zero line between its
+two extremes** (Elder's "absolute must", p.87) — no crossover, no divergence — and only
+when the two price extremes sit ~20–40 bars apart (Elder/Lovvorn, p.88).
 
 "Average penetration": over the last ~4–6 weeks *of wave bars*, measure how far pullbacks
 pierce below (uptrend) / above (downtrend) the fast EMA — **one value per pullback**, its
@@ -169,6 +174,15 @@ They never change an action — they tell the operator how much to trust it:
   fraction of normal volume and range. Force Index is volume-scaled, so those bars flatten
   every indicator and an intraday signal read off them is noise. (Weekends are removed by
   the session calendar below.)
+- **Market closed** — a refresh made inside a dex's weekend closure (below) reads its
+  signal off the last session bar, while the perp keeps trading on Hyperliquid (trade.xyz's
+  internal price): any order, one already placed included, can fill before the reopening,
+  in a thin book or the hectic reopening hour. The flag gives the closure's bounds and the
+  bar's time.
+
+Every signal also carries `last_bar_time`, the open time (UTC) of the wave bar it is read
+off, shown next to its close in the dashboard table and in the CLI: a refresh can be
+minutes old while its bar is days old.
 
 ## Trading sessions (tradfi perps)
 The `xyz` dex's markets close for the weekend; Elder counts trading days (p.125: five a
@@ -191,7 +205,8 @@ pipeline to every screen and to held positions).
 - **Tick rounding:** every level (entry, limit, stop, target) sits on Hyperliquid's price
   grid, rounded on the prudent side — buy-stop up, sell-stop down; a long's stop and buy
   limit down, a short's stop and sell limit up; the target toward the entry. Reward:risk
-  and the Iron-Triangle size are computed from the rounded entry and stop.
+  and the Iron-Triangle size are computed from the rounded entry and stop. An open
+  position's trailing stop and target follow the same grid (see trade management).
 - **Exchange limits — flag, don't cap:** a size whose notional (size × entry) exceeds the
   perp's `maxLeverage` × equity (from `meta`, with `onlyIsolated` noted), or falls under
   Hyperliquid's $10 minimum order value, carries a `size_warnings` entry. The size stays the

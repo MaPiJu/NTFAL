@@ -31,7 +31,7 @@ from data.hyperliquid import (
     completed_bars,
 )
 from data.provider import MarketDataProvider
-from data.sessions import WeekendClosure, drop_closed_bars, weekly_from_weekdays
+from data.sessions import WeekendClosure, closure_at, drop_closed_bars, weekly_from_weekdays
 from indicators import ema, force_index, impulse_color, macd_histogram
 from risk.sizing import MonthlyGuard, position_size, six_percent_guard
 from strategy.trade_management import OpenPosition, assess_position, parse_positions
@@ -179,6 +179,34 @@ def size_warnings(size: float, entry: float, equity: float, spec: PerpSpec | Non
             f"${MIN_ORDER_VALUE_USD:.0f} minimum order value — not placeable"
         )
     return out
+
+
+def _utc(ms: int) -> str:
+    return datetime.fromtimestamp(ms / 1000, tz=UTC).strftime("%a %Y-%m-%d %H:%M UTC")
+
+
+def market_closed_warning(
+    now_ms: int, closure: WeekendClosure | None, wave_label: str, last_bar_ms: int
+) -> str | None:
+    """Data-quality flag for a refresh made while the dex's market is closed for
+    the weekend — never an action change.
+
+    The calendar drops the closed-market bars, so the signal is the one of the
+    last session bar until the reopening. The perp itself keeps trading on
+    Hyperliquid (trade.xyz's internal price) the whole time: a stop or limit
+    order, one placed before the close included, can fill before the reopening,
+    in a thin book or in the hectic reopening hour.
+    """
+    window = closure_at(now_ms, closure)
+    if window is None or closure is None:
+        return None
+    close, reopen = window
+    return (
+        f"market closed since {_utc(close)}, reopens {_utc(reopen)} ({closure.label()}): "
+        f"this signal is the last session bar's, the {wave_label} bar of {_utc(last_bar_ms)}. "
+        f"The perp keeps trading on Hyperliquid meanwhile, so any order, one already placed "
+        f"included, can fill before the reopening, in a thin book or the hectic reopening hour"
+    )
 
 
 def fetch_funding_rates(
@@ -403,6 +431,20 @@ def hidden_positions(
     return list(out.values())
 
 
+def _held_spec(
+    client: MarketDataProvider, asset: str, specs: Mapping[str, PerpSpec]
+) -> PerpSpec | None:
+    """A held coin's PerpSpec: from the watchlist's, or looked up in `meta` for a
+    coin outside it. None when the lookup fails: the tick then follows the 5
+    significant figures alone."""
+    if asset in specs:
+        return specs[asset]
+    try:
+        return client.validate_watchlist([asset]).get(asset)
+    except (HyperliquidError, httpx.HTTPError):
+        return None
+
+
 def build_positions(
     client: MarketDataProvider,
     horizon: HorizonConfig,
@@ -411,14 +453,17 @@ def build_positions(
     now_ms: int,
     previous_stops: Mapping[str, float] | None = None,
     sessions: Mapping[str, WeekendClosure] | None = None,
+    specs: Mapping[str, PerpSpec] | None = None,
 ) -> list[dict[str, Any]]:
     """Elder exit verdict per open position, reusing scan frames where available.
 
     A held coin outside the watchlist (so not already refreshed) gets its candles
-    fetched on demand. Coins too new to evaluate are skipped silently.
-    `previous_stops` (the previous snapshot's stop memory) keeps each suggested
-    stop from moving back against its trade (Elder, p.224). `sessions` (dex ->
-    weekend closure) shapes the bars of a held coin fetched on demand.
+    — and its `meta` spec — fetched on demand. Coins too new to evaluate are
+    skipped silently. `previous_stops` (the previous snapshot's stop memory) keeps
+    each suggested stop from moving back against its trade (Elder, p.224).
+    `sessions` (dex -> weekend closure) shapes the bars of a held coin fetched on
+    demand. `specs` (the watchlist's) give the szDecimals that cap the decimals of
+    the stop and target on the price grid.
     """
     memory = previous_stops or {}
     out: list[dict[str, Any]] = []
@@ -430,7 +475,16 @@ def build_positions(
             continue
         tide, wave = tw
         previous = memory.get(stop_memory_key(pos.asset, pos.side, pos.entry))
-        verdict = asdict(assess_position(pos, tide, wave, horizon.params, previous))
+        spec = _held_spec(client, pos.asset, specs or {})
+        assessed = assess_position(
+            pos,
+            tide,
+            wave,
+            horizon.params,
+            previous,
+            sz_decimals=spec.sz_decimals if spec is not None else None,
+        )
+        verdict = asdict(assessed)
         verdict["open_risk"] = position_open_risk(verdict)
         out.append(verdict)
     return out
@@ -500,6 +554,13 @@ def build_horizon(
         row["position_size"] = None
         row["size_warnings"] = []
         row["last_close"] = float(wave["close"].iloc[-1])
+        # The bar the signal is read off (its open time): on a closed market it
+        # can be days old while the refresh is minutes old.
+        last_bar_ms = int(wave["t"].iloc[-1])
+        row["last_bar_time"] = datetime.fromtimestamp(last_bar_ms / 1000, tz=UTC).isoformat()
+        closed = market_closed_warning(now_ms, closure, horizon.wave, last_bar_ms)
+        if closed is not None:
+            row["data_warnings"] = row["data_warnings"] + [closed]
         # Live price = the still-open wave bar's close (falls back to the last
         # completed close when there is no open bar). Lets the operator see how
         # far price has drifted from the basis the signal was computed on.
@@ -624,6 +685,7 @@ def build_snapshot(
         now_ms,
         (previous or {}).get("stop_memory"),
         cfg.sessions,
+        coins,
     )
     hidden = hidden_positions(previous, positions, failed_dexes)
     guard, risks = _risk_summary(cfg, positions, hidden)
@@ -719,6 +781,7 @@ def refresh_horizon(
             now_ms,
             previous.get("stop_memory"),
             cfg.sessions,
+            coins,
         )
         hidden = hidden_positions(previous, positions, failed_dexes)
         guard, risks = _risk_summary(cfg, positions, hidden)

@@ -132,6 +132,7 @@ th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: upp
 #signals-table thead th:first-child { border-top-left-radius: 6px; }
 #signals-table thead th:last-child { border-top-right-radius: 6px; }
 td.reason { color: var(--muted); font-size: 12px; max-width: 320px; }
+.bar-time { color: var(--muted); font-size: 11px; white-space: nowrap; }
 
 .badge {
   display: inline-block;

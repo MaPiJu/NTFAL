@@ -6,10 +6,12 @@ import pytest
 
 from strategy.trade_management import (
     OpenPosition,
+    _profit_target,
     assess_position,
     parse_positions,
     safezone_stop,
 )
+from strategy.triple_screen import round_to_tick
 from tests.conftest import make_clearinghouse_state, make_ohlcv
 
 WEEKLY_UP = make_ohlcv([100.0 + 2 * i for i in range(40)], freq="W")
@@ -232,6 +234,55 @@ def test_a_remembered_stop_the_close_went_through_was_hit(side):
     assert tm.verdict == "exit"
     assert any("stop was hit" in r for r in tm.reasons)
     assert not assess_position(pos, weekly, daily).stop_hit  # a fresh stop is never crossed
+
+
+def _on_grid(price: float, tick: float = 0.1) -> bool:
+    return abs(price / tick - round(price / tick)) < 1e-6
+
+
+def _gold_frames(side: str):
+    """A ~4,800 market (tick 0.1) trending in the position's favor, levels off-grid."""
+    sign = 1 if side == "long" else -1
+    weekly = make_ohlcv([4000.0 + sign * 20.37 * i for i in range(40)], freq="W")
+    daily = make_ohlcv([4600.0 + sign * 3.731 * i for i in range(60)])
+    pos = OpenPosition("xyz:GOLD", side, entry=4700.0 if side == "long" else 4400.0, size=1.0)
+    return pos, weekly, daily
+
+
+@pytest.mark.parametrize("side", ["long", "short"])
+def test_held_position_stop_and_target_sit_on_the_price_grid(side):
+    # Hyperliquid refuses an order off its price grid ("Price must be divisible by
+    # tick size"). The trailing stop is rounded away from the price (a long's down,
+    # a short's up), the target toward the entry, as a new setup's levels are.
+    pos, weekly, daily = _gold_frames(side)
+    raw_stop = safezone_stop(pos, daily, in_profit=True)
+    raw_target = _profit_target(pos, weekly)
+    assert not _on_grid(raw_stop) and not _on_grid(raw_target)  # the case at hand
+
+    tm = assess_position(pos, weekly, daily, sz_decimals=4)
+
+    assert _on_grid(tm.suggested_stop) and _on_grid(tm.target)
+    rounding = "down" if side == "long" else "up"
+    assert tm.suggested_stop == round_to_tick(raw_stop, rounding, 4)
+    assert tm.target == round_to_tick(raw_target, rounding, 4)  # toward the entry
+    if tm.target_reached:  # the reason quotes the rounded target
+        assert any(f"{tm.target:.6g}" in r for r in tm.reasons)
+
+
+@pytest.mark.parametrize("side", ["long", "short"])
+def test_the_stop_is_rounded_after_the_ratchet(side):
+    # A remembered stop stored off the grid (before stops were rounded) and tighter
+    # than the new SafeZone level: the ratchet keeps it, then it goes on the grid,
+    # away from the price. Rounding first would leave the off-grid level standing.
+    pos, weekly, daily = _gold_frames(side)
+    fresh = safezone_stop(pos, daily, in_profit=True)
+    remembered = fresh + 0.537 if side == "long" else fresh - 0.537
+
+    tm = assess_position(pos, weekly, daily, previous_stop=remembered)
+
+    rounding = "down" if side == "long" else "up"
+    assert tm.suggested_stop == round_to_tick(remembered, rounding)
+    assert not tm.stop_hit
 
 
 def test_a_held_short_has_no_target_when_the_channel_has_no_lower_line():
