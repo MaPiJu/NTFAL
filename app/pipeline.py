@@ -35,7 +35,14 @@ from data.sessions import WeekendClosure, closure_at, drop_closed_bars, weekly_f
 from indicators import ema, force_index, impulse_color, macd_histogram
 from risk.sizing import MonthlyGuard, position_size, six_percent_guard
 from strategy.trade_management import OpenPosition, assess_position, parse_positions
-from strategy.triple_screen import EMA_FAST, EMA_SLOW, Signal, evaluate_asset, select_best
+from strategy.triple_screen import (
+    EMA_FAST,
+    EMA_SLOW,
+    MARKET_CLOSED,
+    Signal,
+    evaluate_asset,
+    select_best,
+)
 
 SNAPSHOT_FILENAME = "snapshot.json"
 
@@ -561,6 +568,7 @@ def build_horizon(
         closed = market_closed_warning(now_ms, closure, horizon.wave, last_bar_ms)
         if closed is not None:
             row["data_warnings"] = row["data_warnings"] + [closed]
+            row["data_flags"] = row["data_flags"] + [MARKET_CLOSED]
         # Live price = the still-open wave bar's close (falls back to the last
         # completed close when there is no open bar). Lets the operator see how
         # far price has drifted from the basis the signal was computed on.

@@ -45,6 +45,11 @@ MAX_PRICE_DECIMALS = 6
 DEFAULT_PARAMS = StrategyParams()
 # Role -> interval labels, used only for human-readable reasons/plans.
 DEFAULT_INTERVALS = {"tide": "tide", "wave": "wave", "entry": "entry"}
+# Data-quality flag codes (see `data_checks`); MARKET_CLOSED is set by the pipeline,
+# which knows the refresh time and the dex's session calendar.
+SHORT_HISTORY = "short_history"
+LOW_VOLUME = "low_volume"
+MARKET_CLOSED = "market_closed"
 
 
 @dataclass(frozen=True)
@@ -103,6 +108,10 @@ class Signal:
     # Why this signal may be less trustworthy than it looks (short history, a
     # near-frozen market). Data checks, never trading indicators.
     data_warnings: list[str] = field(default_factory=list)
+    # The same checks as stable codes (SHORT_HISTORY, LOW_VOLUME; the pipeline
+    # adds MARKET_CLOSED), so the execution layer can gate on them without
+    # parsing the human-readable messages.
+    data_flags: list[str] = field(default_factory=list)
 
 
 def tick_size(price: float, sz_decimals: int | None = None) -> float:
@@ -612,7 +621,18 @@ def data_warnings(
     min_tide_bars: int = 0,
     intervals: dict[str, str] | None = None,
 ) -> list[str]:
-    """Reasons this signal's *inputs* are weaker than they look.
+    """The messages of `data_checks`."""
+    return [msg for _, msg in data_checks(tide, wave, params, min_tide_bars, intervals)]
+
+
+def data_checks(
+    tide: pd.DataFrame,
+    wave: pd.DataFrame,
+    params: StrategyParams = DEFAULT_PARAMS,
+    min_tide_bars: int = 0,
+    intervals: dict[str, str] | None = None,
+) -> list[tuple[str, str]]:
+    """Reasons this signal's *inputs* are weaker than they look, as (code, message).
 
     These are data checks, not trading indicators (CLAUDE.md: "less is more") —
     they never change an action, they only tell the operator how much to trust it:
@@ -626,13 +646,16 @@ def data_warnings(
        noise, not a market.
     """
     labels = intervals or DEFAULT_INTERVALS
-    out: list[str] = []
+    out: list[tuple[str, str]] = []
 
     bars = len(tide)
     if min_tide_bars and bars < min_tide_bars:
         out.append(
-            f"only {bars} {labels['tide']} bars of history (<{min_tide_bars}): the EMA26 "
-            f"is not converged, so the tide and its Impulse are unreliable"
+            (
+                SHORT_HISTORY,
+                f"only {bars} {labels['tide']} bars of history (<{min_tide_bars}): the EMA26 "
+                f"is not converged, so the tide and its Impulse are unreliable",
+            )
         )
 
     vol = wave["volume"].dropna()
@@ -642,8 +665,11 @@ def data_warnings(
         ratio = float(recent.mean()) / baseline
         if ratio < params.low_volume_ratio:
             out.append(
-                f"last {len(recent)} {labels['wave']} bars traded at {ratio:.0%} of normal "
-                f"volume — market near-closed (weekend / out of session), signal unreliable"
+                (
+                    LOW_VOLUME,
+                    f"last {len(recent)} {labels['wave']} bars traded at {ratio:.0%} of normal "
+                    f"volume — market near-closed (weekend / out of session), signal unreliable",
+                )
             )
     return out
 
@@ -886,6 +912,7 @@ def evaluate_asset(
             params.min_reward_risk,
         )
     order_plan = theoretical_entry_order_plan(candidate, entry, labels["wave"], labels["tide"])
+    checks = data_checks(tide, wave, params, min_tide_bars, labels)
 
     return Signal(
         asset=asset,
@@ -913,5 +940,6 @@ def evaluate_asset(
         intervals=dict(labels),
         tide_bars=len(tide),
         wave_bars=len(wave),
-        data_warnings=data_warnings(tide, wave, params, min_tide_bars, labels),
+        data_warnings=[msg for _, msg in checks],
+        data_flags=[code for code, _ in checks],
     )
