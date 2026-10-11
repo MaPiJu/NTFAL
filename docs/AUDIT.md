@@ -403,3 +403,36 @@ verdict n'a été renversé. Aucun n'est critique. Même protocole que les lots 
   par décision, et les trois points notés au §3 quater (signal du vendredi juste après la
   réouverture, stop au point mort sur une entrée moyenne hors grille, retournement de MACD-H non
   exigé).
+
+---
+
+## 6. Lot 5 — couche d'exécution (opt-in), hors périmètre de l'audit
+
+Décision de l'opérateur du 2026-10-11 : automatiser les trades depuis un VPS, avec une clé
+d'API Hyperliquid, et recevoir un rapport quotidien sur Telegram. Les contraintes « lecture
+seule » de `CLAUDE.md` sont remplacées par des contraintes de sécurité. Le scanner reste sans
+clé. L'exécution vit seule dans `execution/` et `bot.py`, désactivée par défaut et en
+`dry_run` par défaut. La signature passe par une API wallet, et la clé du compte est
+refusée. Choix tranchés par l'opérateur :
+
+| Point | Décision |
+|---|---|
+| Horizon tradé | swing seul (`positions_horizon`) |
+| Signaux exécutés | A-trade (Apgar ≥ 7 sans zéro) **et** R:R ≥ 2, une entrée en attente à la fois |
+| Sorties | entièrement automatiques : stop sur l'exchange dès l'exécution, stop SafeZone suiveur jamais desserré, `EXIT` → clôture, premier `TAKE_PROFITS` → moitié |
+| Entrée | stop-limit au stop-entry du signal (Elder p.161), suivi barre après barre tant que le signal tient |
+
+La couche n'ajoute **aucun indicateur**. Elle lit les signaux et les verdicts du scanner tels
+quels et n'y ajoute que la mécanique d'ordre (spécifiée dans `CLAUDE.md`, « Execution
+layer ») :
+
+- la taille est calculée sur le pire remplissage de la limite ;
+- la règle des 6 % compte le nouveau trade avant de le placer ;
+- le levier garde la liquidation à environ deux fois la distance du stop ;
+- pas d'entrée pendant la fermeture `xyz` ;
+- les drapeaux `low_volume` et `market_closed` bloquent une nouvelle entrée.
+
+Ce dernier point est le seul où un drapeau de qualité des données a un effet : il ne vise
+que le bot, et seulement les nouvelles entrées. La mécanique d'ordre réelle (déclencheurs
+`tpsl: "sl"`, modification par `cloid`) reste **à vérifier sur testnet**
+(`docs/DEPLOIEMENT.md`, §8).

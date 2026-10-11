@@ -1,6 +1,6 @@
 """FastAPI dashboard — read-only display of the daily snapshot.
 
-The server only reads cache/snapshot.json (written by run.py); it never
+The server only reads cache/snapshot.json (written by run.py or bot.py); it never
 contacts the exchange and never places orders.
 """
 

@@ -1,28 +1,45 @@
 # CLAUDE.md — Elder Triple Screen Scanner (Hyperliquid)
 
 ## What this project is
-A **read-only analysis tool** that watches a *small* set of perps tradable on
+An **analysis tool** that watches a *small* set of perps tradable on
 Hyperliquid and evaluates them with Alexander Elder's **Triple Screen** +
 **Impulse** method (*The New Trading for a Living*), on **several timeframe
 horizons at once** (swing, scalp, minutes). It produces a signals table per
 horizon plus interactive charts, so the operator can make a discretionary entry
-decision and place orders **manually**.
+decision and place orders **manually** — and an **opt-in execution bot** (`bot.py`)
+that trades **one** horizon's Triple Screen automatically, through a Hyperliquid
+**API wallet**, with a daily Telegram report (the operator's decision of 2026-10-11).
 
-> This is an analysis/education tool, **not** an auto-trader and **not** financial advice.
+> This is an analysis/education tool and **not** financial advice.
 
 ## Hard constraints (never violate)
-- **No order execution, no signing, no private keys.** Use only *public, keyless,
-  read-only* endpoints on Hyperliquid's `info` endpoint: `candleSnapshot`, `meta`,
-  `metaAndAssetCtxs` (the same universe plus each perp's current market context — read
-  for the **funding rate** only), and `clearinghouseState` (a read-only account lookup of
-  *open positions* for a **public** address, like a block explorer; it takes no key and
-  signs nothing). The codebase must contain no private key, no exchange API key, no
-  `exchange`/`order`/`signing` code path.
-- **No auto-trading loop.** Output is informational only; a human decides and executes.
+- **The scanner stays keyless and read-only.** `data/`, `indicators/`, `strategy/`,
+  `risk/`, `app/` and `run.py` use only *public, keyless, read-only* endpoints on
+  Hyperliquid's `info` endpoint: `candleSnapshot`, `meta`, `metaAndAssetCtxs` (read for
+  the **funding rate** only), and the public account lookups for a **public** address —
+  `clearinghouseState` (open positions, margin), `frontendOpenOrders` (resting orders),
+  `userFillsByTime` (fills). None takes a key or signs anything.
+- **Order execution lives only in `execution/` and `bot.py`, and is opt-in.** Nothing is
+  sent unless `[execution] enabled = true`; the default mode is `dry_run` (every order
+  computed and logged, none sent); `testnet` / `mainnet` must be chosen explicitly.
+  Signing uses the official `hyperliquid-python-sdk`, imported only there.
+- **API wallet only, never a withdrawal path.** The signing key is an API (agent) wallet
+  key read from the environment (`HL_API_PRIVATE_KEY`); the bot refuses the account's own
+  key. The only signed actions are `order`, `modify`, `cancel` and `updateLeverage` — never
+  a withdrawal, transfer, approval or any other action. No key, token or secret ever sits
+  in the repo, `config.toml`, a log line or a Telegram message.
+- **The bot executes the Strategy Spec, nothing else.** It trades only the
+  `positions_horizon`, only A-trades (Trade Apgar ≥ 7, no zero) at reward:risk ≥ 2, one
+  pending entry at a time, never on an asset already held; it manages only the positions
+  **it** opened (a manual position is never touched); every position it holds carries a
+  protective stop on the exchange that is **never loosened**; the 2% and 6% Rules are
+  enforced *before* an order is placed (see "Execution layer").
+- **Tests never reach an exchange.** Execution tests use the dry-run gateway, fake
+  accounts and a stand-in for the SDK's `Exchange`; no test signs a real order.
 - **Don't invent indicators.** "Less is more": implement only the indicators listed in
   the Strategy Spec. Adding more indicators is a regression, not a feature. Data-quality
   checks (bar counts, volume) are *not* indicators — they describe the inputs, never
-  change an action.
+  change an action (the bot may *decline a new entry* on them: `block_on_flags`).
 - **Don't scan the whole universe by default.** The watchlist is a short, explicit list;
   the `"*"` / `"<dex>:*"` wildcards still exist but are not the default.
 - Keep secrets out of the repo. Config (equity, watchlist, risk %, horizons) lives in
@@ -143,7 +160,51 @@ managed on the same chain that would have entered it. Per held position, produce
 Each position also shows the **funding paid since it opened** (`cumFunding.sinceOpen` from
 `clearinghouseState`; negative = received) — a holding cost the price PnL leaves out. It is
 context only and never changes a verdict.
-Output is informational only; a human exits manually.
+In the scanner the verdict is informational; the execution bot acts on it for the
+positions it opened (see "Execution layer").
+
+## Execution layer (opt-in, `execution/` + `bot.py`)
+Turns the `positions_horizon`'s decisions into Hyperliquid orders. Every lookback,
+indicator and verdict comes from the scanner unchanged; the bot adds only order mechanics.
+- **Cadence.** A trade cycle runs after every *entry* bar of the traded horizon (swing:
+  every 4h, 60 s after the close); a protection pass runs every `protect_seconds` (60).
+- **Entry.** With no entry pending, the best signal that is an A-trade with `rr_ok`, with
+  no blocking data flag, no `price_alert`, on an open market and an asset nobody holds,
+  gets a **stop-limit**: trigger = the signal's stop-entry, limit `entry_slippage_pct`
+  beyond. Size = Iron Triangle from the **limit** (the worst fill) on the month-start
+  equity, so a fill at the limit still risks ≤ `risk_pct`. Placed only if the 6% guard's
+  committed risk **plus this trade's** stays ≤ 6%, and the margin fits. Leverage =
+  `floor(0.5 / stop distance)`, capped by `max_leverage` and the perp's maximum (isolated
+  liquidation ≥ ~2× the stop distance away).
+- **Pending entry.** Trailed each cycle to the signal's new stop-entry while its signal
+  still qualifies on the same side (Elder p.161); cancelled when it stops qualifying, on a
+  halt, on a tripped 6% Rule, or when its market closes. Not moved when the live price
+  already went through the new level.
+- **Owned positions.** A filled entry becomes an owned position with the entry's stop.
+  `exit` → close all (IOC reduce-only, `exit_slippage_pct` through the mark); first
+  `take_profits` → close `take_profit_fraction` (all of it when either part would be under
+  $10); otherwise the kept stop tightens to the verdict's `suggested_stop`, never loosens.
+  Exits wait for a closed market to reopen (the exchange stop stays on).
+- **Protection.** Each owned position carries exactly one stop-market reduce-only trigger
+  order, at the kept stop (or the resting one when tighter), sized to the position;
+  duplicates, orphan bot stops, unknown bot entries and the rest of a partly filled entry
+  are cancelled. Manual orders (no bot cloid) are never touched.
+- **Identification.** Every bot order carries a cloid `0x4e544641` ("NTFA") + a kind byte
+  (01 entry, 02 stop, 03 close); modifies keep the cloid. After a lost state file, a
+  position carrying a bot stop is re-adopted at that stop.
+- **State.** `cache/execution_state.json` (atomic writes): owned positions, the pending
+  entry, the month-start equity, the dry run's book and a 7-day actions log. A corrupt file
+  stops the bot rather than being reset.
+- **Equity (`auto_equity`).** Equity = Σ `accountValue` over the dexes read; the first read
+  of a UTC month is its start equity (Elder p.204); the month's realized losses = the net
+  loss of its fills. Unreadable → no new entry that cycle.
+- **Guards.** A dex whose lookup fails concludes nothing about its assets and blocks new
+  entries; `halt_file` blocks new entries and pulls the pending one.
+- **Telegram (`notify/`).** A daily report at `[telegram] report_time` (equity, 24h and
+  month PnL, 6% Rule, fills, the bot's actions and the reasons it did not act, positions
+  with verdict and stop, the pending entry, the horizon's signals) and instant alerts on
+  entries placed/filled, closes and errors. The token comes from `TELEGRAM_BOT_TOKEN` and
+  never reaches a log line.
 
 Divergence warnings reuse Elder indicators only: recent price/indicator disagreement on
 MACD-Histogram or 13-EMA Force Index is surfaced in the signal reasons/dashboard, without
@@ -164,8 +225,11 @@ yesterday_EMA)`) and offset by that average to set the limit.
 duration. That is what lets one implementation serve a weekly tide and a 4h tide.
 
 ## Data-quality flags (not indicators)
-Signals carry `data_warnings` describing when their *inputs* are weaker than they look.
-They never change an action — they tell the operator how much to trust it:
+Signals carry `data_warnings` describing when their *inputs* are weaker than they look,
+and the same checks as stable codes in `data_flags` (`short_history`, `low_volume`,
+`market_closed`). They never change an action — they tell the operator how much to trust
+it; the execution bot declines a *new entry* on the codes listed in
+`[execution] block_on_flags` (default `low_volume`, `market_closed`):
 - **Short tide history** — the EMA26 is seeded at the first bar (`adjust=False`), so with
   few bars a large share of it is still that seed; ~60 bars puts the seed under 1%. The
   tradfi perps on the `xyz` dex are recent listings, so this fires on the swing horizon
@@ -232,13 +296,13 @@ pipeline to every screen and to held positions).
   horizons the value-zone target tightens faster than the SafeZone stop, so sub-2:1 setups
   are the norm there and the operator needs to see them).
 - **Horizon stacking:** each horizon sizes its suggestion as a *standalone* trade risking
-  `risk_pct`. Taking setups from several horizons at once multiplies risk; the 6% rule caps
+  `risk_pct` (the bot trades one horizon only). Taking setups from several horizons at once multiplies risk; the 6% rule caps
   total *open* risk, not the number of simultaneous suggestions. Say so in every UI.
 
 ## Architecture
 - `data/hyperliquid.py` — public `info` client (`httpx`); `candleSnapshot` per coin/interval;
   validate watchlist against the perp `meta` universe; current funding rates per dex from
-  `metaAndAssetCtxs`; `clearinghouseState` open positions for a public address (read-only); cache OHLCV to parquet; parse string OHLCV fields
+  `metaAndAssetCtxs`; `clearinghouseState` open positions, `frontendOpenOrders` and `userFillsByTime` for a public address (read-only); cache OHLCV to parquet; parse string OHLCV fields
   to float; respect the 5000-candle limit.
 - `data/sessions.py` — weekend closure per dex: drop closed-market bars, rebuild weekly bars
   from Monday–Friday daily bars.
@@ -261,6 +325,14 @@ pipeline to every screen and to held positions).
 - `run.py` — one command does a full refresh + (re)builds the dashboard data;
   `--watch` runs one `apscheduler` job per horizon at its own `refresh_seconds`;
   `--horizon NAME` refreshes a single chain.
+- `execution/` — the opt-in order layer: `orders` (cloids, order types, price helpers),
+  `planner` (pure: `reconcile`, `plan_cycle`, `plan_protection`), `gateway` (`DryRunGateway`,
+  `HyperliquidGateway` over the SDK), `account` (positions/orders/equity reads), `state`,
+  `engine` (cycle, protection, report inputs under one lock).
+- `notify/` — `telegram` (Bot API sender, alerts) and `report` (the daily report, French).
+- `bot.py` — the VPS entry point: scheduler (trade cycle per entry bar, protection, daily
+  report), `--once`, `--report`, `--serve`. `deploy/ntfal-bot.service` (systemd) and
+  `docs/DEPLOIEMENT.md` (step-by-step setup, French).
 
 ## Tech & conventions
 - Python 3.11+, fully type-hinted; `ruff` + `black`; `pytest`.
@@ -268,7 +340,8 @@ pipeline to every screen and to held positions).
   `synthetic_candles()` with `httpx.MockTransport`.
 - Lightweight Charts is Apache-2.0 but **requires TradingView attribution**: include the
   attribution notice / `attributionLogo` per its license in the dashboard.
-- Config via `config.toml` (watchlist, horizons, equity, risk_pct) + `.env` for anything sensitive.
+- Config via `config.toml` (watchlist, horizons, equity, risk_pct, `[execution]`, `[telegram]`)
+  + `.env` for anything sensitive (`HL_API_PRIVATE_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`).
 - Watchlist in `config.toml`: explicit coins (e.g. BTC, ETH, or tradfi perps like
   `xyz:GOLD`), `"*"` to scan the **entire** tradable native (crypto) perp universe, and
   `"<dex>:*"` to scan a whole HIP-3 builder dex — `"xyz:*"` is the tradfi universe
@@ -287,3 +360,6 @@ pipeline to every screen and to held positions).
    on any timeframe chain, and the third screen never vetoes.
 4. Risk module returns correct size and correctly trips the 6% guard.
 5. Dashboard renders a signals table + Impulse-colored tide/wave/entry charts per horizon.
+6. Execution: the planner's decisions (entry, trail, cancel, exit, partial profits, stop
+   protection, reconcile/adoption) are covered offline; a dry-run cycle places and trails an
+   entry in the simulated book; the SDK mapping is checked against a stand-in `Exchange`.
