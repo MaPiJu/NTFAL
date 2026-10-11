@@ -1,7 +1,7 @@
 [project]
 name = "ntfal"
 version = "0.1.0"
-description = "Elder Triple Screen scanner for Hyperliquid perps — read-only multi-horizon analysis tool"
+description = "Elder Triple Screen scanner for Hyperliquid perps — multi-horizon analysis, with an opt-in execution bot"
 requires-python = ">=3.11"
 dependencies = [
     "httpx>=0.27",
@@ -14,6 +14,13 @@ dependencies = [
     "apscheduler>=3.10",
     # IANA time zones for the session calendar where the OS has none (Windows).
     "tzdata>=2024.1",
+]
+
+[project.optional-dependencies]
+# Only bot.py in testnet/mainnet mode needs these (order signing with an API wallet);
+# the scanner, the dashboard and the dry run do not.
+bot = [
+    "hyperliquid-python-sdk>=0.24,<0.25",
 ]
 
 [dependency-groups]
