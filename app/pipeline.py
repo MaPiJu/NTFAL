@@ -290,6 +290,12 @@ def expand_watchlist(watchlist: tuple[str, ...], client: MarketDataProvider) -> 
     return dict(sorted(specs.items()))
 
 
+def every_perp_watchlist(client: MarketDataProvider) -> tuple[str, ...]:
+    """A watchlist naming every tradable perp on every dex: "*" for the native
+    (crypto) perps plus "<dex>:*" for each HIP-3 builder dex the exchange lists."""
+    return (WATCHLIST_ALL,) + tuple(f"{dex}:{WATCHLIST_ALL}" for dex in client.perp_dexs() if dex)
+
+
 def mask_address(address: str) -> str:
     """Show only the first 6 and last 4 chars of a public address for display."""
     return f"{address[:6]}…{address[-4:]}" if len(address) > 12 else address

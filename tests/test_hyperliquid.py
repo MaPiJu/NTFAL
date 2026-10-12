@@ -60,6 +60,20 @@ def test_tradable_perps_excludes_delisted(tmp_path, btc_fixtures):
     assert list(perps) == sorted(perps)
 
 
+def test_perp_dexs_lists_the_native_dex_first(tmp_path, btc_fixtures):
+    client = make_client(btc_fixtures, tmp_path)
+    assert client.perp_dexs() == ["", "xyz"]
+
+
+def test_perp_dexs_rejects_a_malformed_payload(tmp_path):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"not": "a list of dexes"})
+
+    http = httpx.Client(transport=httpx.MockTransport(handler))
+    with pytest.raises(HyperliquidError, match="perpDexs"):
+        HyperliquidClient(http=http, cache_dir=tmp_path).perp_dexs()
+
+
 def test_coin_dex():
     assert coin_dex("BTC") == ""
     assert coin_dex("xyz:GOLD") == "xyz"

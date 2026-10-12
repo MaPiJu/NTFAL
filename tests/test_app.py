@@ -316,6 +316,39 @@ def test_cli_horizon_limits_the_run_to_those_horizons(
     assert [j["id"] for j in everything.jobs] == ["refresh-swing", "refresh-scalp"]
 
 
+def test_cli_all_scans_every_tradable_perp_on_every_dex(
+    tmp_path, btc_fixtures, monkeypatch, capsys
+):
+    # --all swaps the config watchlist (here just BTC) for every tradable perp of
+    # every dex the exchange lists, for this run only.
+    import run
+
+    cfg = make_config(tmp_path)
+    client = make_client(btc_fixtures, tmp_path)
+    monkeypatch.setattr(run, "load_config", lambda: cfg)
+    monkeypatch.setattr(run, "HyperliquidClient", lambda cache_dir: client)
+    monkeypatch.setattr(client, "close", lambda: None)
+
+    assert run.main(["--all"]) == 0
+    out = capsys.readouterr().out
+    assert "--all: 6 tradable perps on 2 dexes (native, xyz)" in out
+    block = swing(load_snapshot(tmp_path / "snapshot.json"))
+    # Only BTC has candles in the fixtures: the other perps are scanned and
+    # reported as skipped; the delisted ones are never asked for.
+    scanned = {s["asset"] for s in block["signals"]} | {
+        line.split(" ")[0] for line in block["skipped"]
+    }
+    assert scanned == {"BTC", "ETH", "SOL", "HYPE", "xyz:GOLD", "xyz:SP500"}
+    assert cfg.scanner.watchlist == ("BTC",)  # the config itself is untouched
+
+    def unreachable():
+        raise httpx.ConnectError("down")
+
+    monkeypatch.setattr(client, "perp_dexs", unreachable)
+    with pytest.raises(SystemExit, match="could not list"):
+        run.main(["--all"])
+
+
 def test_load_snapshot_handles_missing_and_corrupt_files(tmp_path):
     assert load_snapshot(tmp_path / "nope.json") == {}
     bad = tmp_path / "bad.json"

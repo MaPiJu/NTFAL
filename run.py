@@ -10,6 +10,8 @@ Usage:
     python run.py --horizon swing     # a quick analysis of one horizon only
     python run.py --horizon swing scalp --serve --watch
                                       # ...or of a few, kept fresh and served
+    python run.py --all --horizon swing
+                                      # every tradable perp on every dex, once
 
 Read-only: this script only calls Hyperliquid's public info endpoint and
 never places, signs, or cancels orders.
@@ -24,19 +26,29 @@ import os
 import sys
 import threading
 from collections.abc import Sequence
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+import httpx
 
 from app.pipeline import (
     SNAPSHOT_FILENAME,
     build_snapshot,
     chosen_horizons,
+    every_perp_watchlist,
+    expand_watchlist,
     load_snapshot,
     refresh_horizon,
 )
 from config import Config, load_config
-from data.hyperliquid import HyperliquidClient
+from data.hyperliquid import (
+    CANDLE_REQUESTS_PER_MINUTE,
+    HyperliquidClient,
+    HyperliquidError,
+    coin_dex,
+)
 from journal import append_journal_entry
 
 # --watch runs one job per horizon on a thread pool, and their cadences line up
@@ -354,6 +366,30 @@ def run_watch(
     return 0
 
 
+def with_every_perp(cfg: Config, scope: Sequence[str] | None) -> Config:
+    """`cfg` with its watchlist replaced by every tradable perp on every dex
+    (--all), and a word on how long that takes at the public API's rate limit."""
+    with HyperliquidClient(cache_dir=cfg.cache_dir) as client:
+        try:
+            watchlist = every_perp_watchlist(client)
+            perps = expand_watchlist(watchlist, client)
+        except (HyperliquidError, httpx.HTTPError) as exc:
+            sys.exit(f"--all: could not list Hyperliquid's perps ({exc})")
+    horizons = chosen_horizons(cfg, scope)
+    # Three candle requests per perp and horizon: tide, wave and entry.
+    minutes = len(perps) * 3 * len(horizons) / CANDLE_REQUESTS_PER_MINUTE
+    # Dexes without a tradable perp today stay in the watchlist (a --watch run picks
+    # up their listings) but are not worth naming.
+    dexes = sorted({coin_dex(coin) for coin in perps})
+    print(
+        f"--all: {len(perps)} tradable perps on {len(dexes)} dexes "
+        f"({', '.join(d or 'native' for d in dexes)}) x {len(horizons)} horizon(s): about "
+        f"{minutes:.0f} min at the public API's ~{CANDLE_REQUESTS_PER_MINUTE} candle "
+        f"requests a minute"
+    )
+    return replace(cfg, scanner=replace(cfg.scanner, watchlist=watchlist))
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--serve", action="store_true", help="serve the dashboard after refreshing")
@@ -372,6 +408,12 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="keep refreshing: one job per horizon, each on its own refresh_seconds",
     )
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="this run scans every tradable perp on every Hyperliquid dex instead of the "
+        "config watchlist (slow: best with --horizon swing)",
+    )
     args = parser.parse_args(argv)
 
     cfg = load_config()
@@ -384,6 +426,9 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(
             f"{exc.args[0]} — choose from {', '.join(h.name for h in cfg.scanner.horizons)}"
         )
+
+    if args.all:
+        cfg = with_every_perp(cfg, scope)
 
     snapshot = do_refresh(cfg, scope=scope)
     print_signals_tables(snapshot)

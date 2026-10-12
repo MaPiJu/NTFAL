@@ -15,8 +15,9 @@ that trades **one** horizon's Triple Screen automatically, through a Hyperliquid
 ## Hard constraints (never violate)
 - **The scanner stays keyless and read-only.** `data/`, `indicators/`, `strategy/`,
   `risk/`, `app/` and `run.py` use only *public, keyless, read-only* endpoints on
-  Hyperliquid's `info` endpoint: `candleSnapshot`, `meta`, `metaAndAssetCtxs` (read for
-  the **funding rate** only), and the public account lookups for a **public** address —
+  Hyperliquid's `info` endpoint: `candleSnapshot`, `perpDexs` (the names of the perp
+  dexes, for `run.py --all`), `meta`, `metaAndAssetCtxs` (read for the **funding rate**
+  only), and the public account lookups for a **public** address —
   `clearinghouseState` (open positions, margin), `frontendOpenOrders` (resting orders),
   `userFillsByTime` (fills). None takes a key or signs anything.
 - **Order execution lives only in `execution/` and `bot.py`, and is opt-in.** Nothing is
@@ -41,7 +42,9 @@ that trades **one** horizon's Triple Screen automatically, through a Hyperliquid
   checks (bar counts, volume) are *not* indicators — they describe the inputs, never
   change an action (the bot may *decline a new entry* on them: `block_on_flags`).
 - **Don't scan the whole universe by default.** The watchlist is a short, explicit list;
-  the `"*"` / `"<dex>:*"` wildcards still exist but are not the default.
+  the `"*"` / `"<dex>:*"` wildcards still exist but are not the default. `run.py --all`
+  scans every tradable perp on every dex on demand, for that run only (the config
+  watchlist, the default runs and the bot keep the short list).
 - Keep secrets out of the repo. Config (equity, watchlist, risk %, horizons) lives in
   `.env` / `config.toml`, never hard-coded.
 
@@ -301,7 +304,7 @@ pipeline to every screen and to held positions).
 
 ## Architecture
 - `data/hyperliquid.py` — public `info` client (`httpx`); `candleSnapshot` per coin/interval;
-  validate watchlist against the perp `meta` universe; current funding rates per dex from
+  the perp dexes (`perpDexs`); validate watchlist against the perp `meta` universe; current funding rates per dex from
   `metaAndAssetCtxs`; `clearinghouseState` open positions, `frontendOpenOrders` and `userFillsByTime` for a public address (read-only); cache OHLCV to parquet; parse string OHLCV fields
   to float; respect the 5000-candle limit.
 - `data/sessions.py` — weekend closure per dex: drop closed-market bars, rebuild weekly bars
@@ -327,7 +330,9 @@ pipeline to every screen and to held positions).
 - `run.py` — one command does a full refresh + (re)builds the dashboard data;
   `--watch` runs one `apscheduler` job per horizon at its own `refresh_seconds`;
   `--horizon NAME [NAME…]` limits a run to those chains (refreshed, printed, watched and
-  shown; the snapshot holds only them).
+  shown; the snapshot holds only them); `--all` swaps the watchlist, for that run, for
+  every tradable perp on every dex (~60 candle requests a minute: ~17 min per horizon
+  for ~340 perps).
 - `execution/` — the opt-in order layer: `orders` (cloids, order types, price helpers),
   `planner` (pure: `reconcile`, `plan_cycle`, `plan_protection`), `gateway` (`DryRunGateway`,
   `HyperliquidGateway` over the SDK), `account` (positions/orders/equity reads), `state`,

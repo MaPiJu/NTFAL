@@ -297,6 +297,28 @@ others back). Open positions are still judged on `positions_horizon` (swing): wh
 not among the horizons asked for, its bars are fetched for the held coins only, so the
 positions table and the 6% guard stay complete.
 
+### Scanning the whole universe (`--all`)
+
+```sh
+uv run python run.py --all --horizon swing            # every tradable perp, swing only
+uv run python run.py --all --horizon swing --serve    # …and browse the result
+```
+
+`--all` swaps the watchlist, **for that run only**, for every tradable perp on every
+Hyperliquid dex: the native crypto perps and each HIP-3 builder dex the exchange lists
+(`perpDexs`: `xyz`, `para`, `mkts`, `io`… — new ones included as they launch). The config
+watchlist, the default runs and the bot stay on the six markets. On 2026-10-12 that was
+337 perps (178 crypto, 114 on `xyz`, 45 on three other dexes).
+
+It is slow by nature: Hyperliquid's public API allows about 60 candle requests a minute
+and each perp takes three per horizon, so count roughly **17 minutes per horizon**, every
+run (the run prints its own estimate). Pair it with `--horizon swing` — scanning the
+three horizons takes about an hour, and `--watch` cannot keep scalp (hourly) or micro
+(5 min) on schedule at that size. The table is sorted best first, and the dashboard hides
+the stand-aside rows by default. Only `xyz` has a weekend calendar (`[sessions.xyz]`): the
+stock and index perps of the other builder dexes are read 24/7, so their weekend bars carry
+the near-frozen data warning.
+
 ## Open the dashboard
 
 ```sh
@@ -332,7 +354,8 @@ Edit `config.toml`:
 - `scanner.watchlist` — explicit perps, e.g. `["xyz:GOLD", "BTC"]`, and/or wildcards:
   `"*"` scans **every** tradable native (crypto) Hyperliquid perp and `"xyz:*"` scans the
   whole HIP-3 `xyz` builder dex — the **tradfi** universe (stocks, indices, gold, oil,
-  forex…). The default is the six markets in the table above. Delisted assets are
+  forex…). The default is the six markets in the table above; `run.py --all` scans every
+  dex for one run without touching it. Delisted assets are
   excluded; a full universe fires several requests per asset per horizon, so it takes
   minutes, and assets without two completed bars on a screen are listed as skipped.
 - `scanner.positions_horizon` — which horizon's bars manage open positions (default

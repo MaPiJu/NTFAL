@@ -1,6 +1,7 @@
 """Read-only client for Hyperliquid's public `info` endpoint.
 
-This module only POSTs *public* info requests: `meta`, `metaAndAssetCtxs` (the
+This module only POSTs *public* info requests: `perpDexs` (the names of the perp
+dexes: the native one and every HIP-3 builder dex), `meta`, `metaAndAssetCtxs` (the
 same universe plus each perp's current market context — read here for the funding
 rate), `candleSnapshot`, and the public account lookups for an address —
 `clearinghouseState` (open positions and margin), `frontendOpenOrders` (resting
@@ -28,6 +29,9 @@ MAX_CANDLES_PER_REQUEST = 5000
 # Scanning the full universe fires hundreds of requests; back off on 429
 # instead of dying mid-refresh.
 RATE_LIMIT_RETRIES = 5
+# Hyperliquid allows 1200 request weight per minute per IP and a candleSnapshot
+# weighs at least 20: about 60 candle requests a minute (used for estimates only).
+CANDLE_REQUESTS_PER_MINUTE = 60
 # Hyperliquid refuses an order worth less than this (size x price), in USD.
 MIN_ORDER_VALUE_USD = 10.0
 
@@ -140,6 +144,20 @@ class HyperliquidClient:
         raise HyperliquidError("unreachable")  # pragma: no cover
 
     # -- meta ---------------------------------------------------------------
+
+    def perp_dexs(self) -> list[str]:
+        """Every perp dex, from `perpDexs`: '' (the native, crypto one) first, then
+        each HIP-3 builder dex ('xyz', …) — new ones included as they launch."""
+        data: Any = None
+        try:
+            data = self._info({"type": "perpDexs"})
+            # The native dex comes back as a null entry.
+            builders = [str(d["name"]) for d in data if d]
+        except (TypeError, KeyError, ValueError) as exc:
+            raise HyperliquidError(
+                f"unexpected perpDexs payload: {json.dumps(data)[:200]}"
+            ) from exc
+        return ["", *builders]
 
     def perp_universe(self, dex: str = "") -> dict[str, dict[str, Any]]:
         """Map of perp name -> meta entry (szDecimals, maxLeverage…) from the `meta` request.
