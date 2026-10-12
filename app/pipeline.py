@@ -58,6 +58,11 @@ CHART_BARS = 300
 # digits, which is ~40% of the snapshot's bytes and not a pixel of extra detail
 # (Hyperliquid itself quotes 5 significant figures).
 CHART_SIG_FIGS = 8
+# Up to this many assets per horizon every card gets its charts. Past it (a
+# `run.py --all` scan: ~340 perps), only the setups and the held coins keep
+# theirs — the cards the dashboard shows — and every asset stays in the table:
+# charting all of them put 73 MB in the snapshot (12 MB for the setups alone).
+CHART_EVERY_ASSET_UP_TO = 30
 
 
 def _round(v: float) -> float:
@@ -526,6 +531,7 @@ def build_horizon(
     charts: dict[str, Any] = {}
     skipped: list[str] = []
     held_frames: dict[str, tuple[pd.DataFrame, pd.DataFrame]] = {}
+    chart_every_asset = len(coins) <= CHART_EVERY_ASSET_UP_TO
 
     for coin in coins:
         if on_progress is not None:
@@ -592,6 +598,8 @@ def build_horizon(
         row["funding_warning"] = funding_warning(cost, sig.entry, sig.stop, horizon.holding_hours)
         signals.append(row)
 
+        if not (chart_every_asset or sig.action != "stand_aside" or coin in held):
+            continue
         charts[coin] = {
             "tide": chart_payload(tide),
             "wave": chart_payload(wave),

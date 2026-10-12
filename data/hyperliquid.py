@@ -29,9 +29,11 @@ MAX_CANDLES_PER_REQUEST = 5000
 # Scanning the full universe fires hundreds of requests; back off on 429
 # instead of dying mid-refresh.
 RATE_LIMIT_RETRIES = 5
-# Hyperliquid allows 1200 request weight per minute per IP and a candleSnapshot
-# weighs at least 20: about 60 candle requests a minute (used for estimates only).
-CANDLE_REQUESTS_PER_MINUTE = 60
+# Candle requests the public API serves a minute, for estimates only: measured
+# at ~105 on 2026-10-12 (an --all swing scan: ~1000 requests in 9.5 min, with
+# the 429 backoff below), where the documented weights — 1200 a minute per IP,
+# 20 per candleSnapshot — would allow 60.
+CANDLE_REQUESTS_PER_MINUTE = 100
 # Hyperliquid refuses an order worth less than this (size x price), in USD.
 MIN_ORDER_VALUE_USD = 10.0
 

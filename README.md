@@ -310,14 +310,19 @@ Hyperliquid dex: the native crypto perps and each HIP-3 builder dex the exchange
 watchlist, the default runs and the bot stay on the six markets. On 2026-10-12 that was
 337 perps (178 crypto, 114 on `xyz`, 45 on three other dexes).
 
-It is slow by nature: Hyperliquid's public API allows about 60 candle requests a minute
-and each perp takes three per horizon, so count roughly **17 minutes per horizon**, every
-run (the run prints its own estimate). Pair it with `--horizon swing` — scanning the
-three horizons takes about an hour, and `--watch` cannot keep scalp (hourly) or micro
-(5 min) on schedule at that size. The table is sorted best first, and the dashboard hides
-the stand-aside rows by default. Only `xyz` has a weekend calendar (`[sessions.xyz]`): the
-stock and index perps of the other builder dexes are read 24/7, so their weekend bars carry
-the near-frozen data warning.
+It is slow by nature: each perp takes three candle requests per horizon and Hyperliquid's
+public API serves about a hundred a minute, so count roughly **10 minutes per horizon**,
+every run (measured: 9½ minutes for the swing horizon over the 337 perps on 2026-10-12;
+the run prints its own estimate). Pair it with `--horizon swing` — the three horizons
+take about half an hour, and `--watch` cannot keep scalp (hourly) or micro (5 min) on
+schedule at that size. The table lists every perp, best first; past 30 assets only the
+setups and the held coins keep their charts (all of them made a 73 MB snapshot, the
+setups alone 12 MB), which are the cards the dashboard shows by default anyway. Only
+`xyz` has a weekend calendar (`[sessions.xyz]`): the stock and index perps of the other
+builder dexes are read 24/7, so their weekend bars carry the near-frozen data warning.
+
+That first scan found 61 setups among 330 evaluated perps (7 were too new), 4 of them
+A-trades at R:R ≥ 2 — MOVE short and ENS long (crypto), `io:IONQ` and `io:ANTH` long.
 
 ## Open the dashboard
 

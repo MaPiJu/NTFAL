@@ -349,6 +349,36 @@ def test_cli_all_scans_every_tradable_perp_on_every_dex(
         run.main(["--all"])
 
 
+def test_a_large_scan_charts_only_the_setups_and_the_held_coins(
+    tmp_path, long_setup_fixtures, monkeypatch
+):
+    # Charting every perp of an --all scan put 73 MB in the snapshot. Past
+    # CHART_EVERY_ASSET_UP_TO assets, a stand-aside coin keeps its table row but no
+    # charts — unless it is held, since its card always shows.
+    import app.pipeline as pipeline
+
+    flat = synthetic_candles("1d", 60, start=50.0, step=0.0)
+    fixtures = long_setup_fixtures | {
+        ("ETH", "1w"): synthetic_candles("1w", 40, start=50.0, step=0.0),
+        ("ETH", "1d"): flat,
+        ("SOL", "1w"): synthetic_candles("1w", 40, start=50.0, step=0.0),
+        ("SOL", "1d"): flat,
+    }
+    addr = "0x" + "cd" * 20
+    held = make_clearinghouse_state([{"coin": "SOL", "szi": "2", "entryPx": "50.0"}])
+    client = make_client(fixtures, tmp_path, clearinghouse_states={addr: held})
+    cfg = make_config(tmp_path, watchlist=("BTC", "ETH", "SOL"), address=addr)
+
+    small = swing(build_snapshot(cfg, client))
+    assert set(small["charts"]) == {"BTC", "ETH", "SOL"}  # a short list: every card
+
+    monkeypatch.setattr(pipeline, "CHART_EVERY_ASSET_UP_TO", 2)
+    large = swing(build_snapshot(cfg, client))
+    actions = {s["asset"]: s["action"] for s in large["signals"]}
+    assert actions == {"BTC": "long", "ETH": "stand_aside", "SOL": "stand_aside"}
+    assert set(large["charts"]) == {"BTC", "SOL"}  # the setup and the held coin
+
+
 def test_load_snapshot_handles_missing_and_corrupt_files(tmp_path):
     assert load_snapshot(tmp_path / "nope.json") == {}
     bad = tmp_path / "bad.json"
