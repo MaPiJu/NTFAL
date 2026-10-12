@@ -233,6 +233,89 @@ def test_refresh_horizon_on_an_empty_snapshot_still_produces_that_block(tmp_path
     assert swing(snapshot)["signals"]
 
 
+def test_a_snapshot_can_hold_only_the_horizons_asked_for(tmp_path, chain_fixtures):
+    # A quick look at one horizon fetches that chain's candles only, and the
+    # snapshot (hence the dashboard) holds that horizon alone.
+    log: list[dict] = []
+    cfg = make_config(tmp_path, horizons=(SWING, SCALP))
+    client = make_client(chain_fixtures, tmp_path, requests_log=log)
+    snapshot = build_snapshot(cfg, client, horizons=["scalp"])
+
+    assert snapshot["horizon_order"] == ["scalp"]
+    assert set(snapshot["horizons"]) == {"scalp"}
+    asked = {r["req"]["interval"] for r in log if r["type"] == "candleSnapshot"}
+    assert asked == {"4h", "1h", "15m"}
+    # Several horizons come back in config order, whatever order they were named in.
+    both = build_snapshot(cfg, client, horizons=["scalp", "swing"])
+    assert both["horizon_order"] == ["swing", "scalp"]
+    with pytest.raises(KeyError, match="unknown horizon: weekly"):
+        build_snapshot(cfg, client, horizons=["weekly"])
+
+
+def test_positions_are_judged_on_their_horizon_even_when_it_is_not_analysed(
+    tmp_path, chain_fixtures
+):
+    # Positions are managed on 'swing'. A scalp-only run still assesses them on
+    # swing bars (fetched for the held coin only), so the 6% guard counts them.
+    addr = "0x" + "ab" * 20
+    state = make_clearinghouse_state([{"coin": "BTC", "szi": "0.5", "entryPx": "50000.0"}])
+    client = make_client(chain_fixtures, tmp_path, clearinghouse_states={addr: state})
+    cfg = make_config(tmp_path, horizons=(SWING, SCALP), address=addr)
+
+    scoped = build_snapshot(cfg, client, horizons=["scalp"])
+    full = build_snapshot(cfg, client)
+    assert scoped["positions"] and scoped["positions"] == full["positions"]
+    assert scoped["guard"] == full["guard"]
+
+    # Refreshing the scalp horizon of that snapshot keeps it scalp-only and, since
+    # no swing refresh will ever come, re-assesses the positions each time.
+    updated = refresh_horizon(cfg, client, "scalp", scoped | {"positions": []})
+    assert updated["horizon_order"] == ["scalp"] and set(updated["horizons"]) == {"scalp"}
+    assert updated["positions"] == full["positions"]
+
+
+def test_cli_horizon_limits_the_run_to_those_horizons(
+    tmp_path, chain_fixtures, monkeypatch, capsys
+):
+    import run
+
+    cfg = make_config(tmp_path, horizons=(SWING, SCALP))
+    client = make_client(chain_fixtures, tmp_path)
+    monkeypatch.setattr(run, "load_config", lambda: cfg)
+    monkeypatch.setattr(run, "HyperliquidClient", lambda cache_dir: client)
+    monkeypatch.setattr(client, "close", lambda: None)  # reused across runs
+
+    assert run.main(["--horizon", "scalp"]) == 0
+    out = capsys.readouterr().out
+    assert "[scalp]" in out and "[swing]" not in out
+    assert set(load_snapshot(tmp_path / "snapshot.json")["horizons"]) == {"scalp"}
+
+    for argv in (["--horizon", "swing", "scalp"], ["--horizon", "swing,scalp"]):
+        run.main(argv)
+        assert set(load_snapshot(tmp_path / "snapshot.json")["horizons"]) == {"swing", "scalp"}
+
+    with pytest.raises(SystemExit):
+        run.main(["--horizon", "weekly"])
+    assert "unknown horizon: weekly" in capsys.readouterr().err
+
+    # --watch keeps only the chosen horizons fresh, each job within that scope.
+    class Scheduler:
+        def __init__(self):
+            self.jobs: list[dict] = []
+
+        def add_job(self, func, trigger, **kwargs):
+            self.jobs.append(kwargs)
+
+    scheduler = Scheduler()
+    run.add_watch_jobs(scheduler, cfg, ["scalp"])
+    assert [(j["id"], j["args"][1:]) for j in scheduler.jobs] == [
+        ("refresh-scalp", ["scalp", ["scalp"]])
+    ]
+    everything = Scheduler()
+    run.add_watch_jobs(everything, cfg)
+    assert [j["id"] for j in everything.jobs] == ["refresh-swing", "refresh-scalp"]
+
+
 def test_load_snapshot_handles_missing_and_corrupt_files(tmp_path):
     assert load_snapshot(tmp_path / "nope.json") == {}
     bad = tmp_path / "bad.json"
@@ -793,7 +876,7 @@ def test_watch_refreshes_never_overlap(tmp_path, monkeypatch):
 
     spans: list[tuple[float, float]] = []
 
-    def slow_build(cfg, client, on_progress=None, previous=None):
+    def slow_build(cfg, client, on_progress=None, previous=None, horizons=None):
         start = time.monotonic()
         time.sleep(0.2)
         spans.append((start, time.monotonic()))

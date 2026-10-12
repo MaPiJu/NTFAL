@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
@@ -652,16 +652,34 @@ def _finalize_block(
     return block
 
 
+def chosen_horizons(cfg: Config, names: Sequence[str] | None) -> tuple[HorizonConfig, ...]:
+    """The configured horizons named in `names`, in config order — every horizon
+    when `names` is empty or None. KeyError on a name the config does not define."""
+    if not names:
+        return cfg.scanner.horizons
+    known = {h.name for h in cfg.scanner.horizons}
+    unknown = [n for n in names if n not in known]
+    if unknown:
+        raise KeyError(f"unknown horizon: {', '.join(unknown)}")
+    return tuple(h for h in cfg.scanner.horizons if h.name in names)
+
+
 def build_snapshot(
     cfg: Config,
     client: MarketDataProvider,
     on_progress: Callable[[str, str], None] | None = None,
     previous: dict[str, Any] | None = None,
+    horizons: Sequence[str] | None = None,
 ) -> dict[str, Any]:
-    """Full refresh of every horizon for the watchlist -> dashboard snapshot dict.
+    """Full refresh of every horizon — or only of `horizons` — for the watchlist ->
+    dashboard snapshot dict, holding exactly the horizons refreshed.
 
     `previous` is the snapshot on disk, if any: its stop memory keeps the open
-    positions' suggested stops from moving back."""
+    positions' suggested stops from moving back. Open positions are judged on the
+    positions horizon whether or not it is among `horizons`; when it is not, its
+    bars are fetched for the held coins only, so the 6% guard still counts every
+    open position."""
+    chosen = chosen_horizons(cfg, horizons)
     now_ms = int(time.time() * 1000)
     coins = expand_watchlist(cfg.scanner.watchlist, client)
     funding = fetch_funding_rates(coins, client)
@@ -676,7 +694,7 @@ def build_snapshot(
 
     blocks: dict[str, Any] = {}
     position_frames: dict[str, tuple[pd.DataFrame, pd.DataFrame]] = {}
-    for horizon in cfg.scanner.horizons:
+    for horizon in chosen:
         block, held_frames = build_horizon(
             cfg, client, horizon, coins, now_ms, held, on_progress, funding
         )
@@ -717,7 +735,7 @@ def build_snapshot(
             name: _finalize_block(block, cfg, coins, guard.blocked)
             for name, block in blocks.items()
         },
-        "horizon_order": [h.name for h in cfg.scanner.horizons],
+        "horizon_order": [h.name for h in chosen],
     }
     return snapshot
 
@@ -754,11 +772,14 @@ def refresh_horizon(
 
     This is what makes per-horizon cadences cheap: a 5-minute "minutes" refresh
     refetches only 5m/15m/1h candles and leaves the swing block — and its
-    `generated_at` — exactly as it was.
+    `generated_at` — exactly as it was. The snapshot keeps the horizons it holds
+    (all of them, or the few a run was limited to) plus this one.
 
     Open positions and the 6% guard are global, so they are recomputed only when
-    the refreshed horizon is the one that manages positions; otherwise the
-    previous snapshot's values are carried over.
+    the refreshed horizon is the one that manages positions — or on every refresh
+    when the snapshot does not hold that horizon (a run limited to others, where
+    nothing else would ever refresh them); otherwise the previous snapshot's
+    values are carried over.
     """
     horizon = cfg.scanner.horizon(name)
     now_ms = int(time.time() * 1000)
@@ -780,12 +801,14 @@ def refresh_horizon(
         cfg, client, horizon, coins, now_ms, held, on_progress, funding
     )
 
-    if name == cfg.scanner.positions_horizon:
+    manages_positions = name == cfg.scanner.positions_horizon
+    if manages_positions or cfg.scanner.positions_horizon not in previous.get("horizons", {}):
         positions = build_positions(
             client,
-            horizon,
+            cfg.scanner.horizon(cfg.scanner.positions_horizon),
             open_positions,
-            held_frames,
+            # Another horizon's bars are no use: the held coins' own are fetched.
+            held_frames if manages_positions else {},
             now_ms,
             previous.get("stop_memory"),
             cfg.sessions,
@@ -811,7 +834,9 @@ def refresh_horizon(
     snapshot["equity_at_month_start"] = cfg.risk.equity_at_month_start
     snapshot["risk_pct"] = cfg.risk.risk_pct
     snapshot["positions_horizon"] = cfg.scanner.positions_horizon
-    snapshot["horizon_order"] = [h.name for h in cfg.scanner.horizons]
+    snapshot["horizon_order"] = [
+        h.name for h in cfg.scanner.horizons if h.name in snapshot["horizons"]
+    ]
     snapshot["position_address"] = (
         mask_address(cfg.positions.address) if cfg.positions.address else None
     )

@@ -316,15 +316,18 @@ pipeline to every screen and to held positions).
 - `strategy/params.py` — `StrategyParams`: every tunable, all bar-counts. Overridable
   globally in `[strategy]` and per horizon in `[scanner.horizons.strategy]`.
 - `risk/sizing.py` — 2% Iron Triangle + 6% monthly guard.
-- `app/pipeline.py` — `build_snapshot` (every horizon) and `refresh_horizon` (one horizon,
-  merged into the stored snapshot — what makes per-horizon cadences cheap).
+- `app/pipeline.py` — `build_snapshot` (every horizon, or the few named) and
+  `refresh_horizon` (one horizon, merged into the stored snapshot — what makes
+  per-horizon cadences cheap). Open positions are always judged on `positions_horizon`:
+  when a snapshot does not hold it, the held coins' bars are fetched on their own.
 - `app/` — **FastAPI** server rendering a dashboard: horizon tabs, a signals table per
   horizon + one card per asset with **tide / wave / entry charts** using **TradingView
   Lightweight Charts v5** (candles colored by Impulse, EMA13/EMA26 overlays, MACD-Hist +
   Force Index panes). The page polls `/api/snapshot` so an intraday horizon updates itself.
 - `run.py` — one command does a full refresh + (re)builds the dashboard data;
   `--watch` runs one `apscheduler` job per horizon at its own `refresh_seconds`;
-  `--horizon NAME` refreshes a single chain.
+  `--horizon NAME [NAME…]` limits a run to those chains (refreshed, printed, watched and
+  shown; the snapshot holds only them).
 - `execution/` — the opt-in order layer: `orders` (cloids, order types, price helpers),
   `planner` (pure: `reconcile`, `plan_cycle`, `plan_protection`), `gateway` (`DryRunGateway`,
   `HyperliquidGateway` over the SDK), `account` (positions/orders/equity reads), `state`,

@@ -280,8 +280,9 @@ pip install pytest ruff black   # dev tools
 ## Run
 
 ```sh
-uv run python run.py                  # one full refresh of every horizon
-uv run python run.py --horizon micro  # refresh just one chain and merge it in
+uv run python run.py                          # one full refresh of every horizon
+uv run python run.py --horizon swing          # a quick analysis of one horizon only
+uv run python run.py --horizon swing scalp    # …or of a few (also: swing,scalp)
 ```
 
 This validates the watchlist against the perp universe, incrementally refreshes each
@@ -289,16 +290,24 @@ horizon's candles into `cache/*.parquet`, computes signals, writes `cache/snapsh
 and prints one table per horizon. A full refresh of six assets across three horizons is
 36 candle requests, about 20 seconds.
 
+`--horizon` limits the whole run to the horizons it names: only their candles are
+fetched, only their tables are printed, `--watch` keeps only them fresh, and the snapshot
+— hence the dashboard — holds only them (the next run without `--horizon` brings the
+others back). Open positions are still judged on `positions_horizon` (swing): when it is
+not among the horizons asked for, its bars are fetched for the held coins only, so the
+positions table and the 6% guard stay complete.
+
 ## Open the dashboard
 
 ```sh
 uv run python run.py --serve            # refresh, then serve
 uv run python run.py --serve --watch    # …and keep every horizon fresh
+uv run python run.py --serve --watch --horizon scalp   # …or only the scalp tab
 # then open http://127.0.0.1:8000
 ```
 
-`--watch` starts one `apscheduler` job per horizon at its own `refresh_seconds`
-(swing daily, scalp hourly, micro every 5 minutes). A partial refresh rewrites only that
+`--watch` starts one `apscheduler` job per horizon (or per `--horizon` one) at its own
+`refresh_seconds` (swing daily, scalp hourly, micro every 5 minutes). A partial refresh rewrites only that
 horizon's block of the snapshot, so the swing block keeps its own timestamp. Without
 `--serve`, `--watch` just keeps the snapshot up to date in the foreground. The watch jobs
 run one at a time and the snapshot is written atomically; still, run **one refreshing
