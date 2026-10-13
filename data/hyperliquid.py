@@ -1,11 +1,13 @@
 """Read-only client for Hyperliquid's public `info` endpoint.
 
-Hard constraint (see CLAUDE.md): this module — and the whole project — only
-POSTs *public* info requests: `meta`, `metaAndAssetCtxs` (the same universe plus
-each perp's current market context — read here for the funding rate),
-`candleSnapshot`, and `clearinghouseState` (open positions for a public address —
-a read-only account lookup, like a block explorer). There is no wallet, no
-private key, no signing, no order path anywhere.
+This module only POSTs *public* info requests: `perpDexs` (the names of the perp
+dexes: the native one and every HIP-3 builder dex), `meta`, `metaAndAssetCtxs` (the
+same universe plus each perp's current market context — read here for the funding
+rate), `candleSnapshot`, and the public account lookups for an address —
+`clearinghouseState` (open positions and margin), `frontendOpenOrders` (resting
+orders) and `userFillsByTime` (fills), all like a block explorer. There is no
+wallet, no private key, no signing here: the scanner runs on this client alone.
+Placing orders is the separate, opt-in `execution` package (see CLAUDE.md).
 """
 
 from __future__ import annotations
@@ -27,6 +29,11 @@ MAX_CANDLES_PER_REQUEST = 5000
 # Scanning the full universe fires hundreds of requests; back off on 429
 # instead of dying mid-refresh.
 RATE_LIMIT_RETRIES = 5
+# Candle requests the public API serves a minute, for estimates only: measured
+# at ~105 on 2026-10-12 (an --all swing scan: ~1000 requests in 9.5 min, with
+# the 429 backoff below), where the documented weights — 1200 a minute per IP,
+# 20 per candleSnapshot — would allow 60.
+CANDLE_REQUESTS_PER_MINUTE = 100
 # Hyperliquid refuses an order worth less than this (size x price), in USD.
 MIN_ORDER_VALUE_USD = 10.0
 
@@ -140,6 +147,20 @@ class HyperliquidClient:
 
     # -- meta ---------------------------------------------------------------
 
+    def perp_dexs(self) -> list[str]:
+        """Every perp dex, from `perpDexs`: '' (the native, crypto one) first, then
+        each HIP-3 builder dex ('xyz', …) — new ones included as they launch."""
+        data: Any = None
+        try:
+            data = self._info({"type": "perpDexs"})
+            # The native dex comes back as a null entry.
+            builders = [str(d["name"]) for d in data if d]
+        except (TypeError, KeyError, ValueError) as exc:
+            raise HyperliquidError(
+                f"unexpected perpDexs payload: {json.dumps(data)[:200]}"
+            ) from exc
+        return ["", *builders]
+
     def perp_universe(self, dex: str = "") -> dict[str, dict[str, Any]]:
         """Map of perp name -> meta entry (szDecimals, maxLeverage…) from the `meta` request.
 
@@ -241,6 +262,44 @@ class HyperliquidClient:
         if not isinstance(state, dict):
             raise HyperliquidError(f"unexpected clearinghouseState payload for {address}")
         return state
+
+    def open_orders(self, address: str, dex: str = "") -> list[dict[str, Any]]:
+        """Public `frontendOpenOrders` for an address on one perp dex: every resting
+        order, trigger orders included (triggerPx, reduceOnly, cloid…). Read-only."""
+        if not address:
+            raise HyperliquidError("a public wallet address is required")
+        payload: dict[str, Any] = {"type": "frontendOpenOrders", "user": address}
+        if dex:
+            payload["dex"] = dex
+        try:
+            orders = self._info(payload)
+        except ValueError as exc:  # a non-JSON body
+            raise HyperliquidError(f"unexpected frontendOpenOrders payload for {address}") from exc
+        if not isinstance(orders, list):
+            raise HyperliquidError(f"unexpected frontendOpenOrders payload for {address}")
+        return orders
+
+    def user_fills(
+        self, address: str, start_ms: int, end_ms: int | None = None
+    ) -> list[dict[str, Any]]:
+        """Public `userFillsByTime` for an address: fills since `start_ms` (coin,
+        side, px, sz, closedPnl, fee, time…), oldest first. Read-only."""
+        if not address:
+            raise HyperliquidError("a public wallet address is required")
+        payload: dict[str, Any] = {
+            "type": "userFillsByTime",
+            "user": address,
+            "startTime": start_ms,
+        }
+        if end_ms is not None:
+            payload["endTime"] = end_ms
+        try:
+            fills = self._info(payload)
+        except ValueError as exc:  # a non-JSON body
+            raise HyperliquidError(f"unexpected userFillsByTime payload for {address}") from exc
+        if not isinstance(fills, list):
+            raise HyperliquidError(f"unexpected userFillsByTime payload for {address}")
+        return sorted(fills, key=lambda f: int(f.get("time", 0)))
 
     # -- candles ------------------------------------------------------------
 

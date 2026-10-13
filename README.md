@@ -1,14 +1,18 @@
 # Elder Triple Screen Scanner — Hyperliquid
 
-A **read-only analysis tool** that watches a small set of perps tradable on Hyperliquid
-and evaluates them with Alexander Elder's **Triple Screen** + **Impulse** method
+An analysis tool that watches a small set of perps tradable on Hyperliquid and evaluates
+them with Alexander Elder's **Triple Screen** + **Impulse** method
 (*The New Trading for a Living*) — on **three timeframe horizons at once**. It produces a
 signals table and interactive charts per horizon so the operator can make a
-**discretionary** entry decision and place orders **manually**.
+**discretionary** entry decision and place orders **manually** — or, opt-in, let
+**`bot.py` trade one horizon automatically** and report daily on Telegram (see
+[Automated execution](#automated-execution-opt-in)).
 
-> **Disclaimer:** this is an analysis/education tool, **not financial advice** and
-> **not an auto-trader**. It places no orders, holds no keys, and only ever calls
-> public read-only endpoints on Hyperliquid's `info` API.
+> **Disclaimer:** this is an analysis/education tool, **not financial advice**. The
+> scanner and the dashboard place no orders, hold no keys, and only ever call public
+> read-only endpoints on Hyperliquid's `info` API. Only `bot.py`, when `[execution]` is
+> enabled outside its default dry run, places real orders — through an API wallet that
+> cannot withdraw.
 
 ## Horizons
 
@@ -168,8 +172,8 @@ The Triple Screen says *when to enter*; this answers the other question — *"I 
 hold this, do I hold, take profits, or get out?"* If you set a **public** wallet address
 in `config.toml` (`[positions].address`) the tool reads your **open positions** from
 Hyperliquid's public `clearinghouseState` info endpoint — a read-only account lookup,
-like a block explorer. **No private key, no signing, no order** is ever involved, and you
-can leave the field empty to disable the feature. `clearinghouseState` is queried per dex,
+like a block explorer. The scanner involves **no private key, no signing, no order**, and
+you can leave the field empty to disable the feature. `clearinghouseState` is queried per dex,
 so positions on the `xyz` tradfi dex are found too.
 
 Positions are judged on the horizon named by `scanner.positions_horizon` (default
@@ -194,8 +198,8 @@ entered it. For each one, only Elder's own exit logic applies (no new indicators
 
 Verdict precedence is **exit > take profits > hold**. The result appears as an "Open
 positions" table at the top of the dashboard and as a panel on the held asset's card, and
-is printed by `run.py`. As everywhere, it is **informational only** — you decide and place
-any order manually.
+is printed by `run.py`. In the scanner it is **informational only** — you decide and place
+any order manually; `bot.py` acts on it for the positions *it* opened (below).
 
 Two PnL columns are shown for each position: **Elder** (computed from the last *completed*
 wave close — the same basis as the verdict) and **live** (the exchange mark price /
@@ -210,6 +214,52 @@ Indicators are exactly the ones in the spec — EMA13/EMA26, MACD-Histogram(12,2
 2-EMA Force Index (EMA-13 FI shown for context), Impulse color. Divergence warnings reuse
 MACD-Histogram and Force Index; no extra indicators are introduced.
 
+## Automated execution (opt-in)
+
+`bot.py` trades **one horizon** — `scanner.positions_horizon`, `swing` by default — with
+the same Triple Screen, and sends a **daily Telegram report** plus an instant alert on
+every entry placed or filled, every close and every error. It is off by default
+(`[execution] enabled = false`), and its default mode, `dry_run`, computes and logs every
+order without sending any. Step-by-step VPS setup (API wallet, Telegram bot, systemd,
+dry run → testnet → mainnet): **[docs/DEPLOIEMENT.md](docs/DEPLOIEMENT.md)**.
+
+What it does:
+
+- **After every entry bar** (swing: every 4h, 60 s after the close) it refreshes the
+  horizon, then:
+  - for each position **it opened**: an `EXIT` verdict closes it (IOC, capped at
+    `exit_slippage_pct` through the mark); the first `TAKE_PROFITS` closes
+    `take_profit_fraction` of it; otherwise its stop follows the SafeZone stop — in the
+    trade's direction only;
+  - the **pending entry** is trailed to the latest completed entry bar while its signal
+    holds (Elder p.161) and cancelled when it doesn't;
+  - with no entry pending, it places a **stop-limit** entry for the best setup that is an
+    **A-trade at R:R ≥ 2**, on an asset nobody holds.
+- **Every minute** it makes sure each position it opened carries exactly one protective
+  **stop-market** (reduce-only) on the exchange, sized to the position and never loosened —
+  so a filled entry is protected within a minute.
+
+Safety rules: the **2% Rule** sizes from the entry's worst fill (its limit); the **6% Rule**
+counts the new trade's risk before placing it; equity, month-start equity and the month's
+losses are read off the account (`auto_equity`), and an unreadable account blocks entries;
+leverage keeps the isolated liquidation ~2× beyond the stop; no entry while the `xyz`
+market is closed (the pending one is pulled at the close; exits wait for the reopening,
+stops stay on); `low_volume` / `market_closed` data flags block entries; a position opened
+**by hand is never touched** (but no entry is placed on an asset already held); creating
+`cache/HALT` pauses new entries; the bot **refuses the account's own key** and needs an
+API wallet (it can trade, not withdraw).
+
+```sh
+uv run python bot.py --report   # send the daily report now
+uv run python bot.py --once     # one trade cycle, then exit
+uv run python bot.py            # run forever (the systemd service)
+uv run python bot.py --serve    # …and serve the dashboard on 127.0.0.1:8000
+```
+
+Every order the bot places carries a client order id tagged as its own (entry, stop or
+close), so after a restart it finds its orders on the exchange; its memory (owned
+positions, the pending entry, the actions log) is `cache/execution_state.json`.
+
 ## Install
 
 Python 3.11+ required.
@@ -220,15 +270,19 @@ uv sync
 
 # or with a plain venv
 python -m venv .venv && source .venv/bin/activate
-pip install httpx pandas pyarrow fastapi uvicorn jinja2 python-dotenv apscheduler
+pip install httpx pandas pyarrow fastapi uvicorn jinja2 python-dotenv apscheduler tzdata
 pip install pytest ruff black   # dev tools
 ```
+
+`bot.py` in `testnet`/`mainnet` mode also needs the official SDK, for order signing:
+`uv sync --extra bot` (or `pip install "hyperliquid-python-sdk>=0.24,<0.25"`).
 
 ## Run
 
 ```sh
-uv run python run.py                  # one full refresh of every horizon
-uv run python run.py --horizon micro  # refresh just one chain and merge it in
+uv run python run.py                          # one full refresh of every horizon
+uv run python run.py --horizon swing          # a quick analysis of one horizon only
+uv run python run.py --horizon swing scalp    # …or of a few (also: swing,scalp)
 ```
 
 This validates the watchlist against the perp universe, incrementally refreshes each
@@ -236,16 +290,51 @@ horizon's candles into `cache/*.parquet`, computes signals, writes `cache/snapsh
 and prints one table per horizon. A full refresh of six assets across three horizons is
 36 candle requests, about 20 seconds.
 
+`--horizon` limits the whole run to the horizons it names: only their candles are
+fetched, only their tables are printed, `--watch` keeps only them fresh, and the snapshot
+— hence the dashboard — holds only them (the next run without `--horizon` brings the
+others back). Open positions are still judged on `positions_horizon` (swing): when it is
+not among the horizons asked for, its bars are fetched for the held coins only, so the
+positions table and the 6% guard stay complete.
+
+### Scanning the whole universe (`--all`)
+
+```sh
+uv run python run.py --all --horizon swing            # every tradable perp, swing only
+uv run python run.py --all --horizon swing --serve    # …and browse the result
+```
+
+`--all` swaps the watchlist, **for that run only**, for every tradable perp on every
+Hyperliquid dex: the native crypto perps and each HIP-3 builder dex the exchange lists
+(`perpDexs`: `xyz`, `para`, `mkts`, `io`… — new ones included as they launch). The config
+watchlist, the default runs and the bot stay on the six markets. On 2026-10-12 that was
+337 perps (178 crypto, 114 on `xyz`, 45 on three other dexes).
+
+It is slow by nature: each perp takes three candle requests per horizon and Hyperliquid's
+public API serves about a hundred a minute, so count roughly **10 minutes per horizon**,
+every run (measured: 9½ minutes for the swing horizon over the 337 perps on 2026-10-12;
+the run prints its own estimate). Pair it with `--horizon swing` — the three horizons
+take about half an hour, and `--watch` cannot keep scalp (hourly) or micro (5 min) on
+schedule at that size. The table lists every perp, best first; past 30 assets only the
+setups and the held coins keep their charts (all of them made a 73 MB snapshot, the
+setups alone 12 MB), which are the cards the dashboard shows by default anyway. Only
+`xyz` has a weekend calendar (`[sessions.xyz]`): the stock and index perps of the other
+builder dexes are read 24/7, so their weekend bars carry the near-frozen data warning.
+
+That first scan found 61 setups among 330 evaluated perps (7 were too new), 4 of them
+A-trades at R:R ≥ 2 — MOVE short and ENS long (crypto), `io:IONQ` and `io:ANTH` long.
+
 ## Open the dashboard
 
 ```sh
 uv run python run.py --serve            # refresh, then serve
 uv run python run.py --serve --watch    # …and keep every horizon fresh
+uv run python run.py --serve --watch --horizon scalp   # …or only the scalp tab
 # then open http://127.0.0.1:8000
 ```
 
-`--watch` starts one `apscheduler` job per horizon at its own `refresh_seconds`
-(swing daily, scalp hourly, micro every 5 minutes). A partial refresh rewrites only that
+`--watch` starts one `apscheduler` job per horizon (or per `--horizon` one) at its own
+`refresh_seconds` (swing daily, scalp hourly, micro every 5 minutes). A partial refresh rewrites only that
 horizon's block of the snapshot, so the swing block keeps its own timestamp. Without
 `--serve`, `--watch` just keeps the snapshot up to date in the foreground. The watch jobs
 run one at a time and the snapshot is written atomically; still, run **one refreshing
@@ -270,7 +359,8 @@ Edit `config.toml`:
 - `scanner.watchlist` — explicit perps, e.g. `["xyz:GOLD", "BTC"]`, and/or wildcards:
   `"*"` scans **every** tradable native (crypto) Hyperliquid perp and `"xyz:*"` scans the
   whole HIP-3 `xyz` builder dex — the **tradfi** universe (stocks, indices, gold, oil,
-  forex…). The default is the six markets in the table above. Delisted assets are
+  forex…). The default is the six markets in the table above; `run.py --all` scans every
+  dex for one run without touching it. Delisted assets are
   excluded; a full universe fires several requests per asset per horizon, so it takes
   minutes, and assets without two completed bars on a screen are listed as skipped.
 - `scanner.positions_horizon` — which horizon's bars manage open positions (default
@@ -296,16 +386,24 @@ Edit `config.toml`:
   trades not visible from the configured public address; visible positions are risked
   automatically from their Elder trailing stop.
 - `positions.address` — **public** wallet address (0x…) used to read your open positions
-  for trade management. Read-only: a public address only, never a private key; nothing is
-  signed and no order is placed. Empty disables trade management.
+  for trade management — a public address only, never a private key. It is also the
+  account `bot.py` trades for. Empty disables trade management.
 - `[[positions.manual]]` — manually declared open positions, for a trade the configured
   address cannot see. Each entry takes `asset` (watchlist naming, e.g. `"xyz:GOLD"`),
   `side` (`"long"`/`"short"`), `size` (asset units) and `entry` (price); they get the same
   Elder exit analysis as positions read from Hyperliquid.
 - `[journal]` — set `enabled` and `path` for the append-only JSONL scan journal.
+- `[execution]` — `bot.py`: `enabled`, `mode` (`dry_run` / `testnet` / `mainnet`), the
+  traded `horizon` (must be `positions_horizon`), the entry / exit / stop slippage caps,
+  `take_profit_fraction`, `max_leverage`, `margin`, `protect_seconds`, `block_on_flags`,
+  `auto_equity` and the `halt_file`. Each key is documented in `config.toml`.
+- `[telegram]` — `enabled`, the daily `report_time` in `timezone`, and `alerts` (instant
+  messages).
 
 `EQUITY`, `RISK_PCT`, and `HL_ADDRESS` can also be overridden via environment variables /
-`.env` (see `.env.example`). No secrets are needed anywhere.
+`.env` (see `.env.example`). The scanner needs no secret; `bot.py` reads its two from
+`.env` only: `HL_API_PRIVATE_KEY` (an **API wallet** key, testnet/mainnet only) and
+`TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`.
 
 ## Development
 

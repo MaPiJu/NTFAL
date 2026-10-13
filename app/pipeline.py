@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
@@ -35,7 +35,14 @@ from data.sessions import WeekendClosure, closure_at, drop_closed_bars, weekly_f
 from indicators import ema, force_index, impulse_color, macd_histogram
 from risk.sizing import MonthlyGuard, position_size, six_percent_guard
 from strategy.trade_management import OpenPosition, assess_position, parse_positions
-from strategy.triple_screen import EMA_FAST, EMA_SLOW, Signal, evaluate_asset, select_best
+from strategy.triple_screen import (
+    EMA_FAST,
+    EMA_SLOW,
+    MARKET_CLOSED,
+    Signal,
+    evaluate_asset,
+    select_best,
+)
 
 SNAPSHOT_FILENAME = "snapshot.json"
 
@@ -51,6 +58,11 @@ CHART_BARS = 300
 # digits, which is ~40% of the snapshot's bytes and not a pixel of extra detail
 # (Hyperliquid itself quotes 5 significant figures).
 CHART_SIG_FIGS = 8
+# Up to this many assets per horizon every card gets its charts. Past it (a
+# `run.py --all` scan: ~340 perps), only the setups and the held coins keep
+# theirs — the cards the dashboard shows — and every asset stays in the table:
+# charting all of them put 73 MB in the snapshot (12 MB for the setups alone).
+CHART_EVERY_ASSET_UP_TO = 30
 
 
 def _round(v: float) -> float:
@@ -283,6 +295,12 @@ def expand_watchlist(watchlist: tuple[str, ...], client: MarketDataProvider) -> 
     return dict(sorted(specs.items()))
 
 
+def every_perp_watchlist(client: MarketDataProvider) -> tuple[str, ...]:
+    """A watchlist naming every tradable perp on every dex: "*" for the native
+    (crypto) perps plus "<dex>:*" for each HIP-3 builder dex the exchange lists."""
+    return (WATCHLIST_ALL,) + tuple(f"{dex}:{WATCHLIST_ALL}" for dex in client.perp_dexs() if dex)
+
+
 def mask_address(address: str) -> str:
     """Show only the first 6 and last 4 chars of a public address for display."""
     return f"{address[:6]}…{address[-4:]}" if len(address) > 12 else address
@@ -513,6 +531,7 @@ def build_horizon(
     charts: dict[str, Any] = {}
     skipped: list[str] = []
     held_frames: dict[str, tuple[pd.DataFrame, pd.DataFrame]] = {}
+    chart_every_asset = len(coins) <= CHART_EVERY_ASSET_UP_TO
 
     for coin in coins:
         if on_progress is not None:
@@ -561,6 +580,7 @@ def build_horizon(
         closed = market_closed_warning(now_ms, closure, horizon.wave, last_bar_ms)
         if closed is not None:
             row["data_warnings"] = row["data_warnings"] + [closed]
+            row["data_flags"] = row["data_flags"] + [MARKET_CLOSED]
         # Live price = the still-open wave bar's close (falls back to the last
         # completed close when there is no open bar). Lets the operator see how
         # far price has drifted from the basis the signal was computed on.
@@ -578,6 +598,8 @@ def build_horizon(
         row["funding_warning"] = funding_warning(cost, sig.entry, sig.stop, horizon.holding_hours)
         signals.append(row)
 
+        if not (chart_every_asset or sig.action != "stand_aside" or coin in held):
+            continue
         charts[coin] = {
             "tide": chart_payload(tide),
             "wave": chart_payload(wave),
@@ -644,16 +666,34 @@ def _finalize_block(
     return block
 
 
+def chosen_horizons(cfg: Config, names: Sequence[str] | None) -> tuple[HorizonConfig, ...]:
+    """The configured horizons named in `names`, in config order — every horizon
+    when `names` is empty or None. KeyError on a name the config does not define."""
+    if not names:
+        return cfg.scanner.horizons
+    known = {h.name for h in cfg.scanner.horizons}
+    unknown = [n for n in names if n not in known]
+    if unknown:
+        raise KeyError(f"unknown horizon: {', '.join(unknown)}")
+    return tuple(h for h in cfg.scanner.horizons if h.name in names)
+
+
 def build_snapshot(
     cfg: Config,
     client: MarketDataProvider,
     on_progress: Callable[[str, str], None] | None = None,
     previous: dict[str, Any] | None = None,
+    horizons: Sequence[str] | None = None,
 ) -> dict[str, Any]:
-    """Full refresh of every horizon for the watchlist -> dashboard snapshot dict.
+    """Full refresh of every horizon — or only of `horizons` — for the watchlist ->
+    dashboard snapshot dict, holding exactly the horizons refreshed.
 
     `previous` is the snapshot on disk, if any: its stop memory keeps the open
-    positions' suggested stops from moving back."""
+    positions' suggested stops from moving back. Open positions are judged on the
+    positions horizon whether or not it is among `horizons`; when it is not, its
+    bars are fetched for the held coins only, so the 6% guard still counts every
+    open position."""
+    chosen = chosen_horizons(cfg, horizons)
     now_ms = int(time.time() * 1000)
     coins = expand_watchlist(cfg.scanner.watchlist, client)
     funding = fetch_funding_rates(coins, client)
@@ -668,7 +708,7 @@ def build_snapshot(
 
     blocks: dict[str, Any] = {}
     position_frames: dict[str, tuple[pd.DataFrame, pd.DataFrame]] = {}
-    for horizon in cfg.scanner.horizons:
+    for horizon in chosen:
         block, held_frames = build_horizon(
             cfg, client, horizon, coins, now_ms, held, on_progress, funding
         )
@@ -709,7 +749,7 @@ def build_snapshot(
             name: _finalize_block(block, cfg, coins, guard.blocked)
             for name, block in blocks.items()
         },
-        "horizon_order": [h.name for h in cfg.scanner.horizons],
+        "horizon_order": [h.name for h in chosen],
     }
     return snapshot
 
@@ -746,11 +786,14 @@ def refresh_horizon(
 
     This is what makes per-horizon cadences cheap: a 5-minute "minutes" refresh
     refetches only 5m/15m/1h candles and leaves the swing block — and its
-    `generated_at` — exactly as it was.
+    `generated_at` — exactly as it was. The snapshot keeps the horizons it holds
+    (all of them, or the few a run was limited to) plus this one.
 
     Open positions and the 6% guard are global, so they are recomputed only when
-    the refreshed horizon is the one that manages positions; otherwise the
-    previous snapshot's values are carried over.
+    the refreshed horizon is the one that manages positions — or on every refresh
+    when the snapshot does not hold that horizon (a run limited to others, where
+    nothing else would ever refresh them); otherwise the previous snapshot's
+    values are carried over.
     """
     horizon = cfg.scanner.horizon(name)
     now_ms = int(time.time() * 1000)
@@ -772,12 +815,14 @@ def refresh_horizon(
         cfg, client, horizon, coins, now_ms, held, on_progress, funding
     )
 
-    if name == cfg.scanner.positions_horizon:
+    manages_positions = name == cfg.scanner.positions_horizon
+    if manages_positions or cfg.scanner.positions_horizon not in previous.get("horizons", {}):
         positions = build_positions(
             client,
-            horizon,
+            cfg.scanner.horizon(cfg.scanner.positions_horizon),
             open_positions,
-            held_frames,
+            # Another horizon's bars are no use: the held coins' own are fetched.
+            held_frames if manages_positions else {},
             now_ms,
             previous.get("stop_memory"),
             cfg.sessions,
@@ -803,7 +848,9 @@ def refresh_horizon(
     snapshot["equity_at_month_start"] = cfg.risk.equity_at_month_start
     snapshot["risk_pct"] = cfg.risk.risk_pct
     snapshot["positions_horizon"] = cfg.scanner.positions_horizon
-    snapshot["horizon_order"] = [h.name for h in cfg.scanner.horizons]
+    snapshot["horizon_order"] = [
+        h.name for h in cfg.scanner.horizons if h.name in snapshot["horizons"]
+    ]
     snapshot["position_address"] = (
         mask_address(cfg.positions.address) if cfg.positions.address else None
     )

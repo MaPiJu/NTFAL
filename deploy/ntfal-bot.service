@@ -1,0 +1,37 @@
+# systemd unit for bot.py on a VPS — see docs/DEPLOIEMENT.md.
+#
+# Install (as root), assuming the repo is cloned in /opt/ntfal and owned by a
+# dedicated "ntfal" user:
+#   cp deploy/ntfal-bot.service /etc/systemd/system/
+#   systemctl daemon-reload && systemctl enable --now ntfal-bot
+#   journalctl -u ntfal-bot -f          # follow the log
+#
+# Stopping the service leaves the protective stops resting on the exchange.
+
+[Unit]
+Description=NTFAL — Elder Triple Screen bot (Hyperliquid)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=ntfal
+Group=ntfal
+WorkingDirectory=/opt/ntfal
+# .env holds the API wallet key and the Telegram token: chmod 600, owned by ntfal.
+# python-dotenv reads it from the working directory; nothing else is needed here.
+ExecStart=/opt/ntfal/.venv/bin/python bot.py
+Restart=on-failure
+RestartSec=30
+# Unbuffered output, so journalctl shows each line as it happens.
+Environment=PYTHONUNBUFFERED=1
+
+# Hardening: the bot only needs to write its cache directory.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/ntfal/cache
+
+[Install]
+WantedBy=multi-user.target

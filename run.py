@@ -7,7 +7,11 @@ Usage:
     python run.py --serve --watch     # keep each horizon refreshed on its own
                                       # cadence (swing daily, scalp hourly,
                                       # minutes every 5 min) while serving
-    python run.py --horizon micro     # refresh a single horizon and exit
+    python run.py --horizon swing     # a quick analysis of one horizon only
+    python run.py --horizon swing scalp --serve --watch
+                                      # ...or of a few, kept fresh and served
+    python run.py --all --horizon swing
+                                      # every tradable perp on every dex, once
 
 Read-only: this script only calls Hyperliquid's public info endpoint and
 never places, signs, or cancels orders.
@@ -21,18 +25,30 @@ import math
 import os
 import sys
 import threading
+from collections.abc import Sequence
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import httpx
+
 from app.pipeline import (
     SNAPSHOT_FILENAME,
     build_snapshot,
+    chosen_horizons,
+    every_perp_watchlist,
+    expand_watchlist,
     load_snapshot,
     refresh_horizon,
 )
 from config import Config, load_config
-from data.hyperliquid import HyperliquidClient
+from data.hyperliquid import (
+    CANDLE_REQUESTS_PER_MINUTE,
+    HyperliquidClient,
+    HyperliquidError,
+    coin_dex,
+)
 from journal import append_journal_entry
 
 # --watch runs one job per horizon on a thread pool, and their cadences line up
@@ -283,8 +299,11 @@ def _progress(horizon: str, coin: str) -> None:
     print(f"  [{horizon}] refreshing {coin}…", flush=True)
 
 
-def do_refresh(cfg: Config, horizon: str | None = None) -> dict[str, Any]:
-    """Refresh every horizon, or just one and merge it into the stored snapshot."""
+def do_refresh(
+    cfg: Config, horizon: str | None = None, scope: Sequence[str] | None = None
+) -> dict[str, Any]:
+    """Build a snapshot of the horizons in `scope` (every horizon by default), or
+    refresh just `horizon` and merge it into the stored snapshot."""
     with _REFRESH_LOCK:
         # Both paths read the previous snapshot: besides the horizons a partial
         # refresh merges into, it holds the stop memory (a suggested stop never
@@ -293,8 +312,10 @@ def do_refresh(cfg: Config, horizon: str | None = None) -> dict[str, Any]:
         with HyperliquidClient(cache_dir=cfg.cache_dir) as client:
             if horizon is None or not previous.get("horizons"):
                 # Nothing to merge into yet — a partial refresh would leave the
-                # other horizons missing from the dashboard, so do a full one.
-                snapshot = build_snapshot(cfg, client, on_progress=_progress, previous=previous)
+                # other horizons missing from the dashboard, so build the whole scope.
+                snapshot = build_snapshot(
+                    cfg, client, on_progress=_progress, previous=previous, horizons=scope
+                )
             else:
                 snapshot = refresh_horizon(cfg, client, horizon, previous, on_progress=_progress)
         out = write_snapshot(cfg, snapshot)
@@ -304,14 +325,15 @@ def do_refresh(cfg: Config, horizon: str | None = None) -> dict[str, Any]:
     return snapshot
 
 
-def add_watch_jobs(scheduler: Any, cfg: Config) -> None:
-    """One recurring refresh job per horizon, each on its own cadence."""
-    for h in cfg.scanner.horizons:
+def add_watch_jobs(scheduler: Any, cfg: Config, scope: Sequence[str] | None = None) -> None:
+    """One recurring refresh job per horizon in `scope` (every horizon by
+    default), each on its own cadence."""
+    for h in chosen_horizons(cfg, scope):
         scheduler.add_job(
             do_refresh,
             "interval",
             seconds=h.refresh_seconds,
-            args=[cfg, h.name],
+            args=[cfg, h.name, scope],
             id=f"refresh-{h.name}",
             max_instances=1,  # a slow refresh must not stack on itself
             coalesce=True,  # missed runs collapse into one
@@ -319,13 +341,15 @@ def add_watch_jobs(scheduler: Any, cfg: Config) -> None:
         print(f"watching '{h.name}' every {h.refresh_seconds}s")
 
 
-def run_watch(cfg: Config, serve: bool, host: str, port: int) -> int:
-    """Keep every horizon fresh, optionally while serving the dashboard."""
+def run_watch(
+    cfg: Config, serve: bool, host: str, port: int, scope: Sequence[str] | None = None
+) -> int:
+    """Keep every horizon in `scope` fresh, optionally while serving the dashboard."""
     if serve:
         from apscheduler.schedulers.background import BackgroundScheduler
 
         scheduler = BackgroundScheduler(timezone="UTC")
-        add_watch_jobs(scheduler, cfg)
+        add_watch_jobs(scheduler, cfg, scope)
         scheduler.start()
 
         import uvicorn
@@ -336,10 +360,34 @@ def run_watch(cfg: Config, serve: bool, host: str, port: int) -> int:
     from apscheduler.schedulers.blocking import BlockingScheduler
 
     scheduler = BlockingScheduler(timezone="UTC")
-    add_watch_jobs(scheduler, cfg)
+    add_watch_jobs(scheduler, cfg, scope)
     print("watch mode running (Ctrl-C to stop)")
     scheduler.start()  # blocks until interrupted
     return 0
+
+
+def with_every_perp(cfg: Config, scope: Sequence[str] | None) -> Config:
+    """`cfg` with its watchlist replaced by every tradable perp on every dex
+    (--all), and a word on how long that takes at the public API's rate limit."""
+    with HyperliquidClient(cache_dir=cfg.cache_dir) as client:
+        try:
+            watchlist = every_perp_watchlist(client)
+            perps = expand_watchlist(watchlist, client)
+        except (HyperliquidError, httpx.HTTPError) as exc:
+            sys.exit(f"--all: could not list Hyperliquid's perps ({exc})")
+    horizons = chosen_horizons(cfg, scope)
+    # Three candle requests per perp and horizon: tide, wave and entry.
+    minutes = len(perps) * 3 * len(horizons) / CANDLE_REQUESTS_PER_MINUTE
+    # Dexes without a tradable perp today stay in the watchlist (a --watch run picks
+    # up their listings) but are not worth naming.
+    dexes = sorted({coin_dex(coin) for coin in perps})
+    print(
+        f"--all: {len(perps)} tradable perps on {len(dexes)} dexes "
+        f"({', '.join(d or 'native' for d in dexes)}) x {len(horizons)} horizon(s): about "
+        f"{minutes:.0f} min at the public API's ~{CANDLE_REQUESTS_PER_MINUTE} candle "
+        f"requests a minute"
+    )
+    return replace(cfg, scanner=replace(cfg.scanner, watchlist=watchlist))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -350,28 +398,44 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--horizon",
         metavar="NAME",
-        help="refresh only this horizon (e.g. micro) and merge it into the snapshot",
+        nargs="+",
+        action="extend",
+        help="analyse only these horizons (e.g. --horizon swing, --horizon swing scalp): "
+        "only they are refreshed, printed, watched and shown on the dashboard",
     )
     parser.add_argument(
         "--watch",
         action="store_true",
         help="keep refreshing: one job per horizon, each on its own refresh_seconds",
     )
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="this run scans every tradable perp on every Hyperliquid dex instead of the "
+        "config watchlist (slow: best with --horizon swing)",
+    )
     args = parser.parse_args(argv)
 
     cfg = load_config()
-    if args.horizon is not None and args.horizon not in {h.name for h in cfg.scanner.horizons}:
+    # "--horizon swing scalp", "--horizon swing --horizon scalp" and
+    # "--horizon swing,scalp" all name the same two horizons.
+    scope = [name for arg in args.horizon or [] for name in arg.split(",") if name] or None
+    try:
+        chosen_horizons(cfg, scope)
+    except KeyError as exc:
         parser.error(
-            f"unknown horizon {args.horizon!r} — "
-            f"choose from {', '.join(h.name for h in cfg.scanner.horizons)}"
+            f"{exc.args[0]} — choose from {', '.join(h.name for h in cfg.scanner.horizons)}"
         )
 
-    snapshot = do_refresh(cfg, args.horizon)
+    if args.all:
+        cfg = with_every_perp(cfg, scope)
+
+    snapshot = do_refresh(cfg, scope=scope)
     print_signals_tables(snapshot)
     print_positions_table(snapshot)
 
     if args.watch:
-        return run_watch(cfg, args.serve, args.host, args.port)
+        return run_watch(cfg, args.serve, args.host, args.port, scope)
 
     if args.serve:
         import uvicorn

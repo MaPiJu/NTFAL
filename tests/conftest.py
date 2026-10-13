@@ -69,6 +69,9 @@ def make_client(
         payload = json.loads(request.content)
         if requests_log is not None:
             requests_log.append(payload)
+        if payload["type"] == "perpDexs":
+            # The native dex is a null entry; builder dexes carry their name.
+            return httpx.Response(200, json=[None] + [{"name": d} for d in META_BY_DEX if d])
         if payload["type"] == "meta":
             dex = payload.get("dex", "")
             if dex not in META_BY_DEX:

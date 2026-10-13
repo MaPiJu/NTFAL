@@ -233,6 +233,152 @@ def test_refresh_horizon_on_an_empty_snapshot_still_produces_that_block(tmp_path
     assert swing(snapshot)["signals"]
 
 
+def test_a_snapshot_can_hold_only_the_horizons_asked_for(tmp_path, chain_fixtures):
+    # A quick look at one horizon fetches that chain's candles only, and the
+    # snapshot (hence the dashboard) holds that horizon alone.
+    log: list[dict] = []
+    cfg = make_config(tmp_path, horizons=(SWING, SCALP))
+    client = make_client(chain_fixtures, tmp_path, requests_log=log)
+    snapshot = build_snapshot(cfg, client, horizons=["scalp"])
+
+    assert snapshot["horizon_order"] == ["scalp"]
+    assert set(snapshot["horizons"]) == {"scalp"}
+    asked = {r["req"]["interval"] for r in log if r["type"] == "candleSnapshot"}
+    assert asked == {"4h", "1h", "15m"}
+    # Several horizons come back in config order, whatever order they were named in.
+    both = build_snapshot(cfg, client, horizons=["scalp", "swing"])
+    assert both["horizon_order"] == ["swing", "scalp"]
+    with pytest.raises(KeyError, match="unknown horizon: weekly"):
+        build_snapshot(cfg, client, horizons=["weekly"])
+
+
+def test_positions_are_judged_on_their_horizon_even_when_it_is_not_analysed(
+    tmp_path, chain_fixtures
+):
+    # Positions are managed on 'swing'. A scalp-only run still assesses them on
+    # swing bars (fetched for the held coin only), so the 6% guard counts them.
+    addr = "0x" + "ab" * 20
+    state = make_clearinghouse_state([{"coin": "BTC", "szi": "0.5", "entryPx": "50000.0"}])
+    client = make_client(chain_fixtures, tmp_path, clearinghouse_states={addr: state})
+    cfg = make_config(tmp_path, horizons=(SWING, SCALP), address=addr)
+
+    scoped = build_snapshot(cfg, client, horizons=["scalp"])
+    full = build_snapshot(cfg, client)
+    assert scoped["positions"] and scoped["positions"] == full["positions"]
+    assert scoped["guard"] == full["guard"]
+
+    # Refreshing the scalp horizon of that snapshot keeps it scalp-only and, since
+    # no swing refresh will ever come, re-assesses the positions each time.
+    updated = refresh_horizon(cfg, client, "scalp", scoped | {"positions": []})
+    assert updated["horizon_order"] == ["scalp"] and set(updated["horizons"]) == {"scalp"}
+    assert updated["positions"] == full["positions"]
+
+
+def test_cli_horizon_limits_the_run_to_those_horizons(
+    tmp_path, chain_fixtures, monkeypatch, capsys
+):
+    import run
+
+    cfg = make_config(tmp_path, horizons=(SWING, SCALP))
+    client = make_client(chain_fixtures, tmp_path)
+    monkeypatch.setattr(run, "load_config", lambda: cfg)
+    monkeypatch.setattr(run, "HyperliquidClient", lambda cache_dir: client)
+    monkeypatch.setattr(client, "close", lambda: None)  # reused across runs
+
+    assert run.main(["--horizon", "scalp"]) == 0
+    out = capsys.readouterr().out
+    assert "[scalp]" in out and "[swing]" not in out
+    assert set(load_snapshot(tmp_path / "snapshot.json")["horizons"]) == {"scalp"}
+
+    for argv in (["--horizon", "swing", "scalp"], ["--horizon", "swing,scalp"]):
+        run.main(argv)
+        assert set(load_snapshot(tmp_path / "snapshot.json")["horizons"]) == {"swing", "scalp"}
+
+    with pytest.raises(SystemExit):
+        run.main(["--horizon", "weekly"])
+    assert "unknown horizon: weekly" in capsys.readouterr().err
+
+    # --watch keeps only the chosen horizons fresh, each job within that scope.
+    class Scheduler:
+        def __init__(self):
+            self.jobs: list[dict] = []
+
+        def add_job(self, func, trigger, **kwargs):
+            self.jobs.append(kwargs)
+
+    scheduler = Scheduler()
+    run.add_watch_jobs(scheduler, cfg, ["scalp"])
+    assert [(j["id"], j["args"][1:]) for j in scheduler.jobs] == [
+        ("refresh-scalp", ["scalp", ["scalp"]])
+    ]
+    everything = Scheduler()
+    run.add_watch_jobs(everything, cfg)
+    assert [j["id"] for j in everything.jobs] == ["refresh-swing", "refresh-scalp"]
+
+
+def test_cli_all_scans_every_tradable_perp_on_every_dex(
+    tmp_path, btc_fixtures, monkeypatch, capsys
+):
+    # --all swaps the config watchlist (here just BTC) for every tradable perp of
+    # every dex the exchange lists, for this run only.
+    import run
+
+    cfg = make_config(tmp_path)
+    client = make_client(btc_fixtures, tmp_path)
+    monkeypatch.setattr(run, "load_config", lambda: cfg)
+    monkeypatch.setattr(run, "HyperliquidClient", lambda cache_dir: client)
+    monkeypatch.setattr(client, "close", lambda: None)
+
+    assert run.main(["--all"]) == 0
+    out = capsys.readouterr().out
+    assert "--all: 6 tradable perps on 2 dexes (native, xyz)" in out
+    block = swing(load_snapshot(tmp_path / "snapshot.json"))
+    # Only BTC has candles in the fixtures: the other perps are scanned and
+    # reported as skipped; the delisted ones are never asked for.
+    scanned = {s["asset"] for s in block["signals"]} | {
+        line.split(" ")[0] for line in block["skipped"]
+    }
+    assert scanned == {"BTC", "ETH", "SOL", "HYPE", "xyz:GOLD", "xyz:SP500"}
+    assert cfg.scanner.watchlist == ("BTC",)  # the config itself is untouched
+
+    def unreachable():
+        raise httpx.ConnectError("down")
+
+    monkeypatch.setattr(client, "perp_dexs", unreachable)
+    with pytest.raises(SystemExit, match="could not list"):
+        run.main(["--all"])
+
+
+def test_a_large_scan_charts_only_the_setups_and_the_held_coins(
+    tmp_path, long_setup_fixtures, monkeypatch
+):
+    # Charting every perp of an --all scan put 73 MB in the snapshot. Past
+    # CHART_EVERY_ASSET_UP_TO assets, a stand-aside coin keeps its table row but no
+    # charts — unless it is held, since its card always shows.
+    import app.pipeline as pipeline
+
+    flat = synthetic_candles("1d", 60, start=50.0, step=0.0)
+    fixtures = long_setup_fixtures | {
+        ("ETH", "1w"): synthetic_candles("1w", 40, start=50.0, step=0.0),
+        ("ETH", "1d"): flat,
+        ("SOL", "1w"): synthetic_candles("1w", 40, start=50.0, step=0.0),
+        ("SOL", "1d"): flat,
+    }
+    addr = "0x" + "cd" * 20
+    held = make_clearinghouse_state([{"coin": "SOL", "szi": "2", "entryPx": "50.0"}])
+    client = make_client(fixtures, tmp_path, clearinghouse_states={addr: held})
+    cfg = make_config(tmp_path, watchlist=("BTC", "ETH", "SOL"), address=addr)
+
+    small = swing(build_snapshot(cfg, client))
+    assert set(small["charts"]) == {"BTC", "ETH", "SOL"}  # a short list: every card
+
+    monkeypatch.setattr(pipeline, "CHART_EVERY_ASSET_UP_TO", 2)
+    large = swing(build_snapshot(cfg, client))
+    actions = {s["asset"]: s["action"] for s in large["signals"]}
+    assert actions == {"BTC": "long", "ETH": "stand_aside", "SOL": "stand_aside"}
+    assert set(large["charts"]) == {"BTC", "SOL"}  # the setup and the held coin
+
+
 def test_load_snapshot_handles_missing_and_corrupt_files(tmp_path):
     assert load_snapshot(tmp_path / "nope.json") == {}
     bad = tmp_path / "bad.json"
@@ -793,7 +939,7 @@ def test_watch_refreshes_never_overlap(tmp_path, monkeypatch):
 
     spans: list[tuple[float, float]] = []
 
-    def slow_build(cfg, client, on_progress=None, previous=None):
+    def slow_build(cfg, client, on_progress=None, previous=None, horizons=None):
         start = time.monotonic()
         time.sleep(0.2)
         spans.append((start, time.monotonic()))
