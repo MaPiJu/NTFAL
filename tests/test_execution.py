@@ -152,7 +152,7 @@ def test_through_price_moves_against_the_order_onto_the_grid():
     assert through_price(4000.0, True, 0.005, 4) == 4020.0
     assert through_price(4000.0, False, 0.10, 4) == 3600.0
     # Off the grid: a buy's worst price rounds up, a sell's down.
-    assert through_price(1.23456, True, 0.01, 0) == 1.2469
+    assert through_price(1.23456, True, 0.01, 0) == 1.247  # 1.2469056 rounded up
     assert through_price(1.23456, False, 0.01, 0) == 1.2222
 
 
