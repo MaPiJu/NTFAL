@@ -3,9 +3,10 @@
 This module only POSTs *public* info requests: `perpDexs` (the names of the perp
 dexes: the native one and every HIP-3 builder dex), `meta`, `metaAndAssetCtxs` (the
 same universe plus each perp's current market context — read here for the funding
-rate), `candleSnapshot`, and the public account lookups for an address —
-`clearinghouseState` (open positions and margin), `frontendOpenOrders` (resting
-orders) and `userFillsByTime` (fills), all like a block explorer. There is no
+rate, the open interest and the mark price), `candleSnapshot`, and the public
+account lookups for an address — `clearinghouseState` (open positions and margin),
+`frontendOpenOrders` (resting orders) and `userFillsByTime` (fills), all like a
+block explorer. There is no
 wallet, no private key, no signing here: the scanner runs on this client alone.
 Placing orders is the separate, opt-in `execution` package (see CLAUDE.md).
 """
@@ -76,6 +77,27 @@ class PerpSpec:
             max_leverage=int(leverage) if leverage else None,
             only_isolated=bool(entry.get("onlyIsolated", False)),
         )
+
+
+@dataclass(frozen=True)
+class AssetContext:
+    """One perp's current market context, from `metaAndAssetCtxs`. Each field is
+    None when the payload leaves it out."""
+
+    funding: float | None = None  # hourly rate, fraction of notional (+: longs pay)
+    open_interest: float | None = None  # one side, in coins
+    mark_price: float | None = None
+
+    @property
+    def open_interest_usd(self) -> float | None:
+        """Open interest in USD (coins x mark): how much money the market holds."""
+        if self.open_interest is None or self.mark_price is None:
+            return None
+        return self.open_interest * self.mark_price
+
+
+def _optional_float(value: Any) -> float | None:
+    return None if value is None else float(value)
 
 
 def coin_dex(coin: str) -> str:
@@ -209,12 +231,12 @@ class HyperliquidClient:
             if not entry.get("isDelisted", False)
         }
 
-    def funding_rates(self, dex: str = "") -> dict[str, float]:
-        """Current funding rate of every perp of a dex, from `metaAndAssetCtxs`.
+    def asset_contexts(self, dex: str = "") -> dict[str, AssetContext]:
+        """Every perp of a dex -> its current market context, from `metaAndAssetCtxs`.
 
-        Each rate is HOURLY, as a fraction of the position's notional: positive,
-        longs pay shorts; negative, shorts pay longs. The response pairs the
-        `meta` universe with one context per perp, matched by position.
+        The response pairs the `meta` universe with one context per perp, matched
+        by position. The funding rate is HOURLY, as a fraction of the position's
+        notional: positive, longs pay shorts; negative, shorts pay longs.
         """
         payload: dict[str, Any] = {"type": "metaAndAssetCtxs"}
         if dex:
@@ -227,9 +249,12 @@ class HyperliquidClient:
             meta, ctxs = data
             universe = meta["universe"]
             return {
-                entry["name"]: float(ctx["funding"])
+                entry["name"]: AssetContext(
+                    funding=_optional_float(ctx.get("funding")),
+                    open_interest=_optional_float(ctx.get("openInterest")),
+                    mark_price=_optional_float(ctx.get("markPx")),
+                )
                 for entry, ctx in zip(universe, ctxs, strict=True)
-                if ctx.get("funding") is not None
             }
         except (TypeError, KeyError, ValueError, AttributeError) as exc:
             # zip(strict=True) raises ValueError when the two lists differ in length.
@@ -338,8 +363,11 @@ class HyperliquidClient:
     ) -> pd.DataFrame:
         """Incremental refresh: fetch only bars at/after the last cached open.
 
-        The last cached bar is always refetched because it may have been open
-        when it was cached. Result is merged, deduped, persisted to parquet.
+        The last cached bar is refetched because it may have been open when it was
+        cached — unless it is still open now: then no bar has completed since the
+        last fetch, and the cache is returned without a request (a weekly tide is
+        fetched once a week, not on every 4h refresh). Its still-open bar is then
+        as of that fetch. Result is merged, deduped, persisted to parquet.
         """
         if interval not in INTERVAL_MS:
             raise HyperliquidError(f"unsupported interval: {interval}")
@@ -350,6 +378,8 @@ class HyperliquidClient:
         cached = self.load_cached(coin, interval)
         if cached is None or cached.empty:
             start_ms = now_ms - lookback_bars * bar_ms
+        elif int(cached["T"].iloc[-1]) > now_ms:
+            return cached
         else:
             start_ms = int(cached["t"].iloc[-1])
 

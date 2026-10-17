@@ -522,6 +522,13 @@ function applyStandAsideFilter() {
     : "";
 }
 
+// $12.3M, $480k: an open interest at a glance.
+function usdShort(x) {
+  if (x >= 1e9) return `$${+(x / 1e9).toPrecision(3)}B`;
+  if (x >= 1e6) return `$${+(x / 1e6).toPrecision(3)}M`;
+  return `$${+(x / 1e3).toPrecision(3)}k`;
+}
+
 // --- Top-level render -----------------------------------------------------
 
 function renderAll() {
@@ -572,9 +579,18 @@ function renderAll() {
   }
 
   if (!block) return;
-  document.getElementById("horizon-meta").textContent =
+  // Markets under the open-interest floor are not scanned at all (thin book,
+  // wide spreads): count them here, name them on hover.
+  const thin = snapshot.thin_markets || [];
+  const horizonMeta = document.getElementById("horizon-meta");
+  horizonMeta.textContent =
     `${chainOf(block)} · refreshed ${ago(block.generated_at)}` +
-    (block.skipped && block.skipped.length ? ` · skipped: ${block.skipped.join(", ")}` : "");
+    (block.skipped && block.skipped.length ? ` · skipped: ${block.skipped.join(", ")}` : "") +
+    (thin.length
+      ? ` · ${thin.length} market${thin.length === 1 ? "" : "s"} under ` +
+        `${usdShort(snapshot.min_open_interest_usd)} of open interest not scanned`
+      : "");
+  horizonMeta.title = thin.map((m) => `${m.asset} ${usdShort(m.open_interest_usd)}`).join("\n");
 
   renderTable(block);
   renderCards(block, snapshot);

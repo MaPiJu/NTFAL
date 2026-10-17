@@ -1,7 +1,12 @@
 # systemd unit for bot.py on a VPS — see docs/DEPLOIEMENT.md.
 #
-# Install (as root), assuming the repo is cloned in /opt/ntfal and owned by a
-# dedicated "ntfal" user:
+# One service does it all: every horizon refreshed right after its entry bar
+# closes, the dashboard on 127.0.0.1:8000 (reach it through an SSH tunnel), the
+# daily Telegram report and — only when config.toml sets [execution] enabled =
+# true — the trade cycle and the stop checks.
+#
+# deploy/install.sh installs it (as root, from the clone, e.g. /opt/ntfal, owned
+# by a dedicated "ntfal" user). By hand:
 #   cp deploy/ntfal-bot.service /etc/systemd/system/
 #   systemctl daemon-reload && systemctl enable --now ntfal-bot
 #   journalctl -u ntfal-bot -f          # follow the log
@@ -20,11 +25,13 @@ Group=ntfal
 WorkingDirectory=/opt/ntfal
 # .env holds the API wallet key and the Telegram token: chmod 600, owned by ntfal.
 # python-dotenv reads it from the working directory; nothing else is needed here.
-ExecStart=/opt/ntfal/.venv/bin/python bot.py
+ExecStart=/opt/ntfal/.venv/bin/python bot.py --serve --host 127.0.0.1 --port 8000
 Restart=on-failure
 RestartSec=30
 # Unbuffered output, so journalctl shows each line as it happens.
 Environment=PYTHONUNBUFFERED=1
+# The code is read-only to the service (below): no __pycache__ to write.
+Environment=PYTHONDONTWRITEBYTECODE=1
 
 # Hardening: the bot only needs to write its cache directory.
 NoNewPrivileges=true

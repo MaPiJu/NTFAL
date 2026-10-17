@@ -40,8 +40,9 @@ class HorizonConfig:
       - `wave`  = second screen, the counter-trend oscillator that finds entries
       - `entry` = third screen, lower-timeframe entry timing
 
-    `refresh_seconds` is how often this horizon is worth recomputing (a weekly
-    tide does not change every five minutes); `min_tide_bars` is the history
+    `refresh_seconds` is how often this horizon is recomputed: a whole number of
+    entry bars (by default one — every level moves with the entry bar), each run
+    right after a bar closes (app/cadence.py); `min_tide_bars` is the history
     depth below which the slow EMA26 is not converged and the tide/Impulse are
     flagged as unreliable — surfaced, never silently trusted. `holding_hours` is
     a typical holding time for a trade on this chain, over which the current
@@ -74,6 +75,9 @@ class ScannerConfig:
     horizons: tuple[HorizonConfig, ...]
     # Horizon whose bars drive Elder trade management for OPEN positions.
     positions_horizon: str
+    # Markets holding less open interest than this (USD) are left out of the scan:
+    # a thin book means wide spreads and slippage. 0 keeps every market.
+    min_open_interest_usd: float = 0.0
 
     def horizon(self, name: str) -> HorizonConfig:
         for h in self.horizons:
@@ -213,6 +217,16 @@ def _horizon(raw: dict[str, Any], base: StrategyParams) -> HorizonConfig:
                 f"candle interval ({', '.join(INTERVAL_MS)})"
             )
 
+    # Refreshes run right after an entry bar closes, so their period is a whole
+    # number of entry bars: one by default.
+    entry_s = INTERVAL_MS[entry] // 1000
+    refresh_seconds = int(raw.get("refresh_seconds", entry_s))
+    if refresh_seconds <= 0 or refresh_seconds % entry_s:
+        raise ConfigError(
+            f"horizon {name!r}: refresh_seconds {refresh_seconds} must be a whole number "
+            f"of {entry} entry bars ({entry_s} s each)"
+        )
+
     return HorizonConfig(
         name=name,
         label=str(raw.get("label", name)),
@@ -222,7 +236,7 @@ def _horizon(raw: dict[str, Any], base: StrategyParams) -> HorizonConfig:
         lookback_tide=int(raw.get("lookback_tide", 260)),
         lookback_wave=int(raw.get("lookback_wave", 500)),
         lookback_entry=int(raw.get("lookback_entry", 300)),
-        refresh_seconds=int(raw.get("refresh_seconds", 86_400)),
+        refresh_seconds=refresh_seconds,
         min_tide_bars=int(raw.get("min_tide_bars", 60)),
         holding_hours=float(raw["holding_hours"]) if "holding_hours" in raw else None,
         params=_strategy_params(raw.get("strategy", {}), base),
@@ -337,6 +351,10 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> Config:
             f"({', '.join(h.name for h in horizons)})"
         )
 
+    min_open_interest = float(s.get("min_open_interest_usd", 0.0))
+    if min_open_interest < 0:
+        raise ConfigError("scanner.min_open_interest_usd must be >= 0")
+
     equity = float(os.environ.get("EQUITY", r["equity"]))
     risk_pct = float(os.environ.get("RISK_PCT", r["risk_pct"]))
     # A public address is not a secret, but allow an env override so it need not
@@ -362,6 +380,7 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> Config:
             watchlist=tuple(s["watchlist"]),
             horizons=horizons,
             positions_horizon=positions_horizon,
+            min_open_interest_usd=min_open_interest,
         ),
         strategy=strategy,
         risk=RiskConfig(

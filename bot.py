@@ -8,6 +8,7 @@ Usage:
     python bot.py --once       # one trade cycle (+ stop check), then exit
     python bot.py --report     # send the daily report now, then exit
     python bot.py --serve      # also keep every horizon fresh and serve the dashboard
+                               # (the VPS service: deploy/ntfal-bot.service)
 
 Nothing is ever sent unless config.toml has [execution] enabled = true, and the
 default mode "dry_run" logs every order without sending it. "testnet" and
@@ -20,16 +21,16 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import math
 import os
+import signal
 import sys
-import time
 import traceback
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 
+from app.cadence import BAR_CLOSE_DELAY_SECONDS, first_run
 from app.pipeline import build_snapshot, load_snapshot, refresh_horizon, watchlist_dexes
 from config import Config, load_config
 from data.hyperliquid import INTERVAL_MS, HyperliquidClient
@@ -45,9 +46,6 @@ from execution.state import ExecutionState
 from notify.report import build_report
 from notify.telegram import TelegramNotifier, format_alert
 from run import _REFRESH_LOCK, snapshot_path, write_snapshot
-
-# A trade cycle runs this long after each entry bar closes, so the bar is final.
-CYCLE_DELAY_SECONDS = 60
 
 
 def bot_config(cfg: Config) -> Config:
@@ -98,22 +96,17 @@ def make_notifier(cfg: Config) -> TelegramNotifier | None:
         raise SystemExit(f"[telegram] enabled but {exc} (in .env)") from exc
 
 
-def refresh(cfg: Config, client: HyperliquidClient, name: str) -> dict[str, Any]:
-    """Refresh one horizon into the snapshot (a full build when there is none yet)."""
+def refresh(cfg: Config, client: HyperliquidClient, name: str | None = None) -> dict[str, Any]:
+    """Refresh one horizon into the snapshot — every horizon when `name` is None or
+    the snapshot does not hold it yet."""
     with _REFRESH_LOCK:
         previous = load_snapshot(snapshot_path(cfg))
-        if name not in previous.get("horizons", {}):
+        if name is None or name not in previous.get("horizons", {}):
             snapshot = build_snapshot(cfg, client, previous=previous)
         else:
             snapshot = refresh_horizon(cfg, client, name, previous)
         write_snapshot(cfg, snapshot)
     return snapshot
-
-
-def next_boundary(interval_s: int, now: float | None = None) -> datetime:
-    """The next close of an `interval_s` bar (bars are aligned to the epoch, UTC)."""
-    now = time.time() if now is None else now
-    return datetime.fromtimestamp(math.ceil(now / interval_s) * interval_s, tz=UTC)
 
 
 class Bot:
@@ -170,6 +163,17 @@ class Bot:
         if self.notifier.send(text):
             self.engine.mark_reported()
 
+    def refreshed_horizons(self, serve: bool) -> list[str]:
+        """The horizons the refresh jobs keep fresh: every one with the dashboard,
+        else the traded one when no trade cycle refreshes it (the report reads its
+        signals). The trade cycle refreshes the traded horizon itself."""
+        ecfg = self.cfg.execution
+        return [
+            h.name
+            for h in self.cfg.scanner.horizons
+            if (serve or h.name == ecfg.horizon) and not (ecfg.enabled and h.name == ecfg.horizon)
+        ]
+
     def schedule(self, scheduler: Any, serve: bool) -> None:
         from apscheduler.triggers.cron import CronTrigger
         from apscheduler.triggers.interval import IntervalTrigger
@@ -179,10 +183,9 @@ class Bot:
         common = {"max_instances": 1, "coalesce": True, "misfire_grace_time": 300}
         if ecfg.enabled:
             bar_s = INTERVAL_MS[horizon.entry] // 1000
-            start = next_boundary(bar_s).timestamp() + CYCLE_DELAY_SECONDS
             scheduler.add_job(
                 self.guarded("trade cycle", self.cycle),
-                IntervalTrigger(seconds=bar_s, start_date=datetime.fromtimestamp(start, tz=UTC)),
+                IntervalTrigger(seconds=bar_s, start_date=first_run(bar_s)),
                 id="cycle",
                 **common,
             )
@@ -192,7 +195,7 @@ class Bot:
                 id="protect",
                 **common,
             )
-            delay = CYCLE_DELAY_SECONDS
+            delay = BAR_CLOSE_DELAY_SECONDS
             print(f"trade cycle after every {horizon.entry} bar on '{horizon.name}' (+{delay}s)")
         if self.notifier is not None:
             hour, minute = (int(x) for x in self.cfg.telegram.report_time.split(":"))
@@ -203,18 +206,15 @@ class Bot:
                 **common,
             )
             print(f"daily report at {self.cfg.telegram.report_time} {self.cfg.telegram.timezone}")
-        if serve:
-            for h in self.cfg.scanner.horizons:
-                if ecfg.enabled and h.name == ecfg.horizon:
-                    continue  # the trade cycle refreshes it
-                scheduler.add_job(
-                    self.guarded(
-                        f"refresh {h.name}", lambda n=h.name: refresh(self.cfg, self.client, n)
-                    ),
-                    IntervalTrigger(seconds=h.refresh_seconds),
-                    id=f"refresh-{h.name}",
-                    **common,
-                )
+        for name in self.refreshed_horizons(serve):
+            h = self.cfg.scanner.horizon(name)
+            scheduler.add_job(
+                self.guarded(f"refresh {name}", lambda n=name: refresh(self.cfg, self.client, n)),
+                IntervalTrigger(seconds=h.refresh_seconds, start_date=first_run(h.refresh_seconds)),
+                id=f"refresh-{name}",
+                **common,
+            )
+            print(f"refresh '{name}' every {h.refresh_seconds}s, after each {h.entry} close")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -243,6 +243,14 @@ def main(argv: list[str] | None = None) -> int:
         print("!" * 72 + "\nMAINNET — this bot places REAL orders with REAL money.\n" + "!" * 72)
     if ecfg.enabled:
         bot.protect()
+    if not args.once and bot.refreshed_horizons(args.serve):
+        # The jobs' first runs wait for a bar close (up to 4h on swing): fill the
+        # dashboard (every horizon) or the report's signals (the traded one) now.
+        # The trade cycle below refreshes the traded horizon again, at almost no
+        # cost: its bars are cached.
+        first = None if args.serve else ecfg.horizon
+        bot.guarded("first refresh", lambda: refresh(bot.cfg, bot.client, first))()
+    if ecfg.enabled:
         bot.cycle()
     if args.once:
         return 0
@@ -251,6 +259,9 @@ def main(argv: list[str] | None = None) -> int:
         f"🤖 NTFAL bot started — mode {bot.mode.upper()}, horizon '{ecfg.horizon}'"
         + (f", halt file {ecfg.halt_file} present" if bot.engine.halted() else "")
     )
+    # systemd stops the service with SIGTERM: leave through the normal path below, so
+    # the "stopped" message goes out (uvicorn re-raises SIGTERM after its own shutdown).
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     if args.serve:
         from apscheduler.schedulers.background import BackgroundScheduler
 
@@ -261,7 +272,10 @@ def main(argv: list[str] | None = None) -> int:
         import uvicorn
 
         os.environ.setdefault("SNAPSHOT_PATH", str(snapshot_path(cfg)))
-        uvicorn.run("app.main:app", host=args.host, port=args.port)
+        with contextlib.suppress(KeyboardInterrupt, SystemExit):
+            uvicorn.run("app.main:app", host=args.host, port=args.port)
+        scheduler.shutdown(wait=False)
+        bot.say(f"🛑 NTFAL bot stopped — mode {bot.mode.upper()}; exchange stops stay in place")
         return 0
 
     from apscheduler.schedulers.blocking import BlockingScheduler

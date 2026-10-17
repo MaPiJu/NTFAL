@@ -18,6 +18,18 @@
 #   USOIL WTI    -> xyz:CL          UKOIL  Brent       -> xyz:BRENTOIL
 watchlist = ["xyz:GOLD", "xyz:SILVER", "xyz:CL", "xyz:BRENTOIL", "xyz:SP500", "xyz:XYZ100"]
 
+# Markets holding less open interest than this (USD, from metaAndAssetCtxs:
+# openInterest x mark) are left out of every scan — the watchlist's and --all's:
+# a thin book means wide spreads and a stop that slips (Elder p.121: "Short-term
+# traders should focus on the contracts with the highest open interest"; open
+# interest is read as liquidity only, never as a signal). Measured on 2026-10-17,
+# $10M keeps 95 of Hyperliquid's 340 perps: their median impact spread (a $6k
+# market order, both ways) is ~5 bp at $10-25M and ~1.5 bp above $50M, against
+# ~21-36 bp under $5M. The six default markets hold $150-340M each. An --all scan
+# then takes ~3 min per horizon instead of ~10. Held positions are managed whatever their market's open
+# interest. 0 scans every market.
+min_open_interest_usd = 10_000_000
+
 # Which horizon's bars drive Elder trade management for OPEN positions. A held
 # position is strategic, so it is judged on the longest chain by default.
 positions_horizon = "swing"
@@ -26,8 +38,12 @@ positions_horizon = "swing"
 # Each horizon is one full Triple Screen, with the three screens named by role:
 #   tide  = 1st screen, strategic bias     wave = 2nd screen, counter-trend entry
 #   entry = 3rd screen, lower-timeframe entry timing
-# Elder's "factor of ~5" holds inside each chain. `refresh_seconds` sets how
-# often the horizon is recomputed (a weekly tide doesn't move every 5 minutes).
+# Elder's "factor of ~5" holds inside each chain. A horizon is recomputed right
+# after each close of its ENTRY bar (+60 s), the bar every level (stop-entry,
+# limit, SafeZone) moves with: swing every 4h, scalp every 15 min, micro every
+# 5 min. `refresh_seconds` may slow it to a whole number of entry bars (e.g.
+# 86400 on swing: once a day, at 00:01 UTC, after the daily close). A screen whose
+# bar is still open is not refetched: the weekly tide costs one request a week.
 # `min_tide_bars`: below this much tide history the EMA26 is not converged, so
 # the tide and its Impulse are flagged unreliable rather than silently trusted.
 # `holding_hours`: a typical holding time for a trade on this chain. The current
@@ -43,7 +59,7 @@ entry = "4h"
 lookback_tide = 260
 lookback_wave = 500
 lookback_entry = 1000
-refresh_seconds = 86400   # once a day
+refresh_seconds = 14400   # every 4h entry bar
 min_tide_bars = 60
 holding_hours = 336   # 14 days
 
@@ -56,7 +72,7 @@ entry = "15m"
 lookback_tide = 1000
 lookback_wave = 2000
 lookback_entry = 2000
-refresh_seconds = 3600    # hourly
+refresh_seconds = 900     # every 15m entry bar
 min_tide_bars = 60
 holding_hours = 48    # 2 days
 
@@ -73,7 +89,7 @@ entry = "5m"
 lookback_tide = 2000
 lookback_wave = 2000
 lookback_entry = 2000
-refresh_seconds = 300     # every 5 minutes
+refresh_seconds = 300     # every 5m entry bar
 min_tide_bars = 60
 holding_hours = 4
 

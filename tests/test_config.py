@@ -73,6 +73,30 @@ def test_rejects_an_interval_hyperliquid_does_not_serve(tmp_path):
         load_config(write(tmp_path, body))
 
 
+def test_a_horizon_refreshes_after_every_entry_bar_by_default(tmp_path):
+    # Every level moves with the entry bar, so that is the default cadence; a
+    # slower one must stay a whole number of entry bars, so each run still lands
+    # just after a close.
+    body = BASE.replace("refresh_seconds = 300\n", "")
+    micro = load_config(write(tmp_path, body)).scanner.horizon("micro")
+    assert micro.refresh_seconds == INTERVAL_MS["5m"] // 1000
+
+    for bad in ("refresh_seconds = 450", "refresh_seconds = 0"):
+        with pytest.raises(ConfigError, match="whole number of 5m entry bars"):
+            load_config(write(tmp_path, BASE.replace("refresh_seconds = 300", bad)))
+
+
+def test_open_interest_floor(tmp_path):
+    assert load_config(write(tmp_path, BASE)).scanner.min_open_interest_usd == 0.0
+    body = BASE.replace(
+        'positions_horizon = "swing"',
+        'positions_horizon = "swing"\nmin_open_interest_usd = 5_000_000',
+    )
+    assert load_config(write(tmp_path, body)).scanner.min_open_interest_usd == 5e6
+    with pytest.raises(ConfigError, match="min_open_interest_usd"):
+        load_config(write(tmp_path, body.replace("5_000_000", "-1")))
+
+
 def test_rejects_duplicate_horizon_names(tmp_path):
     body = BASE.replace('name = "micro"', 'name = "swing"')
     with pytest.raises(ConfigError, match="duplicate horizon"):
@@ -199,9 +223,13 @@ def test_shipped_config_is_valid_and_hyperliquid_only():
     # Elder's factor of ~5 holds inside each chain, coarsest first.
     chains = [(h.tide, h.wave, h.entry) for h in cfg.scanner.horizons]
     assert chains == [("1w", "1d", "4h"), ("4h", "1h", "15m"), ("1h", "15m", "5m")]
-    # Shorter horizons must refresh more often than longer ones.
-    seconds = [h.refresh_seconds for h in cfg.scanner.horizons]
-    assert seconds == sorted(seconds, reverse=True)
+    # Each horizon refreshes after every close of its entry bar: swing 4h, scalp
+    # 15m, micro 5m.
+    assert [h.refresh_seconds for h in cfg.scanner.horizons] == [
+        INTERVAL_MS[h.entry] // 1000 for h in cfg.scanner.horizons
+    ]
+    # Thin markets (under $10M of open interest) are not scanned.
+    assert cfg.scanner.min_open_interest_usd == 10_000_000
     assert cfg.scanner.positions_horizon == "swing"
     # Elder's 2:1 floor is the shipped default.
     assert cfg.strategy.min_reward_risk == 2.0

@@ -1,8 +1,18 @@
 # Déploiement du bot sur un VPS — guide pas à pas
 
-Ce guide met `bot.py` en service sur un VPS Linux. Le bot trade automatiquement **un seul
-horizon** (swing par défaut) du Triple Screen et envoie un **rapport quotidien sur
-Telegram**, avec une alerte immédiate à chaque ordre d'entrée, exécution, clôture ou erreur.
+Ce guide met `bot.py` en service sur un VPS Linux, avec **un seul service systemd** qui
+fait tout :
+
+- il garde **les trois horizons à jour**, chacun juste après chaque clôture de sa bougie
+  d'entrée (swing toutes les 4 h, scalp toutes les 15 min, micro toutes les 5 min) ;
+- il sert le **tableau de bord** sur 127.0.0.1:8000, accessible par un tunnel SSH ;
+- il envoie le **rapport quotidien sur Telegram** ;
+- **une fois l'exécution activée**, il trade automatiquement **un seul horizon** (swing par
+  défaut) du Triple Screen, avec une alerte immédiate à chaque ordre d'entrée, exécution,
+  clôture ou erreur.
+
+Tant que `[execution] enabled = false`, c'est un outil d'analyse seul : aucun ordre n'est
+calculé ni envoyé.
 
 > ⚠️ C'est de l'argent réel. Le bot applique les règles d'Elder (règle des 2 %, règle des
 > 6 %, censure Impulse, stops SafeZone), mais une erreur de configuration, un bug ou un
@@ -31,6 +41,11 @@ Telegram**, avec une alerte immédiate à chaque ordre d'entrée, exécution, cl
 - **Chaque jour à `report_time`**, il envoie le rapport Telegram : équité, PnL 24 h et du
   mois, règle des 6 %, exécutions, actions du bot et ce qu'il n'a pas fait (avec la
   raison), positions avec leur verdict et leur stop, entrée en attente, signaux swing.
+
+Seuls les marchés qui détiennent au moins `min_open_interest_usd` d'open interest (10 M$
+par défaut) sont analysés : un carnet mince veut dire des spreads larges et un stop qui
+glisse. Les six marchés par défaut en détiennent chacun 150 à 340 M$. Une position déjà
+ouverte reste gérée, quel que soit l'open interest de son marché.
 
 Règles de sécurité intégrées :
 
@@ -72,34 +87,59 @@ Règles de sécurité intégrées :
 
 ## 4. Installer sur le VPS
 
-Exemple sur Ubuntu 24.04, en root :
+Le dépôt est cloné dans `/opt/ntfal` (déjà fait). En root, depuis le serveur :
 
 ```sh
-adduser --system --group --no-create-home --home /opt/ntfal ntfal
-apt install -y git python3 python3-venv
-git clone https://github.com/MaPiJu/NTFAL.git /opt/ntfal   # (dépôt privé : clé de déploiement SSH)
 cd /opt/ntfal
-python3 -m venv .venv
-.venv/bin/pip install httpx pandas pyarrow fastapi uvicorn jinja2 python-dotenv apscheduler tzdata \
-    "hyperliquid-python-sdk>=0.24,<0.25"
-mkdir -p cache
-cp .env.example .env
-chown -R ntfal:ntfal /opt/ntfal
-chmod 600 .env
+git pull                          # récupérer la dernière version
+sudo ./deploy/install.sh --dev    # --dev : ajoute pytest, pour lancer les tests
 ```
 
-(Avec `uv` : `uv sync --extra bot` crée le même `.venv`.)
+Le script est idempotent (on peut le relancer sans risque). Il :
 
-Renseigne `.env` (`nano /opt/ntfal/.env`) :
+1. installe `git`, `python3` et `python3-venv`, et vérifie que Python est en version 3.11
+   ou plus ;
+2. crée l'utilisateur système `ntfal`, sans shell ni mot de passe ;
+3. crée ou met à jour `.venv` avec les dépendances de `pyproject.toml`, SDK Hyperliquid
+   compris ;
+4. crée `.env` depuis `.env.example` s'il n'existe pas, sans jamais l'écraser ;
+5. règle les droits : le code appartient à root et reste en lecture seule pour le
+   service ; `cache/` et `.env` (en `chmod 600`) appartiennent à `ntfal` ;
+6. vérifie, en tant que `ntfal`, que `config.toml` se charge et que chaque secret exigé
+   par la configuration est bien dans `.env` (il nomme celui qui manque, sans jamais
+   afficher de valeur) ;
+7. installe le service `ntfal-bot`, l'active au démarrage et le (re)lance.
+
+Juste après l'installation, le service tourne en **analyse seule**. Vérifie-le :
 
 ```sh
-HL_ADDRESS=0x…ton adresse publique…
-HL_API_PRIVATE_KEY=0x…clé de l'API wallet…
-TELEGRAM_BOT_TOKEN=…
-TELEGRAM_CHAT_ID=…
+systemctl status ntfal-bot          # « active (running) »
+journalctl -u ntfal-bot -f          # le journal en direct (Ctrl-C pour quitter)
+.venv/bin/python -m pytest -q       # les tests (avec --dev)
 ```
 
-Dans `config.toml` :
+**Ouvrir le tableau de bord** depuis ton ordinateur (le service n'écoute que sur
+127.0.0.1, rien n'est exposé sur Internet) :
+
+```sh
+ssh -L 8000:127.0.0.1:8000 root@2.31.30.116
+```
+
+Laisse cette fenêtre ouverte et va sur http://127.0.0.1:8000.
+
+Renseigne ensuite `.env` (`nano /opt/ntfal/.env`), au fur et à mesure des étapes :
+
+```sh
+HL_ADDRESS=0x…ton adresse publique…        # dès le dry-run
+TELEGRAM_BOT_TOKEN=…                        # dès que tu actives Telegram
+TELEGRAM_CHAT_ID=…
+HL_API_PRIVATE_KEY=0x…clé de l'API wallet…  # seulement pour testnet / mainnet
+```
+
+Tape ces valeurs directement dans `nano` sur le serveur. Ne les colle jamais dans un
+chat, un ticket ou un fichier versionné.
+
+Puis dans `config.toml` :
 
 ```toml
 [execution]
@@ -112,12 +152,18 @@ report_time = "21:15"
 timezone = "Europe/Paris"
 ```
 
-Vérifie ensuite :
+Relance le script pour appliquer et tout revérifier (un secret manquant l'arrête avant
+le redémarrage) :
 
 ```sh
+sudo ./deploy/install.sh
+journalctl -u ntfal-bot -n 60                    # le cycle de démarrage : ce que le bot ferait
 sudo -u ntfal .venv/bin/python bot.py --report   # le rapport arrive-t-il sur Telegram ?
-sudo -u ntfal .venv/bin/python bot.py --once     # un cycle : ce que le bot ferait
 ```
+
+Au démarrage, le service lance tout de suite un cycle de trading et une vérification des
+stops : le journal montre ce que le bot ferait (« entry placed », « no setup »…). Évite
+`bot.py --once` pendant que le service tourne : deux processus écriraient le même état.
 
 ## 5. Les trois étapes
 
@@ -137,22 +183,20 @@ sudo -u ntfal .venv/bin/python bot.py --once     # un cycle : ce que le bot fera
    début. Au démarrage, la console affiche un bandeau `MAINNET` et Telegram reçoit
    « bot started — mode MAINNET ».
 
-## 6. Mettre en service
+## 6. Exploiter le service
 
-```sh
-cp /opt/ntfal/deploy/ntfal-bot.service /etc/systemd/system/
-systemctl daemon-reload
-systemctl enable --now ntfal-bot
-journalctl -u ntfal-bot -f                     # suivre le journal
-```
+`install.sh` a déjà installé et activé le service : il redémarre seul après un reboot ou
+un plantage (30 s plus tard).
 
 | Besoin | Commande |
 |--------|----------|
+| Suivre le journal | `journalctl -u ntfal-bot -f` |
+| Appliquer une modification de `config.toml` ou `.env` | `sudo /opt/ntfal/deploy/install.sh` (revérifie tout, puis redémarre) |
+| Mettre à jour le code | `sudo /opt/ntfal/deploy/install.sh --update` (`git pull` puis réinstallation ; tes modifications de `config.toml` sont conservées) |
 | Pause (plus d'entrée, sorties et stops actifs) | `sudo -u ntfal touch /opt/ntfal/cache/HALT` |
 | Reprendre | `rm /opt/ntfal/cache/HALT` |
 | Arrêter le bot | `systemctl stop ntfal-bot` (les stops restent sur l'exchange) |
-| Mettre à jour | `cd /opt/ntfal && sudo -u ntfal git pull && systemctl restart ntfal-bot` |
-| Rapport immédiat | `sudo -u ntfal .venv/bin/python bot.py --report` |
+| Rapport immédiat | `sudo -u ntfal /opt/ntfal/.venv/bin/python bot.py --report` (depuis `/opt/ntfal`) |
 
 L'état du bot (positions qu'il possède, entrée en attente, journal des actions) est dans
 `cache/execution_state.json`. **Ne le supprime pas pendant qu'une position est ouverte.**
@@ -161,13 +205,17 @@ un de ses stops sur l'exchange.
 
 ## 7. Sécuriser le VPS
 
-- Connexion SSH par clé uniquement (`PasswordAuthentication no`), `ufw allow OpenSSH &&
-  ufw enable`, `apt install unattended-upgrades fail2ban`.
-- **N'expose pas le tableau de bord** sur Internet. Si tu le veux, lance plutôt
-  `bot.py --serve` (écoute sur 127.0.0.1) et ouvre un tunnel :
-  `ssh -L 8000:127.0.0.1:8000 vps`, puis http://127.0.0.1:8000.
-- `.env` en `chmod 600`, propriété de `ntfal`. Le token Telegram n'apparaît jamais dans
-  les journaux.
+- `sudo ./deploy/install.sh --harden` installe un pare-feu qui n'ouvre que SSH (`ufw`),
+  `fail2ban` et les mises à jour de sécurité automatiques (`unattended-upgrades`). Si ton
+  SSH n'écoute pas sur le port 22, ouvre d'abord ce port à la main, sinon tu te
+  bloquerais dehors.
+- Connexion SSH par clé uniquement : dans `/etc/ssh/sshd_config`, mets
+  `PasswordAuthentication no`, puis `systemctl reload ssh`. Fais-le seulement après avoir
+  vérifié que ta connexion par clé fonctionne.
+- **N'expose pas le tableau de bord** sur Internet. Le service écoute sur 127.0.0.1 :
+  passe par le tunnel SSH de la section 4.
+- `.env` est en `chmod 600`, propriété de `ntfal`. Le code appartient à root : le service
+  ne peut écrire que dans `cache/`. Le token Telegram n'apparaît jamais dans les journaux.
 
 ## 8. Limites connues — à vérifier sur testnet avant le mainnet
 

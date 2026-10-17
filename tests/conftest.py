@@ -60,10 +60,13 @@ def make_client(
     requests_log: list[dict] | None = None,
     clearinghouse_states: dict[str, dict] | None = None,
     funding: dict[str, str] | None = None,
+    contexts: dict[str, dict] | None = None,
 ) -> HyperliquidClient:
     """Client backed by httpx.MockTransport serving recorded fixtures.
 
-    `funding` sets the hourly rate `metaAndAssetCtxs` reports per perp."""
+    `funding` sets the hourly rate `metaAndAssetCtxs` reports per perp; `contexts`
+    adds any other context field per perp (openInterest, markPx…), which it
+    otherwise leaves out."""
 
     def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content)
@@ -84,7 +87,10 @@ def make_client(
             meta = META_BY_DEX[dex]
             rates = funding or {}
             ctxs = [
-                {"funding": rates.get(e["name"], DEFAULT_FUNDING), "markPx": "1.0"}
+                {
+                    "funding": rates.get(e["name"], DEFAULT_FUNDING),
+                    **(contexts or {}).get(e["name"], {}),
+                }
                 for e in meta["universe"]
             ]
             return httpx.Response(200, json=[meta, ctxs])

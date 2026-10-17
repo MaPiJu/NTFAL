@@ -220,8 +220,11 @@ MACD-Histogram and Force Index; no extra indicators are introduced.
 the same Triple Screen, and sends a **daily Telegram report** plus an instant alert on
 every entry placed or filled, every close and every error. It is off by default
 (`[execution] enabled = false`), and its default mode, `dry_run`, computes and logs every
-order without sending any. Step-by-step VPS setup (API wallet, Telegram bot, systemd,
-dry run → testnet → mainnet): **[docs/DEPLOIEMENT.md](docs/DEPLOIEMENT.md)**.
+order without sending any. On a VPS, `sudo deploy/install.sh` installs everything as one
+systemd service (`bot.py --serve`: every horizon kept fresh, the dashboard on
+127.0.0.1:8000, the report, and the trade bot only once enabled). Step-by-step VPS setup
+(API wallet, Telegram bot, dry run → testnet → mainnet):
+**[docs/DEPLOIEMENT.md](docs/DEPLOIEMENT.md)**.
 
 What it does:
 
@@ -252,9 +255,14 @@ API wallet (it can trade, not withdraw).
 ```sh
 uv run python bot.py --report   # send the daily report now
 uv run python bot.py --once     # one trade cycle, then exit
-uv run python bot.py            # run forever (the systemd service)
-uv run python bot.py --serve    # …and serve the dashboard on 127.0.0.1:8000
+uv run python bot.py            # run forever: trade cycle, stop checks, report
+uv run python bot.py --serve    # …and keep every horizon fresh + serve the dashboard
+                                # on 127.0.0.1:8000 (the systemd service)
 ```
+
+`--serve` refreshes every horizon at startup, then each one right after every close of its
+entry bar, whether or not execution is enabled — so the same service is the analysis
+dashboard on its own and the bot once `[execution] enabled = true`.
 
 Every order the bot places carries a client order id tagged as its own (entry, stop or
 close), so after a restart it finds its orders on the exchange; its memory (owned
@@ -277,6 +285,15 @@ pip install pytest ruff black   # dev tools
 `bot.py` in `testnet`/`mainnet` mode also needs the official SDK, for order signing:
 `uv sync --extra bot` (or `pip install "hyperliquid-python-sdk>=0.24,<0.25"`).
 
+On a Debian/Ubuntu VPS, `sudo deploy/install.sh` (run from the clone, e.g. `/opt/ntfal`)
+does it all: a `ntfal` system user, the `.venv` with the dependencies of `pyproject.toml`
+(the SDK included), `.env` from `.env.example` (chmod 600, never overwritten), the code
+read-only to the service, and the `ntfal-bot` systemd service enabled and (re)started.
+It checks that `config.toml` loads and that every secret the config asks for is present
+in `.env` before starting anything; `--update` pulls the latest code first, `--dev` adds
+the test tools, `--harden` turns on a firewall (SSH only) and fail2ban. Details in
+[docs/DEPLOIEMENT.md](docs/DEPLOIEMENT.md).
+
 ## Run
 
 ```sh
@@ -285,10 +302,13 @@ uv run python run.py --horizon swing          # a quick analysis of one horizon 
 uv run python run.py --horizon swing scalp    # …or of a few (also: swing,scalp)
 ```
 
-This validates the watchlist against the perp universe, incrementally refreshes each
-horizon's candles into `cache/*.parquet`, computes signals, writes `cache/snapshot.json`,
-and prints one table per horizon. A full refresh of six assets across three horizons is
-36 candle requests, about 20 seconds.
+This validates the watchlist against the perp universe, leaves out the markets holding
+less open interest than `scanner.min_open_interest_usd` ($10M), incrementally refreshes
+each horizon's candles into `cache/*.parquet`, computes signals, writes
+`cache/snapshot.json`, and prints one table per horizon. A first refresh of six assets
+across three horizons is under 54 candle requests, about 15 seconds; after that a screen
+whose last bar is still open is not refetched at all (the weekly tide costs one request a
+week), so a refresh fetches little more than the entry bars that just closed.
 
 `--horizon` limits the whole run to the horizons it names: only their candles are
 fetched, only their tables are printed, `--watch` keeps only them fresh, and the snapshot
@@ -307,15 +327,24 @@ uv run python run.py --all --horizon swing --serve    # …and browse the result
 `--all` swaps the watchlist, **for that run only**, for every tradable perp on every
 Hyperliquid dex: the native crypto perps and each HIP-3 builder dex the exchange lists
 (`perpDexs`: `xyz`, `para`, `mkts`, `io`… — new ones included as they launch). The config
-watchlist, the default runs and the bot stay on the six markets. On 2026-10-12 that was
-337 perps (178 crypto, 114 on `xyz`, 45 on three other dexes).
+watchlist, the default runs and the bot stay on the six markets. On 2026-10-17 that was
+340 perps on 11 dexes.
 
-It is slow by nature: each perp takes three candle requests per horizon and Hyperliquid's
-public API serves about a hundred a minute, so count roughly **10 minutes per horizon**,
-every run (measured: 9½ minutes for the swing horizon over the 337 perps on 2026-10-12;
-the run prints its own estimate). Pair it with `--horizon swing` — the three horizons
-take about half an hour, and `--watch` cannot keep scalp (hourly) or micro (5 min) on
-schedule at that size. The table lists every perp, best first; past 30 assets only the
+Most of them are thin: the **open-interest floor** (`scanner.min_open_interest_usd`,
+$10M by default, from `metaAndAssetCtxs`: open interest × mark) leaves out every market
+holding less, before any candle is fetched — a thin book means wide spreads and a stop
+that slips (Elder p.121: short-term traders should stick to the highest open interest).
+On 2026-10-17, 95 of the 340 perps held at least $10M; the median impact spread (a $6k
+market order, both ways) was ~5 bp at $10–25M of open interest and ~1.5 bp above $50M,
+against ~21–36 bp under $5M. The six default markets hold $150–340M each. The CLI and the dashboard name the markets left out. Set the floor to 0
+to scan everything.
+
+Each scanned perp takes up to three candle requests per horizon and Hyperliquid's public
+API serves about a hundred a minute: with the floor, count **about 3 minutes per horizon**
+for a first `--all` run (the run prints its own estimate; it was 9½ minutes for the
+unfiltered 337 perps on 2026-10-12), and less once the candles are cached. Pair it with
+`--horizon swing` for a one-off look; `--watch` on all three horizons at that size cannot
+keep micro (every 5 minutes) on schedule. The table lists every perp, best first; past 30 assets only the
 setups and the held coins keep their charts (all of them made a 73 MB snapshot, the
 setups alone 12 MB), which are the cards the dashboard shows by default anyway. Only
 `xyz` has a weekend calendar (`[sessions.xyz]`): the stock and index perps of the other
@@ -333,9 +362,13 @@ uv run python run.py --serve --watch --horizon scalp   # …or only the scalp ta
 # then open http://127.0.0.1:8000
 ```
 
-`--watch` starts one `apscheduler` job per horizon (or per `--horizon` one) at its own
-`refresh_seconds` (swing daily, scalp hourly, micro every 5 minutes). A partial refresh rewrites only that
-horizon's block of the snapshot, so the swing block keeps its own timestamp. Without
+`--watch` starts one `apscheduler` job per horizon (or per `--horizon` one) that runs
+**right after each close of the horizon's entry bar** (+60 s, once the bar is final):
+swing every 4h (00:01, 04:01… UTC), scalp every 15 minutes, micro every 5 minutes. The
+entry bar is the one every level moves with (the stop-entry 1 tick beyond the latest bar,
+the SafeZone stop), so that is when each horizon's table can change; a job started at a
+random time would read its bars up to a whole bar late. A partial refresh rewrites only
+that horizon's block of the snapshot, so the swing block keeps its own timestamp. Without
 `--serve`, `--watch` just keeps the snapshot up to date in the foreground. The watch jobs
 run one at a time and the snapshot is written atomically; still, run **one refreshing
 process at a time** (not a one-off `run.py` alongside a running `--watch`): each refresh
@@ -363,11 +396,15 @@ Edit `config.toml`:
   dex for one run without touching it. Delisted assets are
   excluded; a full universe fires several requests per asset per horizon, so it takes
   minutes, and assets without two completed bars on a screen are listed as skipped.
+- `scanner.min_open_interest_usd` — markets holding less open interest (USD) are not
+  scanned: wide spreads, slippage (default `10_000_000`; `0` scans everything). Held
+  positions are managed whatever their market's open interest.
 - `scanner.positions_horizon` — which horizon's bars manage open positions (default
   `"swing"`).
 - `[[scanner.horizons]]` — one block per timeframe chain: `name`, `label`, the three
   intervals (`tide`, `wave`, `entry`), how much history to keep (`lookback_*`, in bars),
-  `refresh_seconds`, `min_tide_bars` (below which the tide is flagged as
+  `refresh_seconds` (a whole number of entry bars; by default one — each refresh runs
+  just after a close), `min_tide_bars` (below which the tide is flagged as
   not-yet-converged) and `holding_hours` (typical holding time, for the funding-cost
   estimate; omit it for no estimate). Any Hyperliquid candle interval works: `1m`…`1w`.
 - `[strategy]` — tune the Elder thresholds without editing code:

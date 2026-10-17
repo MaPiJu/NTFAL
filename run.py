@@ -4,9 +4,9 @@
 Usage:
     python run.py                     # one full refresh of every horizon
     python run.py --serve             # refresh, then serve the dashboard
-    python run.py --serve --watch     # keep each horizon refreshed on its own
-                                      # cadence (swing daily, scalp hourly,
-                                      # minutes every 5 min) while serving
+    python run.py --serve --watch     # keep each horizon refreshed right after
+                                      # each close of its entry bar (swing 4h,
+                                      # scalp 15m, minutes 5m) while serving
     python run.py --horizon swing     # a quick analysis of one horizon only
     python run.py --horizon swing scalp --serve --watch
                                       # ...or of a few, kept fresh and served
@@ -33,12 +33,15 @@ from typing import Any
 
 import httpx
 
+from app.cadence import first_run
 from app.pipeline import (
     SNAPSHOT_FILENAME,
     build_snapshot,
     chosen_horizons,
     every_perp_watchlist,
     expand_watchlist,
+    fetch_asset_contexts,
+    liquid_markets,
     load_snapshot,
     refresh_horizon,
 )
@@ -60,6 +63,19 @@ _REFRESH_LOCK = threading.Lock()
 
 def num(x: float | None) -> str:
     return f"{x:,.6g}" if x is not None else "—"
+
+
+def usd_short(x: float) -> str:
+    """$12.3M, $480k: an open interest at a glance."""
+    if x >= 1e9:
+        return f"${x / 1e9:.3g}B"
+    if x >= 1e6:
+        return f"${x / 1e6:.3g}M"
+    return f"${x / 1e3:.3g}k"
+
+
+# Thin markets named by the CLI before the rest are only counted.
+THIN_MARKETS_NAMED = 12
 
 
 def pct(x: float | None, digits: int = 2) -> str:
@@ -212,6 +228,16 @@ def print_signals_tables(snapshot: dict[str, Any]) -> None:
             f"⚠ 6% RULE ACTIVE: monthly losses + open risk ${guard['total_at_risk']:,.2f} "
             f">= limit ${guard['limit']:,.2f} — NO NEW ENTRIES this month."
         )
+    thin = snapshot.get("thin_markets") or []
+    if thin:
+        named = ", ".join(
+            f"{m['asset']} ({usd_short(m['open_interest_usd'])})" for m in thin[:THIN_MARKETS_NAMED]
+        )
+        more = (
+            f" and {len(thin) - THIN_MARKETS_NAMED} more" if len(thin) > THIN_MARKETS_NAMED else ""
+        )
+        floor = usd_short(snapshot["min_open_interest_usd"])
+        print(f"Not scanned, open interest under {floor} (thin book, wide spreads): {named}{more}")
     print(
         "BAR = open time (UTC) of the last completed wave bar, the one the signal is read off; "
         "CLOSE is its close."
@@ -327,18 +353,25 @@ def do_refresh(
 
 def add_watch_jobs(scheduler: Any, cfg: Config, scope: Sequence[str] | None = None) -> None:
     """One recurring refresh job per horizon in `scope` (every horizon by
-    default), each on its own cadence."""
+    default), each on its own cadence: right after each close of its entry bar
+    (or every `refresh_seconds`, a whole number of them)."""
     for h in chosen_horizons(cfg, scope):
+        start = first_run(h.refresh_seconds)
         scheduler.add_job(
             do_refresh,
             "interval",
             seconds=h.refresh_seconds,
+            start_date=start,
             args=[cfg, h.name, scope],
             id=f"refresh-{h.name}",
             max_instances=1,  # a slow refresh must not stack on itself
             coalesce=True,  # missed runs collapse into one
+            misfire_grace_time=h.refresh_seconds // 2,  # late beats skipped
         )
-        print(f"watching '{h.name}' every {h.refresh_seconds}s")
+        print(
+            f"watching '{h.name}' every {h.refresh_seconds}s, after each "
+            f"{h.entry} close (next {start:%H:%M:%S} UTC)"
+        )
 
 
 def run_watch(
@@ -375,17 +408,23 @@ def with_every_perp(cfg: Config, scope: Sequence[str] | None) -> Config:
             perps = expand_watchlist(watchlist, client)
         except (HyperliquidError, httpx.HTTPError) as exc:
             sys.exit(f"--all: could not list Hyperliquid's perps ({exc})")
+        floor = cfg.scanner.min_open_interest_usd
+        liquid, _ = liquid_markets(perps, fetch_asset_contexts(perps, client), floor)
     horizons = chosen_horizons(cfg, scope)
-    # Three candle requests per perp and horizon: tide, wave and entry.
-    minutes = len(perps) * 3 * len(horizons) / CANDLE_REQUESTS_PER_MINUTE
+    # At most three candle requests per perp and horizon: tide, wave and entry (a
+    # screen whose cached bar is still open costs none).
+    minutes = len(liquid) * 3 * len(horizons) / CANDLE_REQUESTS_PER_MINUTE
     # Dexes without a tradable perp today stay in the watchlist (a --watch run picks
     # up their listings) but are not worth naming.
     dexes = sorted({coin_dex(coin) for coin in perps})
+    kept = (
+        f", {len(liquid)} holding at least {usd_short(floor)} of open interest" if floor > 0 else ""
+    )
     print(
         f"--all: {len(perps)} tradable perps on {len(dexes)} dexes "
-        f"({', '.join(d or 'native' for d in dexes)}) x {len(horizons)} horizon(s): about "
-        f"{minutes:.0f} min at the public API's ~{CANDLE_REQUESTS_PER_MINUTE} candle "
-        f"requests a minute"
+        f"({', '.join(d or 'native' for d in dexes)}){kept} x {len(horizons)} horizon(s): "
+        f"about {minutes:.0f} min at most, at the public API's "
+        f"~{CANDLE_REQUESTS_PER_MINUTE} candle requests a minute"
     )
     return replace(cfg, scanner=replace(cfg.scanner, watchlist=watchlist))
 
@@ -406,7 +445,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--watch",
         action="store_true",
-        help="keep refreshing: one job per horizon, each on its own refresh_seconds",
+        help="keep refreshing: one job per horizon, right after each close of its entry bar",
     )
     parser.add_argument(
         "--all",

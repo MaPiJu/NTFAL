@@ -10,10 +10,11 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+from app.cadence import BAR_CLOSE_DELAY_SECONDS
 from app.main import app
 from app.pipeline import (
     build_snapshot,
-    fetch_funding_rates,
+    fetch_asset_contexts,
     fetch_open_positions,
     funding_cost,
     funding_warning,
@@ -32,7 +33,7 @@ from config import (
     RiskConfig,
     ScannerConfig,
 )
-from data.hyperliquid import PerpSpec
+from data.hyperliquid import AssetContext, HyperliquidError, PerpSpec
 from data.sessions import WeekendClosure
 from journal import append_journal_entry
 from risk.sizing import position_size
@@ -75,6 +76,7 @@ def make_config(
     positions_horizon="swing",
     strategy=None,
     sessions=None,
+    min_open_interest_usd=0.0,
     **risk_overrides,
 ) -> Config:
     risk = {
@@ -89,6 +91,7 @@ def make_config(
             watchlist=watchlist,
             horizons=tuple(horizons),
             positions_horizon=positions_horizon,
+            min_open_interest_usd=min_open_interest_usd,
         ),
         strategy=strategy or StrategyParams(),
         risk=RiskConfig(**risk),
@@ -314,6 +317,11 @@ def test_cli_horizon_limits_the_run_to_those_horizons(
     everything = Scheduler()
     run.add_watch_jobs(everything, cfg)
     assert [j["id"] for j in everything.jobs] == ["refresh-swing", "refresh-scalp"]
+    # Each job runs right after a close of its horizon's bars, a minute in, and
+    # every refresh_seconds from there.
+    for job, horizon in zip(everything.jobs, (SWING, SCALP), strict=True):
+        assert job["seconds"] == horizon.refresh_seconds
+        assert job["start_date"].timestamp() % horizon.refresh_seconds == BAR_CLOSE_DELAY_SECONDS
 
 
 def test_cli_all_scans_every_tradable_perp_on_every_dex(
@@ -415,6 +423,109 @@ def test_tradfi_dex_wildcard_scans_builder_universe(tmp_path, btc_fixtures):
     block = swing(snapshot)
     assert [s["asset"] for s in block["signals"]] == ["BTC", "xyz:GOLD"]
     assert "xyz:GOLD" in block["charts"]
+
+
+def test_markets_under_the_open_interest_floor_are_not_scanned(tmp_path, btc_fixtures, capsys):
+    # BTC holds $50M of open interest, ETH $40k: under a $1M floor ETH is left out
+    # of the scan — no candle request, no row, no "skipped" line — and listed with
+    # its open interest. SOL's open interest is unknown (no mark): kept.
+    log: list[dict] = []
+    contexts = {
+        "BTC": {"openInterest": "1000", "markPx": "50000"},
+        "ETH": {"openInterest": "10", "markPx": "4000"},
+        "SOL": {"openInterest": "5"},
+    }
+    cfg = make_config(tmp_path, watchlist=("*",), min_open_interest_usd=1e6)
+    client = make_client(btc_fixtures, tmp_path, requests_log=log, contexts=contexts)
+    progress: list[str] = []
+    snapshot = build_snapshot(cfg, client, on_progress=lambda h, c: progress.append(c))
+
+    assert progress == ["BTC", "HYPE", "SOL"]
+    assert snapshot["min_open_interest_usd"] == 1e6
+    # Largest first; HYPE's context has neither field: unknown, kept.
+    assert snapshot["thin_markets"] == [{"asset": "ETH", "open_interest_usd": 40_000.0}]
+    assert not any(r["type"] == "candleSnapshot" and r["req"]["coin"] == "ETH" for r in log)
+    block = swing(snapshot)
+    assert [s.split(" — ")[0] for s in block["skipped"]] == ["HYPE", "SOL"]
+    (btc,) = block["signals"]
+    assert btc["open_interest_usd"] == pytest.approx(50_000_000.0)
+
+    from run import print_signals_tables
+
+    print_signals_tables(snapshot)
+    assert "Not scanned, open interest under $1M (thin book, wide spreads): ETH ($40k)" in (
+        capsys.readouterr().out
+    )
+
+
+def test_no_open_interest_floor_scans_everything(tmp_path, btc_fixtures):
+    contexts = {"ETH": {"openInterest": "10", "markPx": "4000"}}
+    cfg = make_config(tmp_path, watchlist=("*",))
+    client = make_client(btc_fixtures, tmp_path, contexts=contexts)
+    snapshot = build_snapshot(cfg, client)
+    assert snapshot["thin_markets"] == []
+    assert [s.split(" — ")[0] for s in swing(snapshot)["skipped"]] == ["ETH", "HYPE", "SOL"]
+
+
+def test_a_failed_context_lookup_keeps_every_market(tmp_path, btc_fixtures):
+    # The floor only removes what it can measure: no open interest read, no filter.
+    cfg = make_config(tmp_path, watchlist=("BTC",), min_open_interest_usd=1e12)
+    client = make_client(btc_fixtures, tmp_path)
+
+    def broken(dex: str = "") -> dict:
+        raise HyperliquidError("unexpected metaAndAssetCtxs payload")
+
+    client.asset_contexts = broken
+    snapshot = build_snapshot(cfg, client)
+    assert snapshot["thin_markets"] == []
+    assert [s["asset"] for s in swing(snapshot)["signals"]] == ["BTC"]
+
+
+def test_a_held_coin_under_the_floor_is_still_managed(tmp_path, btc_fixtures):
+    # A thin market is not scanned for entries, but a position held there keeps
+    # its Elder verdict, stop and open risk (the 6% rule counts it).
+    addr = "0x" + "ab" * 20
+    cfg = make_config(tmp_path, address=addr, min_open_interest_usd=1e9)
+    state = make_clearinghouse_state([{"coin": "BTC", "szi": "0.5", "entryPx": "50000.0"}])
+    client = make_client(
+        btc_fixtures,
+        tmp_path,
+        clearinghouse_states={addr: state},
+        contexts={"BTC": {"openInterest": "1", "markPx": "50000"}},
+    )
+    snapshot = build_snapshot(cfg, client)
+
+    assert swing(snapshot)["signals"] == []
+    assert [m["asset"] for m in snapshot["thin_markets"]] == ["BTC"]
+    (pos,) = snapshot["positions"]
+    assert pos["asset"] == "BTC" and pos["verdict"] in {"hold", "take_profits", "exit"}
+    assert snapshot["total_open_trade_risk"] == pytest.approx(pos["open_risk"])
+
+
+def test_refresh_horizon_updates_the_thin_markets(tmp_path, chain_fixtures):
+    cfg = make_config(tmp_path, horizons=(SWING, SCALP), min_open_interest_usd=1e6)
+    snapshot = build_snapshot(cfg, make_client(chain_fixtures, tmp_path))
+    assert snapshot["thin_markets"] == []
+
+    thin = {"BTC": {"openInterest": "1", "markPx": "50000"}}
+    merged = refresh_horizon(
+        cfg, make_client(chain_fixtures, tmp_path, contexts=thin), "scalp", snapshot
+    )
+    assert merged["thin_markets"] == [{"asset": "BTC", "open_interest_usd": 50_000.0}]
+    assert merged["horizons"]["scalp"]["signals"] == []
+
+
+def test_the_live_price_is_the_mark(tmp_path, btc_fixtures):
+    # The mark is what a stop triggers on; without one, the wave bars' latest close.
+    cfg = make_config(tmp_path)
+    marked = build_snapshot(
+        cfg, make_client(btc_fixtures, tmp_path, contexts={"BTC": {"markPx": "12345.5"}})
+    )
+    assert swing(marked)["signals"][0]["live_price"] == 12345.5
+
+    unmarked = build_snapshot(cfg, make_client(btc_fixtures, tmp_path / "fresh"))
+    last_daily = float(btc_fixtures[("BTC", "1d")][-1]["c"])
+    assert swing(unmarked)["signals"][0]["live_price"] == last_daily
 
 
 def test_explicit_tradfi_coin_in_watchlist(tmp_path, btc_fixtures):
@@ -1198,15 +1309,15 @@ def test_cli_shows_tiny_funding_rates_with_two_significant_digits():
     assert rate_pct(None) == "—"
 
 
-def test_a_failing_funding_lookup_drops_only_that_dex():
-    class FlakyFunding:
-        def funding_rates(self, dex: str = "") -> dict[str, float]:
+def test_a_failing_context_lookup_drops_only_that_dex():
+    class FlakyContexts:
+        def asset_contexts(self, dex: str = "") -> dict[str, AssetContext]:
             if dex == "xyz":
                 raise httpx.ConnectTimeout("timed out")
-            return {"BTC": 0.0001}
+            return {"BTC": AssetContext(funding=0.0001), "ETH": AssetContext(funding=0.0002)}
 
     specs = {"BTC": PerpSpec(5, 40), "xyz:GOLD": PerpSpec(4, 25)}
-    assert fetch_funding_rates(specs, FlakyFunding()) == {"BTC": 0.0001}
+    assert fetch_asset_contexts(specs, FlakyContexts()) == {"BTC": AssetContext(funding=0.0001)}
 
 
 def test_guard_uses_automatic_open_position_risk(tmp_path, btc_fixtures):

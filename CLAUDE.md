@@ -16,8 +16,9 @@ that trades **one** horizon's Triple Screen automatically, through a Hyperliquid
 - **The scanner stays keyless and read-only.** `data/`, `indicators/`, `strategy/`,
   `risk/`, `app/` and `run.py` use only *public, keyless, read-only* endpoints on
   Hyperliquid's `info` endpoint: `candleSnapshot`, `perpDexs` (the names of the perp
-  dexes, for `run.py --all`), `meta`, `metaAndAssetCtxs` (read for the **funding rate**
-  only), and the public account lookups for a **public** address —
+  dexes, for `run.py --all`), `meta`, `metaAndAssetCtxs` (read for the **funding rate**,
+  the **open interest** — the liquidity floor — and the **mark price** only), and the
+  public account lookups for a **public** address —
   `clearinghouseState` (open positions, margin), `frontendOpenOrders` (resting orders),
   `userFillsByTime` (fills). None takes a key or signs anything.
 - **Order execution lives only in `execution/` and `bot.py`, and is opt-in.** Nothing is
@@ -45,6 +46,17 @@ that trades **one** horizon's Triple Screen automatically, through a Hyperliquid
   the `"*"` / `"<dex>:*"` wildcards still exist but are not the default. `run.py --all`
   scans every tradable perp on every dex on demand, for that run only (the config
   watchlist, the default runs and the bot keep the short list).
+- **Thin markets are not scanned.** A market holding less open interest than
+  `scanner.min_open_interest_usd` ($10M; open interest × mark, from `metaAndAssetCtxs`) is
+  left out of every scan before any candle is fetched — a thin book means wide spreads and
+  a stop that slips (Elder p.121: "the higher the open interest… the less slippage you
+  risk… Short-term traders should focus on the contracts with the highest open interest";
+  p.8: "trade liquid, high-volume markets"). It is a choice of *inputs* (like the
+  watchlist), not an indicator: it never changes a signal, it decides which markets get
+  one — Elder's open-interest *signals* (rising/falling OI, p.120–121) are not in the
+  Strategy Spec and stay out. The markets left out are
+  listed (`thin_markets`); a market whose open interest is unknown (lookup failed) is
+  kept; a held position is managed whatever its market's open interest.
 - Keep secrets out of the repo. Config (equity, watchlist, risk %, horizons) lives in
   `.env` / `config.toml`, never hard-coded.
 
@@ -65,11 +77,19 @@ horizon. Per horizon:
   completed bar of a lower timeframe.
 
 ### Horizons (config.toml `[[scanner.horizons]]`, current default)
-| name    | tide | wave | entry | refresh    |
-|---------|------|------|-------|------------|
-| `swing` | `1w` | `1d` | `4h`  | once a day |
-| `scalp` | `4h` | `1h` | `15m` | hourly     |
-| `micro` | `1h` | `15m`| `5m`  | every 5 min|
+| name    | tide | wave | entry | refresh (after each entry-bar close) |
+|---------|------|------|-------|--------------------------------------|
+| `swing` | `1w` | `1d` | `4h`  | every 4h                             |
+| `scalp` | `4h` | `1h` | `15m` | every 15 min                         |
+| `micro` | `1h` | `15m`| `5m`  | every 5 min                          |
+
+A horizon is recomputed **right after each close of its entry bar** (+60 s, once the bar
+is final — `app/cadence.py`): the entry bar is the one every level moves with (the
+stop-entry 1 tick beyond the latest bar, the SafeZone stop), and a refresh at a random
+time reads its bars up to a whole bar late. `refresh_seconds` may slow a horizon down to a
+whole number of entry bars, never off the bar grid. A screen whose cached bar is still
+open is not refetched (no bar can have completed since): the weekly tide costs one
+request a week.
 
 Every horizon runs the same code and produces its own signals table, its own charts and
 its own "best trade" pick; horizons are never ranked against each other. Horizons are
@@ -304,9 +324,12 @@ pipeline to every screen and to held positions).
 
 ## Architecture
 - `data/hyperliquid.py` — public `info` client (`httpx`); `candleSnapshot` per coin/interval;
-  the perp dexes (`perpDexs`); validate watchlist against the perp `meta` universe; current funding rates per dex from
-  `metaAndAssetCtxs`; `clearinghouseState` open positions, `frontendOpenOrders` and `userFillsByTime` for a public address (read-only); cache OHLCV to parquet; parse string OHLCV fields
-  to float; respect the 5000-candle limit.
+  the perp dexes (`perpDexs`); validate watchlist against the perp `meta` universe; each
+  perp's market context per dex from `metaAndAssetCtxs` (`AssetContext`: funding rate, open
+  interest, mark); `clearinghouseState` open positions, `frontendOpenOrders` and
+  `userFillsByTime` for a public address (read-only); cache OHLCV to parquet, refetching
+  nothing while the last cached bar is still open; parse string OHLCV fields to float;
+  respect the 5000-candle limit.
 - `data/sessions.py` — weekend closure per dex: drop closed-market bars, rebuild weekly bars
   from Monday–Friday daily bars.
 - `data/provider.py` — the `MarketDataProvider` Protocol the pipeline is typed against
@@ -319,9 +342,12 @@ pipeline to every screen and to held positions).
 - `strategy/params.py` — `StrategyParams`: every tunable, all bar-counts. Overridable
   globally in `[strategy]` and per horizon in `[scanner.horizons.strategy]`.
 - `risk/sizing.py` — 2% Iron Triangle + 6% monthly guard.
+- `app/cadence.py` — when a horizon runs: `first_run` = just after a bar close.
 - `app/pipeline.py` — `build_snapshot` (every horizon, or the few named) and
   `refresh_horizon` (one horizon, merged into the stored snapshot — what makes
-  per-horizon cadences cheap). Open positions are always judged on `positions_horizon`:
+  per-horizon cadences cheap); `liquid_markets` applies the open-interest floor; a
+  signal's `live_price` is the mark (the candles' latest close when the mark is
+  unknown). Open positions are always judged on `positions_horizon`:
   when a snapshot does not hold it, the held coins' bars are fetched on their own. Past
   `CHART_EVERY_ASSET_UP_TO` (30) assets, only setups and held coins keep their charts.
 - `app/` — **FastAPI** server rendering a dashboard: horizon tabs, a signals table per
@@ -329,19 +355,23 @@ pipeline to every screen and to held positions).
   Lightweight Charts v5** (candles colored by Impulse, EMA13/EMA26 overlays, MACD-Hist +
   Force Index panes). The page polls `/api/snapshot` so an intraday horizon updates itself.
 - `run.py` — one command does a full refresh + (re)builds the dashboard data;
-  `--watch` runs one `apscheduler` job per horizon at its own `refresh_seconds`;
-  `--horizon NAME [NAME…]` limits a run to those chains (refreshed, printed, watched and
-  shown; the snapshot holds only them); `--all` swaps the watchlist, for that run, for
-  every tradable perp on every dex (~100 candle requests a minute: ~10 min per horizon
-  for ~340 perps).
+  `--watch` runs one `apscheduler` job per horizon, right after each close of its entry
+  bar; `--horizon NAME [NAME…]` limits a run to those chains (refreshed, printed, watched
+  and shown; the snapshot holds only them); `--all` swaps the watchlist, for that run, for
+  every tradable perp on every dex — the open-interest floor keeps ~95 of ~340 (~100
+  candle requests a minute: ~3 min per horizon).
 - `execution/` — the opt-in order layer: `orders` (cloids, order types, price helpers),
   `planner` (pure: `reconcile`, `plan_cycle`, `plan_protection`), `gateway` (`DryRunGateway`,
   `HyperliquidGateway` over the SDK), `account` (positions/orders/equity reads), `state`,
   `engine` (cycle, protection, report inputs under one lock).
 - `notify/` — `telegram` (Bot API sender, alerts) and `report` (the daily report, French).
 - `bot.py` — the VPS entry point: scheduler (trade cycle per entry bar, protection, daily
-  report), `--once`, `--report`, `--serve`. `deploy/ntfal-bot.service` (systemd) and
-  `docs/DEPLOIEMENT.md` (step-by-step setup, French).
+  report), `--once`, `--report`, `--serve` (every horizon refreshed at startup and after
+  each entry-bar close, the dashboard — with or without execution enabled).
+  `deploy/ntfal-bot.service` (systemd: `bot.py --serve` on 127.0.0.1:8000),
+  `deploy/install.sh` (idempotent install/update as root: service user, venv from
+  `pyproject.toml`, code read-only to the service, `.env` 600, startup checks, the unit)
+  and `docs/DEPLOIEMENT.md` (step-by-step setup, French).
 
 ## Tech & conventions
 - Python 3.11+, fully type-hinted; `ruff` + `black`; `pytest`.

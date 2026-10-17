@@ -9,6 +9,7 @@ import pytest
 from data.hyperliquid import (
     INTERVAL_MS,
     MAX_CANDLES_PER_REQUEST,
+    AssetContext,
     HyperliquidClient,
     HyperliquidError,
     PerpSpec,
@@ -121,22 +122,33 @@ def test_meta_exposes_leverage_limits(tmp_path, btc_fixtures):
     assert client.tradable_perps("xyz")["xyz:GOLD"] == PerpSpec(4, 25)
 
 
-def test_funding_rates_come_from_meta_and_asset_ctxs(tmp_path, btc_fixtures):
+def test_asset_contexts_come_from_meta_and_asset_ctxs(tmp_path, btc_fixtures):
     # `funding` in metaAndAssetCtxs is the current HOURLY rate, as a fraction of
-    # notional (positive: longs pay shorts), one context per `meta` universe entry.
+    # notional (positive: longs pay shorts), one context per `meta` universe entry;
+    # `openInterest` is one side, in coins, so x the mark it is the USD it holds.
     log: list[dict] = []
-    client = make_client(btc_fixtures, tmp_path, requests_log=log, funding={"xyz:GOLD": "-0.00031"})
+    client = make_client(
+        btc_fixtures,
+        tmp_path,
+        requests_log=log,
+        funding={"xyz:GOLD": "-0.00031"},
+        contexts={"xyz:GOLD": {"openInterest": "70000.5", "markPx": "4100.0"}},
+    )
 
-    rates = client.funding_rates("xyz")
-    assert rates["xyz:GOLD"] == pytest.approx(-0.00031)
-    assert rates["xyz:SP500"] == pytest.approx(0.0000125)
+    contexts = client.asset_contexts("xyz")
+    gold = contexts["xyz:GOLD"]
+    assert gold == AssetContext(funding=-0.00031, open_interest=70000.5, mark_price=4100.0)
+    assert gold.open_interest_usd == pytest.approx(70000.5 * 4100.0)
+    assert contexts["xyz:SP500"].funding == pytest.approx(0.0000125)
+    # A context without open interest or mark: unknown, not zero.
+    assert contexts["xyz:SP500"].open_interest_usd is None
     assert log[-1] == {"type": "metaAndAssetCtxs", "dex": "xyz"}
 
-    assert client.funding_rates()["BTC"] == pytest.approx(0.0000125)
+    assert client.asset_contexts()["BTC"].funding == pytest.approx(0.0000125)
     assert log[-1] == {"type": "metaAndAssetCtxs"}  # native dex: no "dex" key
 
 
-def test_funding_rates_reject_a_misaligned_payload(tmp_path):
+def test_asset_contexts_reject_a_misaligned_payload(tmp_path):
     # Contexts are matched to perps by position: a payload whose two lists
     # disagree in length would pin rates on the wrong coins.
     def handler(request: httpx.Request) -> httpx.Response:
@@ -145,10 +157,10 @@ def test_funding_rates_reject_a_misaligned_payload(tmp_path):
     http = httpx.Client(transport=httpx.MockTransport(handler))
     client = HyperliquidClient(http=http, cache_dir=tmp_path)
     with pytest.raises(HyperliquidError, match="metaAndAssetCtxs"):
-        client.funding_rates()
+        client.asset_contexts()
 
 
-def test_funding_rates_reject_a_non_json_body(tmp_path):
+def test_asset_contexts_reject_a_non_json_body(tmp_path):
     # A maintenance or proxy page served with a 200 is a bad payload like any
     # other: it must surface as HyperliquidError, which the pipeline drops per dex.
     def handler(request: httpx.Request) -> httpx.Response:
@@ -157,7 +169,7 @@ def test_funding_rates_reject_a_non_json_body(tmp_path):
     http = httpx.Client(transport=httpx.MockTransport(handler))
     client = HyperliquidClient(http=http, cache_dir=tmp_path)
     with pytest.raises(HyperliquidError, match="metaAndAssetCtxs"):
-        client.funding_rates("xyz")
+        client.asset_contexts("xyz")
 
 
 def test_clearinghouse_state_rejects_a_non_json_body(tmp_path):
@@ -234,6 +246,26 @@ def test_refresh_is_incremental(tmp_path, btc_fixtures):
     # the revised close replaced the stale cached value
     assert second["close"].iloc[-2] == float(revised["c"])
     assert second["close"].iloc[-1] == 99999.0
+
+
+def test_refresh_skips_the_request_while_the_cached_bar_is_still_open(tmp_path, btc_fixtures):
+    # No bar can have completed while the last cached one is still open: the cache
+    # already holds every completed bar, so no request is made (a 1w tide refreshed
+    # every 4h costs one request a week). Once that bar has closed, it is refetched.
+    candles = btc_fixtures[("BTC", "1d")]
+    log: list[dict] = []
+    client = make_client(btc_fixtures, tmp_path, requests_log=log)
+    opened = candles[-1]["t"]
+    first = client.refresh("BTC", "1d", lookback_bars=400, now_ms=opened + 1000)
+    assert len(log) == 1
+
+    still_open = client.refresh("BTC", "1d", lookback_bars=400, now_ms=candles[-1]["T"] - 1)
+    assert len(log) == 1
+    assert still_open.equals(first)
+
+    client.refresh("BTC", "1d", lookback_bars=400, now_ms=candles[-1]["T"])
+    assert len(log) == 2
+    assert log[-1]["req"]["startTime"] == opened
 
 
 def test_refresh_respects_5000_candle_limit(tmp_path, btc_fixtures):

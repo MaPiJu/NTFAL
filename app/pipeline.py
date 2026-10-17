@@ -4,9 +4,14 @@ The snapshot is a single JSON document written by run.py and read by the
 FastAPI app — the server itself never talks to the exchange.
 
 One scan produces one block per **horizon** (timeframe chain). Horizons refresh
-on their own cadence — a weekly tide does not move every five minutes — so
-`refresh_horizon` rebuilds a single block and merges it into the existing
+on their own cadence — right after each close of their entry bar (app/cadence.py)
+— so `refresh_horizon` rebuilds a single block and merges it into the existing
 snapshot, leaving the others untouched.
+
+Markets holding less open interest than `scanner.min_open_interest_usd` are left
+out of every scan (`liquid_markets`): a thin book means wide spreads and slippage,
+and fewer markets make a faster scan. Held positions are managed whatever their
+market's open interest.
 """
 
 from __future__ import annotations
@@ -25,6 +30,7 @@ import pandas as pd
 from config import WATCHLIST_ALL, Config, HorizonConfig
 from data.hyperliquid import (
     MIN_ORDER_VALUE_USD,
+    AssetContext,
     HyperliquidError,
     PerpSpec,
     coin_dex,
@@ -221,23 +227,51 @@ def market_closed_warning(
     )
 
 
-def fetch_funding_rates(
+def fetch_asset_contexts(
     coins: Mapping[str, PerpSpec], client: MarketDataProvider
-) -> dict[str, float]:
-    """Current hourly funding rate per watched coin — one `metaAndAssetCtxs`
-    request per dex involved.
+) -> dict[str, AssetContext]:
+    """Current market context (funding rate, open interest, mark) per watched coin
+    — one `metaAndAssetCtxs` request per dex involved.
 
-    Funding is context, never a trading input: a dex whose lookup fails (a bad
-    payload, an HTTP error, a timeout) only leaves its coins without a rate.
+    A dex whose lookup fails (a bad payload, an HTTP error, a timeout) only leaves
+    its coins without a context: no funding estimate, no open-interest filter, the
+    live price read off the candles.
     """
-    rates: dict[str, float] = {}
+    contexts: dict[str, AssetContext] = {}
     for dex in sorted({coin_dex(c) for c in coins}):
         try:
-            by_coin = client.funding_rates(dex)
+            by_coin = client.asset_contexts(dex)
         except (HyperliquidError, httpx.HTTPError):
             continue
-        rates.update({c: r for c, r in by_coin.items() if c in coins})
-    return rates
+        contexts.update({c: ctx for c, ctx in by_coin.items() if c in coins})
+    return contexts
+
+
+def liquid_markets(
+    coins: Mapping[str, PerpSpec],
+    contexts: Mapping[str, AssetContext],
+    min_open_interest_usd: float,
+) -> tuple[dict[str, PerpSpec], list[dict[str, Any]]]:
+    """(the coins worth scanning, the thin ones left out) for an open-interest floor.
+
+    A market holding less open interest than `min_open_interest_usd` has a thin
+    book: wide spreads, slippage on the stop. It is left out, listed with its open
+    interest (largest first). A coin whose open interest is unknown — its dex's
+    lookup failed — is kept: the floor only removes what it can measure.
+    """
+    if min_open_interest_usd <= 0:
+        return dict(coins), []
+    kept: dict[str, PerpSpec] = {}
+    thin: list[dict[str, Any]] = []
+    for coin, spec in coins.items():
+        ctx = contexts.get(coin)
+        oi = ctx.open_interest_usd if ctx is not None else None
+        if oi is not None and oi < min_open_interest_usd:
+            thin.append({"asset": coin, "open_interest_usd": oi})
+        else:
+            kept[coin] = spec
+    thin.sort(key=lambda m: (-m["open_interest_usd"], m["asset"]))
+    return kept, thin
 
 
 def funding_cost(action: str, rate: float | None, hours: float | None) -> float | None:
@@ -516,14 +550,14 @@ def build_horizon(
     now_ms: int,
     held: set[str],
     on_progress: Callable[[str, str], None] | None = None,
-    funding: Mapping[str, float] | None = None,
+    contexts: Mapping[str, AssetContext] | None = None,
 ) -> tuple[dict[str, Any], dict[str, tuple[pd.DataFrame, pd.DataFrame]]]:
     """One timeframe chain over the whole watchlist.
 
     Returns the horizon block (signals + charts, before sizing and ranking) and
     the tide/wave frames of any *held* coin, so trade management can reuse them.
-    `funding` (coin -> hourly rate) adds each signal's estimated funding cost
-    over the horizon's `holding_hours`.
+    `contexts` (coin -> market context) give each signal its live mark, its open
+    interest and its estimated funding cost over the horizon's `holding_hours`.
     """
     params = horizon.params
     signals: list[dict[str, Any]] = []
@@ -537,8 +571,8 @@ def build_horizon(
         if on_progress is not None:
             on_progress(horizon.name, coin)
         # A tradfi perp's closed-market bars never reach an indicator (see
-        # screen_bars). The raw wave frame keeps the still-open bar so we can read
-        # a live price; the strategy itself only ever sees completed bars.
+        # screen_bars). The raw wave frame keeps the still-open bar, a live price
+        # when the mark is unknown; the strategy itself only ever sees completed bars.
         closure = cfg.sessions.get(coin_dex(coin))
         tide, _ = screen_bars(client, coin, horizon.tide, horizon.lookback_tide, now_ms, closure)
         wave, wave_all = screen_bars(
@@ -581,16 +615,21 @@ def build_horizon(
         if closed is not None:
             row["data_warnings"] = row["data_warnings"] + [closed]
             row["data_flags"] = row["data_flags"] + [MARKET_CLOSED]
-        # Live price = the still-open wave bar's close (falls back to the last
-        # completed close when there is no open bar). Lets the operator see how
-        # far price has drifted from the basis the signal was computed on.
-        row["live_price"] = float(wave_all["close"].iloc[-1]) if not wave_all.empty else None
+        # Live price = the mark (what a stop triggers on); without one, the wave
+        # bars' latest close. Lets the operator see how far price has drifted from
+        # the basis the signal was computed on.
+        ctx = (contexts or {}).get(coin) or AssetContext()
+        if ctx.mark_price is not None:
+            row["live_price"] = ctx.mark_price
+        else:
+            row["live_price"] = float(wave_all["close"].iloc[-1]) if not wave_all.empty else None
         row["price_alert"] = live_price_alert(
             sig.action, row["live_price"], sig.entry, sig.stop, sig.target
         )
+        row["open_interest_usd"] = ctx.open_interest_usd
         # Funding: the current hourly rate, and what holding the trade for the
         # horizon's typical time would cost (positive = paid). Context only.
-        rate = funding.get(coin) if funding else None
+        rate = ctx.funding
         cost = funding_cost(sig.action, rate, horizon.holding_hours)
         row["funding_rate"] = rate
         row["funding_hours"] = horizon.holding_hours
@@ -695,8 +734,9 @@ def build_snapshot(
     open position."""
     chosen = chosen_horizons(cfg, horizons)
     now_ms = int(time.time() * 1000)
-    coins = expand_watchlist(cfg.scanner.watchlist, client)
-    funding = fetch_funding_rates(coins, client)
+    watched = expand_watchlist(cfg.scanner.watchlist, client)
+    contexts = fetch_asset_contexts(watched, client)
+    coins, thin = liquid_markets(watched, contexts, cfg.scanner.min_open_interest_usd)
 
     # Open positions (read-only) drive the Elder trade-management section.
     failed_dexes: set[str] = set()
@@ -710,7 +750,7 @@ def build_snapshot(
     position_frames: dict[str, tuple[pd.DataFrame, pd.DataFrame]] = {}
     for horizon in chosen:
         block, held_frames = build_horizon(
-            cfg, client, horizon, coins, now_ms, held, on_progress, funding
+            cfg, client, horizon, coins, now_ms, held, on_progress, contexts
         )
         blocks[horizon.name] = block
         if horizon.name == cfg.scanner.positions_horizon:
@@ -725,7 +765,7 @@ def build_snapshot(
         now_ms,
         (previous or {}).get("stop_memory"),
         cfg.sessions,
-        coins,
+        watched,
     )
     hidden = hidden_positions(previous, positions, failed_dexes)
     guard, risks = _risk_summary(cfg, positions, hidden)
@@ -735,6 +775,8 @@ def build_snapshot(
         "equity": cfg.risk.equity,
         "equity_at_month_start": cfg.risk.equity_at_month_start,
         "risk_pct": cfg.risk.risk_pct,
+        "min_open_interest_usd": cfg.scanner.min_open_interest_usd,
+        "thin_markets": thin,
         "guard": asdict(guard),
         **risks,
         "positions": positions,
@@ -797,8 +839,9 @@ def refresh_horizon(
     """
     horizon = cfg.scanner.horizon(name)
     now_ms = int(time.time() * 1000)
-    coins = expand_watchlist(cfg.scanner.watchlist, client)
-    funding = fetch_funding_rates(coins, client)
+    watched = expand_watchlist(cfg.scanner.watchlist, client)
+    contexts = fetch_asset_contexts(watched, client)
+    coins, thin = liquid_markets(watched, contexts, cfg.scanner.min_open_interest_usd)
 
     snapshot = dict(previous)
     snapshot.setdefault("horizons", {})
@@ -812,7 +855,7 @@ def refresh_horizon(
     held = {p.asset for p in open_positions}
 
     block, held_frames = build_horizon(
-        cfg, client, horizon, coins, now_ms, held, on_progress, funding
+        cfg, client, horizon, coins, now_ms, held, on_progress, contexts
     )
 
     manages_positions = name == cfg.scanner.positions_horizon
@@ -826,7 +869,7 @@ def refresh_horizon(
             now_ms,
             previous.get("stop_memory"),
             cfg.sessions,
-            coins,
+            watched,
         )
         hidden = hidden_positions(previous, positions, failed_dexes)
         guard, risks = _risk_summary(cfg, positions, hidden)
@@ -847,6 +890,8 @@ def refresh_horizon(
     snapshot["equity"] = cfg.risk.equity
     snapshot["equity_at_month_start"] = cfg.risk.equity_at_month_start
     snapshot["risk_pct"] = cfg.risk.risk_pct
+    snapshot["min_open_interest_usd"] = cfg.scanner.min_open_interest_usd
+    snapshot["thin_markets"] = thin
     snapshot["positions_horizon"] = cfg.scanner.positions_horizon
     snapshot["horizon_order"] = [
         h.name for h in cfg.scanner.horizons if h.name in snapshot["horizons"]
