@@ -32,7 +32,12 @@ class MarketDataProvider(Protocol):
     def asset_contexts(self, dex: str = "") -> dict[str, AssetContext]: ...
 
     def refresh(
-        self, coin: str, interval: str, lookback_bars: int, now_ms: int | None = None
+        self,
+        coin: str,
+        interval: str,
+        lookback_bars: int,
+        now_ms: int | None = None,
+        fresh: bool = False,
     ) -> pd.DataFrame: ...
 
     def clearinghouse_state(self, address: str, dex: str = "") -> dict[str, Any]: ...

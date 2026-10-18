@@ -405,6 +405,7 @@ def screen_bars(
     lookback: int,
     now_ms: int,
     closure: WeekendClosure | None = None,
+    fresh: bool = False,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """(completed bars the indicators may see, raw bars incl. the open one) for one
     screen of one coin.
@@ -412,12 +413,13 @@ def screen_bars(
     On a dex with a weekend `closure` (data/sessions.py), bars lying entirely
     inside it are dropped, and a weekly screen is rebuilt from the Monday-Friday
     daily bars instead of Hyperliquid's Thursday-anchored 1w candles. Without
-    one, these are simply the completed bars.
+    one, these are simply the completed bars. `fresh` refetches the open bar even
+    when no bar has completed since the cached one (see HyperliquidClient.refresh).
     """
     if closure is not None and interval == "1w":
-        raw = client.refresh(coin, "1d", lookback * 7)
+        raw = client.refresh(coin, "1d", lookback * 7, fresh=fresh)
         return completed_bars(weekly_from_weekdays(raw), now_ms), raw
-    raw = client.refresh(coin, interval, lookback)
+    raw = client.refresh(coin, interval, lookback, fresh=fresh)
     return drop_closed_bars(completed_bars(raw, now_ms), closure), raw
 
 
@@ -571,15 +573,21 @@ def build_horizon(
         if on_progress is not None:
             on_progress(horizon.name, coin)
         # A tradfi perp's closed-market bars never reach an indicator (see
-        # screen_bars). The raw wave frame keeps the still-open bar, a live price
-        # when the mark is unknown; the strategy itself only ever sees completed bars.
+        # screen_bars). Without a mark, the entry screen's still-open bar is the live
+        # price, so it is refetched even when no entry bar has closed since the
+        # cached one; the strategy itself only ever sees completed bars.
         closure = cfg.sessions.get(coin_dex(coin))
+        ctx = (contexts or {}).get(coin) or AssetContext()
         tide, _ = screen_bars(client, coin, horizon.tide, horizon.lookback_tide, now_ms, closure)
-        wave, wave_all = screen_bars(
-            client, coin, horizon.wave, horizon.lookback_wave, now_ms, closure
-        )
-        entry_frame, _ = screen_bars(
-            client, coin, horizon.entry, horizon.lookback_entry, now_ms, closure
+        wave, _ = screen_bars(client, coin, horizon.wave, horizon.lookback_wave, now_ms, closure)
+        entry_frame, entry_all = screen_bars(
+            client,
+            coin,
+            horizon.entry,
+            horizon.lookback_entry,
+            now_ms,
+            closure,
+            fresh=ctx.mark_price is None,
         )
 
         # A market without two completed bars per screen can't be evaluated
@@ -615,14 +623,15 @@ def build_horizon(
         if closed is not None:
             row["data_warnings"] = row["data_warnings"] + [closed]
             row["data_flags"] = row["data_flags"] + [MARKET_CLOSED]
-        # Live price = the mark (what a stop triggers on); without one, the wave
-        # bars' latest close. Lets the operator see how far price has drifted from
-        # the basis the signal was computed on.
-        ctx = (contexts or {}).get(coin) or AssetContext()
+        # Live price = the mark (what a stop triggers on); without one, the latest
+        # close of the freshly fetched entry bars. Lets the operator see how far
+        # price has drifted from the basis the signal was computed on.
         if ctx.mark_price is not None:
             row["live_price"] = ctx.mark_price
+        elif not entry_all.empty:
+            row["live_price"] = float(entry_all["close"].iloc[-1])
         else:
-            row["live_price"] = float(wave_all["close"].iloc[-1]) if not wave_all.empty else None
+            row["live_price"] = float(wave["close"].iloc[-1])
         row["price_alert"] = live_price_alert(
             sig.action, row["live_price"], sig.entry, sig.stop, sig.target
         )

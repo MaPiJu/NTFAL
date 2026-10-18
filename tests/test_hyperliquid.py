@@ -267,6 +267,10 @@ def test_refresh_skips_the_request_while_the_cached_bar_is_still_open(tmp_path, 
     assert len(log) == 2
     assert log[-1]["req"]["startTime"] == opened
 
+    # `fresh` refetches a still-open bar anyway: a live price.
+    client.refresh("BTC", "1d", lookback_bars=400, now_ms=candles[-1]["T"] - 1, fresh=True)
+    assert len(log) == 3
+
 
 def test_refresh_respects_5000_candle_limit(tmp_path, btc_fixtures):
     log: list[dict] = []

@@ -49,11 +49,18 @@ from run import _REFRESH_LOCK, snapshot_path, write_snapshot
 
 
 def bot_config(cfg: Config) -> Config:
-    """Testnet data and state live apart from mainnet's: their prices differ."""
+    """Testnet data and state live apart from mainnet's: their prices differ. Its
+    open interest is play money too, far under any mainnet floor: there the floor
+    is off, or the testnet run would scan nothing."""
     if cfg.execution.mode != "testnet":
         return cfg
     cache = cfg.cache_dir / "testnet"
-    return replace(cfg, cache_dir=cache, journal=replace(cfg.journal, path=cache / "journal.jsonl"))
+    return replace(
+        cfg,
+        cache_dir=cache,
+        journal=replace(cfg.journal, path=cache / "journal.jsonl"),
+        scanner=replace(cfg.scanner, min_open_interest_usd=0.0),
+    )
 
 
 def make_client(cfg: Config) -> HyperliquidClient:
@@ -272,11 +279,22 @@ def main(argv: list[str] | None = None) -> int:
         import uvicorn
 
         os.environ.setdefault("SNAPSHOT_PATH", str(snapshot_path(cfg)))
-        with contextlib.suppress(KeyboardInterrupt, SystemExit):
+        # SIGTERM ends here with code 0; a dashboard that cannot start (port taken,
+        # import error) makes uvicorn exit non-zero, which must reach systemd so it
+        # restarts the whole bot.
+        code: int | str | None = 0
+        try:
             uvicorn.run("app.main:app", host=args.host, port=args.port)
+        except KeyboardInterrupt:
+            pass
+        except SystemExit as exc:
+            code = exc.code
         scheduler.shutdown(wait=False)
-        bot.say(f"🛑 NTFAL bot stopped — mode {bot.mode.upper()}; exchange stops stay in place")
-        return 0
+        why = "" if code in (0, None) else f" (the dashboard failed to run: exit {code})"
+        bot.say(
+            f"🛑 NTFAL bot stopped — mode {bot.mode.upper()}{why}; exchange stops stay in place"
+        )
+        return 0 if code is None else code if isinstance(code, int) else 1
 
     from apscheduler.schedulers.blocking import BlockingScheduler
 

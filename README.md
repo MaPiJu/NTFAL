@@ -19,10 +19,10 @@ signals table and interactive charts per horizon so the operator can make a
 Elder's "factor of ~5" is applied to a **role**, not a fixed interval, so one
 implementation serves every horizon:
 
-| Horizon | Tide (1st screen) | Wave (2nd screen) | Entry (3rd screen) | Refreshed |
+| Horizon | Tide (1st screen) | Wave (2nd screen) | Entry (3rd screen) | Refreshed (after each entry-bar close) |
 |---------|-------------------|-------------------|--------------------|-----------|
-| **swing** — days → weeks | `1w` | `1d` | `4h` | once a day |
-| **scalp** — hours | `4h` | `1h` | `15m` | hourly |
+| **swing** — days → weeks | `1w` | `1d` | `4h` | every 4h |
+| **scalp** — hours | `4h` | `1h` | `15m` | every 15 min |
 | **micro** — minutes | `1h` | `15m` | `5m` | every 5 min |
 
 Each horizon runs the same Elder logic and gets its own tab, table, charts and
@@ -204,8 +204,11 @@ any order manually; `bot.py` acts on it for the positions *it* opened (below).
 Two PnL columns are shown for each position: **Elder** (computed from the last *completed*
 wave close — the same basis as the verdict) and **live** (the exchange mark price /
 `unrealizedPnl`, which matches what Hyperliquid shows in real time). The verdict and the
-"in profit" gate always use the Elder/close value, so they don't flicker with intraday
-noise; the live column is there to reconcile with your exchange screen. A **funding paid**
+"in profit" gate use the Elder/close value, so they don't flicker with intraday noise —
+except that "in profit" also needs the mark to agree when it is known: a position filled
+after the last wave close (the bot's swing entries fill intraday) is not in profit on a
+price from before it existed, and a break-even stop above a long's mark would sit through
+the market. The live column is there to reconcile with your exchange screen. A **funding paid**
 column (Hyperliquid's `cumFunding.sinceOpen`, from the same read-only `clearinghouseState`
 call; negative = received) shows the holding cost neither PnL includes — in the dashboard,
 the CLI positions table and the journal.

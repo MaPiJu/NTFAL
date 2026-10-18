@@ -56,7 +56,8 @@ that trades **one** horizon's Triple Screen automatically, through a Hyperliquid
   one — Elder's open-interest *signals* (rising/falling OI, p.120–121) are not in the
   Strategy Spec and stay out. The markets left out are
   listed (`thin_markets`); a market whose open interest is unknown (lookup failed) is
-  kept; a held position is managed whatever its market's open interest.
+  kept; a held position is managed whatever its market's open interest. On testnet
+  (`bot.py`, mode `testnet`) the floor is off: its open interest is play money.
 - Keep secrets out of the repo. Config (equity, watchlist, risk %, horizons) lives in
   `.env` / `config.toml`, never hard-coded.
 
@@ -167,7 +168,11 @@ managed on the same chain that would have entered it. Per held position, produce
 - **TAKE_PROFITS** if price reaches the profit target (tide value zone EMA13–EMA26, or
   the tide channel when price already trades beyond value), **or** when *neither* screen
   still shows the favorable Impulse color (both blue) **and** the trade is in profit —
-  Elder's "permission to take profits" once the green/red is gone.
+  Elder's "permission to take profits" once the green/red is gone. "In profit" is read off
+  the wave close **and**, when the exchange mark is known, the mark must agree: a position
+  filled after that close (the bot's swing entries fill intraday) is not in profit on a
+  price from before it existed — read off the close alone, it took "profits" at a loss and
+  set break-even stops through the market (walk-forward replay, 2026-10-17).
 - **HOLD** otherwise; always surface a **SafeZone trailing-stop** suggestion (behind the
   recent wave extreme by the average adverse bar noise × a factor — **2 for longs, 3 for
   shorts** per Elder, since shorting near highs is noisier — ratcheted to ≥ break-even in profit).
@@ -346,8 +351,8 @@ pipeline to every screen and to held positions).
 - `app/pipeline.py` — `build_snapshot` (every horizon, or the few named) and
   `refresh_horizon` (one horizon, merged into the stored snapshot — what makes
   per-horizon cadences cheap); `liquid_markets` applies the open-interest floor; a
-  signal's `live_price` is the mark (the candles' latest close when the mark is
-  unknown). Open positions are always judged on `positions_horizon`:
+  signal's `live_price` is the mark (when the mark is unknown, the latest close of
+  the entry bars, refetched for it). Open positions are always judged on `positions_horizon`:
   when a snapshot does not hold it, the held coins' bars are fetched on their own. Past
   `CHART_EVERY_ASSET_UP_TO` (30) assets, only setups and held coins keep their charts.
 - `app/` — **FastAPI** server rendering a dashboard: horizon tabs, a signals table per

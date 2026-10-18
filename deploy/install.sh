@@ -73,6 +73,13 @@ if [[ $UPDATE -eq 1 ]]; then
   # As root, with root's git credentials (deploy key or token) for a private repo.
   # --autostash keeps your edits to tracked files (config.toml) across the pull.
   git -c safe.directory="$APP_DIR" -C "$APP_DIR" pull --ff-only --autostash
+  # When your edits clash with the update, git still exits 0 but leaves conflict
+  # markers (and keeps your edits in its stash): stop before anything restarts.
+  CONFLICTS="$(git -c safe.directory="$APP_DIR" -C "$APP_DIR" diff --name-only --diff-filter=U)"
+  [[ -z "$CONFLICTS" ]] || die "your local edits clash with the update in: $CONFLICTS
+  Edit the file(s) to keep the right lines (between <<<<<<< and >>>>>>>), then run:
+    git -C $APP_DIR add $CONFLICTS && git -C $APP_DIR stash drop
+  and re-run this script. The service was not touched."
 fi
 
 say "Service user '$SERVICE_USER'"
@@ -85,7 +92,26 @@ else
 fi
 
 say "Python environment ($APP_DIR/.venv)"
-[[ -x "$VENV_PY" ]] || python3 -m venv "$APP_DIR/.venv"
+# The .venv is rebuilt from pyproject.toml whenever it cannot serve: missing, run
+# by an interpreter the service user cannot reach (a uv-managed Python under
+# /root), or without pip (uv creates venvs without it).
+RECREATE=""
+if [[ ! -x "$VENV_PY" ]]; then
+  RECREATE="none yet"
+else
+  case "$(readlink -f "$VENV_PY")" in
+    /root/* | /home/*) RECREATE="its Python lives in a home directory the service cannot read" ;;
+  esac
+  if [[ -z "$RECREATE" ]] && ! "$VENV_PY" -m pip --version >/dev/null 2>&1 &&
+    ! "$VENV_PY" -m ensurepip --upgrade >/dev/null 2>&1; then
+    RECREATE="it has no pip"
+  fi
+fi
+if [[ -n "$RECREATE" ]]; then
+  echo "creating .venv with $(python3 --version) ($RECREATE)"
+  rm -rf "$APP_DIR/.venv"
+  python3 -m venv "$APP_DIR/.venv"
+fi
 "$VENV_PY" -m pip install --quiet --upgrade pip
 # The project is not a package: its dependencies are read from pyproject.toml —
 # the scanner's, the "bot" extra's (order signing, testnet/mainnet only) and,
@@ -114,24 +140,33 @@ chown "$SERVICE_USER:$SERVICE_USER" "$APP_DIR/.env"
 chmod 600 "$APP_DIR/.env"
 install -d -o "$SERVICE_USER" -g "$SERVICE_USER" -m 750 "$APP_DIR/cache"
 chown -R "$SERVICE_USER:$SERVICE_USER" "$APP_DIR/cache"
-# Everything else: root's, readable by the service, writable by nobody else.
-find "$APP_DIR" \( -path "$APP_DIR/.env" -o -path "$APP_DIR/cache" \) -prune \
+# Everything else: root's, readable by the service, writable by nobody else —
+# except .env and any copy of it an editor left behind (.env.save, .env~), whose
+# modes stay as they are.
+find "$APP_DIR" \( -path "$APP_DIR/.env*" -o -path "$APP_DIR/cache" \) -prune \
   -o -exec chown root:root {} + -exec chmod go+rX,go-w {} +
 echo "code: root (read-only to the service) · cache/ and .env: $SERVICE_USER · .env: 600"
 
 say "Checking the install (config.toml, .env, imports) as '$SERVICE_USER'"
 # What bot.py needs at startup, so a gap fails here instead of in a restart loop.
-# It names a missing secret, never prints one.
-MODE="$(cd "$APP_DIR" && runuser -u "$SERVICE_USER" -- "$VENV_PY" -c '
-import os, sys
+# It runs with the service's environment only (.env, no root variables), and it
+# names a missing or malformed secret, never prints one.
+MODE="$(cd "$APP_DIR" && runuser -u "$SERVICE_USER" -- env -i PATH=/usr/bin:/bin \
+  HOME="$APP_DIR" PYTHONDONTWRITEBYTECODE=1 "$VENV_PY" -c '
+import os, re, sys
 import app.main, bot
 from config import load_config
 cfg = load_config()
 e, t = cfg.execution, cfg.telegram
 missing = []
 if e.enabled and e.mode != "dry_run":
-    missing += [] if os.environ.get("HL_API_PRIVATE_KEY", "").strip() else ["HL_API_PRIVATE_KEY"]
-    missing += [] if cfg.positions.address else ["HL_ADDRESS"]
+    key = os.environ.get("HL_API_PRIVATE_KEY", "").strip()
+    if not key:
+        missing.append("HL_API_PRIVATE_KEY")
+    elif not re.fullmatch(r"(0x)?[0-9a-fA-F]{64}", key):
+        missing.append("HL_API_PRIVATE_KEY (not a 64-hex-digit private key)")
+    if not cfg.positions.address:
+        missing.append("HL_ADDRESS")
 if t.enabled:
     missing += [k for k in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID") if not os.environ.get(k, "").strip()]
 if missing:
@@ -157,10 +192,15 @@ fi
 if [[ $HARDEN -eq 1 ]]; then
   say "Hardening: ufw (SSH only), fail2ban, unattended-upgrades"
   apt-get install -y -qq ufw fail2ban unattended-upgrades >/dev/null
-  ufw allow OpenSSH >/dev/null
+  # Open every port sshd listens on (not only 22) before the firewall goes up.
+  SSH_PORTS="$(sshd -T 2>/dev/null | awk '$1 == "port" {print $2}' | sort -u | xargs)"
+  SSH_PORTS="${SSH_PORTS:-22}"
+  for port in $SSH_PORTS; do
+    ufw allow "$port/tcp" >/dev/null
+  done
   ufw --force enable >/dev/null
   systemctl enable --now fail2ban >/dev/null 2>&1
-  echo "firewall on: only SSH is reachable (the dashboard stays on 127.0.0.1)"
+  echo "firewall on: only SSH (port $SSH_PORTS) is reachable; the dashboard stays on 127.0.0.1"
 fi
 
 HOST_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"

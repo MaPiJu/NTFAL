@@ -91,9 +91,15 @@ Le dépôt est cloné dans `/opt/ntfal` (déjà fait). En root, depuis le serveu
 
 ```sh
 cd /opt/ntfal
-git pull                          # récupérer la dernière version
+git pull                          # la première fois seulement : récupère install.sh
 sudo ./deploy/install.sh --dev    # --dev : ajoute pytest, pour lancer les tests
 ```
+
+Ce `git pull` ne passe que si tu n'as encore rien modifié dans les fichiers suivis
+(`config.toml`). Ensuite, mets toujours à jour avec `sudo ./deploy/install.sh --update` :
+il met tes modifications de côté pendant la mise à jour, puis les réapplique. Si elles
+entrent en conflit avec la nouvelle version, il s'arrête sans toucher au service et te
+dit quoi faire.
 
 Le script est idempotent (on peut le relancer sans risque). Il :
 
@@ -177,8 +183,9 @@ stops : le journal montre ce que le bot ferait (« entry placed », « no setup 
 2. **Testnet (facultatif mais recommandé)** : `mode = "testnet"`, avec une API wallet créée
    sur app.hyperliquid-testnet.xyz. Données et ordres viennent du testnet, dans un cache
    séparé (`cache/testnet/`). Les marchés xyz n'y existent peut-être pas : mets
-   temporairement `watchlist = ["BTC", "ETH"]`. On vérifie ici la **mécanique** : ordres
-   acceptés, stop posé après exécution, stop suiveur, annulation au week-end.
+   temporairement `watchlist = ["BTC", "ETH"]`. Le plancher d'open interest est désactivé
+   en testnet, où l'open interest est de l'argent fictif. On vérifie ici la **mécanique** :
+   ordres acceptés, stop posé après exécution, stop suiveur, annulation au week-end.
 3. **Mainnet** : `mode = "mainnet"`, de préférence avec un compte peu approvisionné au
    début. Au démarrage, la console affiche un bandeau `MAINNET` et Telegram reçoit
    « bot started — mode MAINNET ».
@@ -192,7 +199,7 @@ un plantage (30 s plus tard).
 |--------|----------|
 | Suivre le journal | `journalctl -u ntfal-bot -f` |
 | Appliquer une modification de `config.toml` ou `.env` | `sudo /opt/ntfal/deploy/install.sh` (revérifie tout, puis redémarre) |
-| Mettre à jour le code | `sudo /opt/ntfal/deploy/install.sh --update` (`git pull` puis réinstallation ; tes modifications de `config.toml` sont conservées) |
+| Mettre à jour le code | `sudo /opt/ntfal/deploy/install.sh --update` (`git pull` puis réinstallation ; tes modifications de `config.toml` sont conservées, ou le script s'arrête en cas de conflit) |
 | Pause (plus d'entrée, sorties et stops actifs) | `sudo -u ntfal touch /opt/ntfal/cache/HALT` |
 | Reprendre | `rm /opt/ntfal/cache/HALT` |
 | Arrêter le bot | `systemctl stop ntfal-bot` (les stops restent sur l'exchange) |

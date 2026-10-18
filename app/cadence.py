@@ -22,7 +22,10 @@ def first_run(
     interval_s: int, now: float | None = None, delay_s: int = BAR_CLOSE_DELAY_SECONDS
 ) -> datetime:
     """The first moment after `now` that lies `delay_s` past a bar close: a job
-    started at it with an `interval_s` period always runs just after a close."""
+    started at it with an `interval_s` period always runs just after a close. The
+    delay never exceeds half a bar, so a 1m bar is read 30 s after its close, not
+    at the very moment the next one closes."""
     now = time.time() if now is None else now
+    delay_s = min(delay_s, interval_s // 2)
     closes = math.floor((now - delay_s) / interval_s) + 1
     return datetime.fromtimestamp(closes * interval_s + delay_s, tz=UTC)

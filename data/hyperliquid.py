@@ -360,6 +360,7 @@ class HyperliquidClient:
         interval: str,
         lookback_bars: int,
         now_ms: int | None = None,
+        fresh: bool = False,
     ) -> pd.DataFrame:
         """Incremental refresh: fetch only bars at/after the last cached open.
 
@@ -367,7 +368,8 @@ class HyperliquidClient:
         cached — unless it is still open now: then no bar has completed since the
         last fetch, and the cache is returned without a request (a weekly tide is
         fetched once a week, not on every 4h refresh). Its still-open bar is then
-        as of that fetch. Result is merged, deduped, persisted to parquet.
+        as of that fetch; `fresh` refetches it anyway, for a live price. Result is
+        merged, deduped, persisted to parquet.
         """
         if interval not in INTERVAL_MS:
             raise HyperliquidError(f"unsupported interval: {interval}")
@@ -378,7 +380,7 @@ class HyperliquidClient:
         cached = self.load_cached(coin, interval)
         if cached is None or cached.empty:
             start_ms = now_ms - lookback_bars * bar_ms
-        elif int(cached["T"].iloc[-1]) > now_ms:
+        elif not fresh and int(cached["T"].iloc[-1]) > now_ms:
             return cached
         else:
             start_ms = int(cached["t"].iloc[-1])

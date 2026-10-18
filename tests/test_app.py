@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import asdict, replace
 from datetime import UTC, datetime
 
@@ -515,17 +516,27 @@ def test_refresh_horizon_updates_the_thin_markets(tmp_path, chain_fixtures):
     assert merged["horizons"]["scalp"]["signals"] == []
 
 
-def test_the_live_price_is_the_mark(tmp_path, btc_fixtures):
-    # The mark is what a stop triggers on; without one, the wave bars' latest close.
+def test_the_live_price_is_the_mark(tmp_path, chain_fixtures):
+    # The mark is what a stop triggers on. Without one, the live price is the
+    # entry bars' latest close — refetched even while the cached entry bar is
+    # still open, where the other screens' still-open bars are not refetched.
+    bar = 4 * 3_600_000
+    opened = int(time.time() * 1000) // bar * bar
+    last = chain_fixtures[("BTC", "4h")][-1]
+    fixtures = dict(chain_fixtures)
+    fixtures[("BTC", "4h")] = chain_fixtures[("BTC", "4h")] + [
+        dict(last, t=opened, T=opened + bar - 1, c="93000.0")
+    ]
     cfg = make_config(tmp_path)
     marked = build_snapshot(
-        cfg, make_client(btc_fixtures, tmp_path, contexts={"BTC": {"markPx": "12345.5"}})
+        cfg, make_client(fixtures, tmp_path, contexts={"BTC": {"markPx": "12345.5"}})
     )
     assert swing(marked)["signals"][0]["live_price"] == 12345.5
 
-    unmarked = build_snapshot(cfg, make_client(btc_fixtures, tmp_path / "fresh"))
-    last_daily = float(btc_fixtures[("BTC", "1d")][-1]["c"])
-    assert swing(unmarked)["signals"][0]["live_price"] == last_daily
+    # The open 4h bar moved since it was cached: without a mark, it is refetched.
+    fixtures[("BTC", "4h")][-1] = dict(fixtures[("BTC", "4h")][-1], c="93500.0")
+    unmarked = build_snapshot(cfg, make_client(fixtures, tmp_path))
+    assert swing(unmarked)["signals"][0]["live_price"] == 93500.0
 
 
 def test_explicit_tradfi_coin_in_watchlist(tmp_path, btc_fixtures):

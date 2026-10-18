@@ -105,6 +105,36 @@ def test_live_and_elder_pnl_are_both_reported():
     assert tm.in_profit  # by the Elder PnL
 
 
+def test_a_close_from_before_the_fill_does_not_put_the_trade_in_profit():
+    # The bot's swing entries fill intraday: the last daily close (148.4) can predate
+    # the fill (148.2) and sit on the profitable side of it while the mark (148.0)
+    # is underwater. On that stale close the trade would take "profits" at a loss
+    # and lift its stop to break-even, 148.2 — above the mark, through the market.
+    closes = [100.0 + i for i in range(50)] + [149.0, 148.5, 148.6, 148.4]  # green lost
+    daily = make_ohlcv(closes)
+    stale = assess_position(
+        OpenPosition("X", "long", 148.2, 1.0, mark_price=148.0), WEEKLY_UP, daily
+    )
+    assert stale.pnl_elder > 0 and not stale.in_profit
+    assert stale.verdict == "hold"
+    assert stale.suggested_stop == pytest.approx(147.3)  # the SafeZone, not break-even
+
+    agreed = assess_position(
+        OpenPosition("X", "long", 148.2, 1.0, mark_price=148.3), WEEKLY_UP, daily
+    )
+    assert agreed.in_profit and agreed.verdict == "take_profits"
+    assert agreed.suggested_stop == pytest.approx(148.2)
+    # Without a mark (a manual position), the close alone decides, as before.
+    assert assess_position(OpenPosition("X", "long", 148.2, 1.0), WEEKLY_UP, daily).in_profit
+
+    # Mirror for a short: the close (151.6) is under the entry, the mark is not.
+    falling = make_ohlcv([300.0 - c for c in closes])
+    short = OpenPosition("X", "short", 151.8, 1.0, mark_price=152.0)
+    assert not assess_position(short, WEEKLY_DOWN, falling).in_profit
+    short_ahead = OpenPosition("X", "short", 151.8, 1.0, mark_price=151.7)
+    assert assess_position(short_ahead, WEEKLY_DOWN, falling).in_profit
+
+
 def test_long_in_uptrend_with_green_impulse_holds():
     # accelerating climb -> EMA13 and MACD-hist both rising -> green; trend up.
     daily = make_ohlcv(_accel(100.0, 60, 0.1))  # ends ~277, still below weekly value

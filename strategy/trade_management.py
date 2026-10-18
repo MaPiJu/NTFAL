@@ -21,6 +21,12 @@ out?" — using only Elder's own exit tools, no new indicators:
   break-even once the trade is in profit. Never widen risk: given the last
   suggestion for the same position, a new one only moves in the trade's direction.
 
+"In profit" is read off the last completed wave close — and, when the exchange
+mark is known, the mark must agree: a position filled *after* that close (the
+bot's swing entries fill intraday, the daily close can be a day old) is not in
+profit on a price from before it existed, and a break-even stop above a long's
+mark would sit through the market.
+
 The stop and the target sit on Hyperliquid's price grid, which refuses any other
 price: the stop rounded away from the price, the target toward the entry.
 
@@ -232,8 +238,10 @@ def assess_position(
     )
     return_pct_elder = (close_price / pos.entry - 1.0) * direction if pos.entry else 0.0
     return_pct_live = (live_price / pos.entry - 1.0) * direction if pos.entry else 0.0
-    # Verdict is on completed bars, so "in profit" uses the Elder (close) PnL.
-    in_profit = pnl_elder > 0
+    # Verdict is on completed bars, so "in profit" uses the Elder (close) PnL — with
+    # the mark agreeing when it is known (the close may predate the fill).
+    marked = pos.mark_price is not None and pos.mark_price > 0
+    in_profit = pnl_elder > 0 and (not marked or (live_price - pos.entry) * direction > 0)
 
     target = _profit_target(pos, tide, params)
     if target is not None:

@@ -25,6 +25,22 @@ def test_first_run_lands_just_after_a_bar_close():
     assert first_run(4 * HOUR, now=t0 + delay).timestamp() == t0 + 4 * HOUR + delay
     assert first_run(4 * HOUR, now=t0 - 1).timestamp() == t0 + delay
     assert first_run(900, now=t0 + 901).timestamp() == t0 + 900 + delay
+    # Never more than half a bar late: a 1m bar is read 30 s after its close, not
+    # as the next one closes.
+    assert first_run(60, now=t0 + 1).timestamp() == t0 + 30
+
+
+def test_testnet_drops_the_open_interest_floor(tmp_path):
+    # Testnet open interest is play money, far under the mainnet floor: with the
+    # floor on, a testnet run would scan nothing at all.
+    cfg = replace(
+        make_config(tmp_path, min_open_interest_usd=1e7),
+        execution=ExecutionConfig(horizon="swing", mode="testnet"),
+    )
+    assert bot.bot_config(cfg).scanner.min_open_interest_usd == 0
+    assert bot.bot_config(cfg).cache_dir == tmp_path / "testnet"
+    mainnet = replace(cfg, execution=ExecutionConfig(horizon="swing", mode="mainnet"))
+    assert bot.bot_config(mainnet).scanner.min_open_interest_usd == 1e7
 
 
 class Scheduler:
@@ -106,3 +122,18 @@ def test_startup_fills_the_snapshot_without_waiting_for_a_bar(
     assert bot.main(argv) == 0
     assert refreshed == first
     assert started == ([] if "--once" in argv else [True])
+
+    if "--serve" in argv:
+        # SIGTERM ends uvicorn with SystemExit(0): a clean stop. A dashboard that
+        # cannot start (port taken) exits 1, which must reach systemd so it
+        # restarts the bot.
+        def sigterm(*args, **kwargs):
+            raise SystemExit(0)
+
+        def port_taken(*args, **kwargs):
+            raise SystemExit(1)
+
+        monkeypatch.setattr(uvicorn, "run", sigterm)
+        assert bot.main(argv) == 0
+        monkeypatch.setattr(uvicorn, "run", port_taken)
+        assert bot.main(argv) == 1

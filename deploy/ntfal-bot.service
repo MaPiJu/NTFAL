@@ -5,8 +5,10 @@
 # daily Telegram report and — only when config.toml sets [execution] enabled =
 # true — the trade cycle and the stop checks.
 #
-# deploy/install.sh installs it (as root, from the clone, e.g. /opt/ntfal, owned
-# by a dedicated "ntfal" user). By hand:
+# deploy/install.sh installs it (as root, from the clone, e.g. /opt/ntfal): the
+# code stays root's, read-only to the service; the "ntfal" user owns only cache/
+# and .env. By hand (cache/ must exist and belong to ntfal, or the unit fails):
+#   install -d -o ntfal -g ntfal -m 750 /opt/ntfal/cache
 #   cp deploy/ntfal-bot.service /etc/systemd/system/
 #   systemctl daemon-reload && systemctl enable --now ntfal-bot
 #   journalctl -u ntfal-bot -f          # follow the log
