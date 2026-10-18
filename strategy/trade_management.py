@@ -292,11 +292,18 @@ def assess_position(
 
     # --- TAKE PROFITS: target hit, or Impulse permission while in profit ----
     if verdict != "exit":
-        if target_reached:
+        # Both need the trade in profit — by the close and the mark: a close from
+        # before the fill can sit at the target while the mark is under the entry.
+        if target_reached and in_profit:
             verdict = "take_profits"
             reasons.append(
                 f"wave close {close_price:.6g} reached the tide value/channel "
                 f"target {target:.6g} — take profits"
+            )
+        elif target_reached:
+            reasons.append(
+                f"wave close {close_price:.6g} reached the target {target:.6g}, but the mark "
+                f"{live_price:.6g} is back past the entry {pos.entry:.6g} — no profit to take"
             )
         # Permission to take profits once NEITHER screen still shows favorable
         # momentum (the green/red is gone on both the tide and the wave) and the
@@ -309,7 +316,7 @@ def assess_position(
                 f"{favorable_imp} — momentum stalling; permission to take profits"
             )
 
-    if not reasons:
+    if verdict == "hold":
         reasons.append(
             "tide and Impulse still favor the trade — hold; trail the stop to "
             f"{suggested_stop:.6g}"

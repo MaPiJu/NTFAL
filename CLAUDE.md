@@ -168,8 +168,9 @@ managed on the same chain that would have entered it. Per held position, produce
 - **TAKE_PROFITS** if price reaches the profit target (tide value zone EMA13–EMA26, or
   the tide channel when price already trades beyond value), **or** when *neither* screen
   still shows the favorable Impulse color (both blue) **and** the trade is in profit —
-  Elder's "permission to take profits" once the green/red is gone. "In profit" is read off
-  the wave close **and**, when the exchange mark is known, the mark must agree: a position
+  Elder's "permission to take profits" once the green/red is gone. Both need the trade **in
+  profit**, read off the wave close **and**, when the exchange mark is known, the mark must
+  agree (it also gates the break-even ratchet below): a position
   filled after that close (the bot's swing entries fill intraday) is not in profit on a
   price from before it existed — read off the close alone, it took "profits" at a loss and
   set break-even stops through the market (walk-forward replay, 2026-10-17).

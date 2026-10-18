@@ -127,6 +127,16 @@ def test_a_close_from_before_the_fill_does_not_put_the_trade_in_profit():
     # Without a mark (a manual position), the close alone decides, as before.
     assert assess_position(OpenPosition("X", "long", 148.2, 1.0), WEEKLY_UP, daily).in_profit
 
+    # The same holds for the profit target: a close at the target, from before the
+    # fill, while the mark is under the entry, is no profit to take.
+    weekly = make_ohlcv(_accel(30.0, 40, 0.04), freq="W")  # value zone in the 40s
+    rally = make_ohlcv(_accel(100.0, 60, 0.1))  # ends ~277, far past the target
+    reached = assess_position(OpenPosition("X", "long", 35.0, 1.0), weekly, rally)
+    assert reached.target_reached and reached.verdict == "take_profits"
+    stale_tm = assess_position(OpenPosition("X", "long", 35.0, 1.0, mark_price=34.0), weekly, rally)
+    assert stale_tm.target_reached and stale_tm.verdict == "hold"
+    assert any("no profit to take" in r for r in stale_tm.reasons)
+
     # Mirror for a short: the close (151.6) is under the entry, the mark is not.
     falling = make_ohlcv([300.0 - c for c in closes])
     short = OpenPosition("X", "short", 151.8, 1.0, mark_price=152.0)
